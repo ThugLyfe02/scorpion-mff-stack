@@ -249,7 +249,10 @@ def parse_message_with_evidence(
         )
     historical_context = _HISTORICAL_CONTEXT_RE.search(normalized)
     historical_action = entry_match is not None or _ACTION_CUE_RE.search(normalized) is not None
-    if historical_context is not None and historical_action:
+    historical_families = tuple(
+        kind for kind in _action_hits(normalized) if kind is not EventKind.AMBIGUOUS
+    )
+    if historical_context is not None and historical_action and len(historical_families) <= 1:
         return finish(
             _base(raw, EventKind.AMBIGUOUS, "historical_action_context"),
             "action.historical_context",
