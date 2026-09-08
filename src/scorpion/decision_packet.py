@@ -7,17 +7,24 @@ from enum import StrEnum
 
 from .accuracy import AssociationEvidence, DecisionEvidence
 from .domain import EventKind, SignalEvent
+from .eligibility import (
+    EligibilityDecision,
+    EligibilityDisposition,
+    StrategyBucket,
+    classify_eligibility,
+)
 from .resilience import OperationalMode, ResilienceAssessment
 from .sequence_guard import SequenceAssessment
 from .source_intelligence import SourceBehaviorShift
 
-PACKET_VERSION = "v1"
+PACKET_VERSION = "v2"
 
 
 class DecisionDisposition(StrEnum):
     OBSERVE = "OBSERVE"
     READY_FOR_OPERATOR_REVIEW = "READY_FOR_OPERATOR_REVIEW"
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
+    BLOCKED_STRATEGY = "BLOCKED_STRATEGY"
     BLOCKED_SYSTEM = "BLOCKED_SYSTEM"
 
 
@@ -48,6 +55,8 @@ class OperatorDecisionPacket:
     source_shift_score: float
     reason_codes: tuple[str, ...]
     created_ts_utc: datetime
+    strategy_bucket: StrategyBucket = StrategyBucket.UNKNOWN
+    eligibility_reason: str = ""
 
 
 def _packet_id(event_id: str, disposition: DecisionDisposition, reasons: tuple[str, ...]) -> str:
@@ -67,16 +76,24 @@ def build_decision_packet(
     sequence: SequenceAssessment,
     *,
     source_shift: SourceBehaviorShift | None = None,
+    eligibility: EligibilityDecision | None = None,
     policy: SelectiveReviewPolicy | None = None,
     created_ts_utc: datetime | None = None,
 ) -> OperatorDecisionPacket:
     policy = policy or SelectiveReviewPolicy()
+    eligibility = eligibility or classify_eligibility(event)
     source_shift_score = source_shift.score if source_shift is not None else 0.0
     reasons: list[str] = []
 
     if resilience.mode is OperationalMode.HALTED:
         disposition = DecisionDisposition.BLOCKED_SYSTEM
         reasons.append("system_halted")
+    elif (
+        eligibility.disposition is EligibilityDisposition.RESEARCH_ONLY
+        and event.kind in {EventKind.ENTRY, EventKind.ADD, EventKind.TRIM, EventKind.EXIT}
+    ):
+        disposition = DecisionDisposition.BLOCKED_STRATEGY
+        reasons.append(eligibility.reason)
     elif event.kind is EventKind.IGNORE:
         disposition = DecisionDisposition.OBSERVE
         reasons.append("non_actionable_ignore")
@@ -146,4 +163,6 @@ def build_decision_packet(
         source_shift_score=source_shift_score,
         reason_codes=reason_codes,
         created_ts_utc=created,
+        strategy_bucket=eligibility.bucket,
+        eligibility_reason=eligibility.reason,
     )
