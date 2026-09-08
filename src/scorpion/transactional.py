@@ -98,7 +98,7 @@ class SQLiteTransitionCommitter:
                 )
                 inserted = cursor.rowcount == 1
                 effect_count = 0
-                effect_status = _effect_status(decision_packet)
+                effect_status = _effect_status(decision_packet) if effects else ""
                 if inserted:
                     for effect in effects:
                         effect_cursor = db.execute(
