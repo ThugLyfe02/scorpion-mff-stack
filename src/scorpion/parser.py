@@ -16,12 +16,12 @@ from .domain import EventKind, RawDiscordMessage, SignalEvent
 PARSER_VERSION = "v3"
 
 ENTRY_RE = re.compile(
-    r"\b(?P<ticker>[A-Z]{1,6})\b.*?"
+    r"\b(?P<ticker>[A-Z]{1,6})\b\s+\$?"
     r"(?P<strike>\d+(?:\.\d+)?)\s*(?P<cp>C|P|CALL|PUT)\b",
     re.IGNORECASE,
 )
 ENTRY_ALT_RE = re.compile(
-    r"\b(?P<cp>CALL|PUT)\b.*?\b(?P<ticker>[A-Z]{1,6})\b.*?"
+    r"\b(?P<cp>CALL|PUT)\b\s+\b(?P<ticker>[A-Z]{1,6})\b\s+"
     r"\$?(?P<strike>\d+(?:\.\d+)?)\b",
     re.IGNORECASE,
 )
