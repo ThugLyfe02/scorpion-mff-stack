@@ -29,7 +29,7 @@ def test_operator_inbox_prioritizes_blocked_system_packet(tmp_path, raw_factory)
 def test_operator_inbox_marks_old_actionable_packet_stale(tmp_path, raw_factory):
     store = Store(tmp_path / "stale.db")
     pipeline = Pipeline(store, allowed_author_ids=frozenset({"author"}))
-    asyncio.run(pipeline.handle(raw_factory("QQQ 719C TODAY @ 1.01")))
+    asyncio.run(pipeline.handle(raw_factory("AAPL 200C TODAY @ 1.01")))
     inbox = load_operator_inbox(
         store.path,
         now=datetime.now(UTC) + timedelta(seconds=40),
