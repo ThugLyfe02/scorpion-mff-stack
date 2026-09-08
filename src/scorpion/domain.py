@@ -79,9 +79,13 @@ class SignalEvent:
 
     @property
     def contract_key(self) -> str | None:
-        if not all((self.ticker, self.option_side, self.strike is not None, self.expiry)):
+        ticker = self.ticker
+        option_side = self.option_side
+        strike = self.strike
+        expiry = self.expiry
+        if ticker is None or option_side is None or strike is None or expiry is None:
             return None
-        return f"{self.ticker}|{self.option_side}|{self.strike}|{self.expiry.isoformat()}"
+        return f"{ticker}|{option_side}|{strike}|{expiry.isoformat()}"
 
 
 @dataclass(frozen=True, slots=True)
