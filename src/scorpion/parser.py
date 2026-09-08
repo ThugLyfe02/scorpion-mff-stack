@@ -259,6 +259,18 @@ def parse_message_with_evidence(
             0.15,
             matched_terms=(historical_context.group(0),),
         )
+    conditional_context = _CONDITIONAL_RE.search(normalized)
+    conditional_action = entry_match is not None or _ACTION_CUE_RE.search(normalized) is not None
+    conditional_families = tuple(
+        kind for kind in _action_hits(normalized) if kind is not EventKind.AMBIGUOUS
+    )
+    if conditional_context is not None and conditional_action and len(conditional_families) <= 1:
+        return finish(
+            _base(raw, EventKind.AMBIGUOUS, "conditional_action_context"),
+            "action.conditional_context",
+            0.10,
+            matched_terms=(conditional_context.group(0),),
+        )
 
     if entry_match:
         ticker = entry_match["ticker"].upper()
