@@ -13,7 +13,7 @@ from .accuracy import DecisionEvidence
 from .config import ALLOWED_CHANNEL_IDS, EXCLUDED_TICKERS, GUILD_ID, MARKET_TZ
 from .domain import EventKind, RawDiscordMessage, SignalEvent
 
-PARSER_VERSION = "v2"
+PARSER_VERSION = "v3"
 
 ENTRY_RE = re.compile(
     r"\b(?P<ticker>[A-Z]{1,6})\b.*?"
@@ -97,6 +97,20 @@ _STOP_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 _CONDITIONAL_RE = re.compile(
     r"\b(?:if|would|could|might|maybe|looking\s+to|ready\s+to|plan(?:ning)?\s+to)\b",
+    re.IGNORECASE,
+)
+_NEGATED_ACTION_RE = re.compile(
+    r"\b(?:not|never|do\s+not|don't|dont)\s+(?:currently\s+|yet\s+)?"
+    r"(?:buy|enter|entry|add(?:ing)?|close|closing|sell|selling|sold|trim(?:ming)?|exit|out)\b",
+    re.IGNORECASE,
+)
+_HISTORICAL_CONTEXT_RE = re.compile(
+    r"\b(?:earlier|yesterday|previously|prior|old\s+alert|recap|last\s+session|from\s+yesterday)\b",
+    re.IGNORECASE,
+)
+_ACTION_CUE_RE = re.compile(
+    r"\b(?:buy|entry|enter|add(?:ed|ing)?|close|closed|closing|sell|sold|trim(?:med|ming)?|"
+    r"exit|out|stop)\b",
     re.IGNORECASE,
 )
 _GENERIC_CLOSE_RE = re.compile(r"\bclos(?:e|ing)\b", re.IGNORECASE)
@@ -225,6 +239,23 @@ def parse_message_with_evidence(
         )
 
     entry_match = ENTRY_RE.search(normalized) or ENTRY_ALT_RE.search(normalized)
+    negated_action = _NEGATED_ACTION_RE.search(normalized)
+    if negated_action is not None:
+        return finish(
+            _base(raw, EventKind.AMBIGUOUS, "negated_action_language"),
+            "action.negated",
+            0.10,
+            matched_terms=(negated_action.group(0),),
+        )
+    historical_context = _HISTORICAL_CONTEXT_RE.search(normalized)
+    if historical_context is not None and (entry_match is not None or _ACTION_CUE_RE.search(normalized)):
+        return finish(
+            _base(raw, EventKind.AMBIGUOUS, "historical_action_context"),
+            "action.historical_context",
+            0.15,
+            matched_terms=(historical_context.group(0),),
+        )
+
     if entry_match:
         ticker = entry_match["ticker"].upper()
         if ticker in EXCLUDED_TICKERS:
