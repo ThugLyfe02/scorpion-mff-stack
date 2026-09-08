@@ -104,6 +104,7 @@ _NEGATED_ACTION_RE = re.compile(
     r"(?:buy|enter|entry|add(?:ing)?|close|closing|sell|selling|sold|trim(?:ming)?|exit|out)\b",
     re.IGNORECASE,
 )
+_NEGATION_TOKEN_RE = re.compile(r"\b(?:not|never|do\s+not|don't|dont)\b", re.IGNORECASE)
 _HISTORICAL_CONTEXT_RE = re.compile(
     r"\b(?:earlier|yesterday|previously|prior|old\s+alert|recap|last\s+session|from\s+yesterday)\b",
     re.IGNORECASE,
@@ -240,12 +241,18 @@ def parse_message_with_evidence(
 
     entry_match = ENTRY_RE.search(normalized) or ENTRY_ALT_RE.search(normalized)
     negated_action = _NEGATED_ACTION_RE.search(normalized)
-    if negated_action is not None:
+    negated_entry_prefix = (
+        _NEGATION_TOKEN_RE.search(normalized[: entry_match.start()])
+        if entry_match is not None
+        else None
+    )
+    negation_match = negated_action or negated_entry_prefix
+    if negation_match is not None:
         return finish(
             _base(raw, EventKind.AMBIGUOUS, "negated_action_language"),
             "action.negated",
             0.10,
-            matched_terms=(negated_action.group(0),),
+            matched_terms=(negation_match.group(0),),
         )
     historical_context = _HISTORICAL_CONTEXT_RE.search(normalized)
     historical_action = entry_match is not None or _ACTION_CUE_RE.search(normalized) is not None
