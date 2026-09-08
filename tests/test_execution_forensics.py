@@ -1,10 +1,12 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from scorpion.execution_forensics import ForensicStatus, run_execution_forensics
+from scorpion.execution_forensics import (
+    ForensicStatus,
+    run_execution_forensics,
+)
 from scorpion.history_archive import ArchivedDiscordMessage
 from scorpion.quote_tape import HistoricalQuote, HistoricalQuoteTape
-
 
 OPTIONS_KING = "968352649437126676"
 HIGH_CONFIDENCE = "1448448931116748993"
