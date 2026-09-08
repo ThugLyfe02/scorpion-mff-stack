@@ -248,7 +248,8 @@ def parse_message_with_evidence(
             matched_terms=(negated_action.group(0),),
         )
     historical_context = _HISTORICAL_CONTEXT_RE.search(normalized)
-    if historical_context is not None and (entry_match is not None or _ACTION_CUE_RE.search(normalized)):
+    historical_action = entry_match is not None or _ACTION_CUE_RE.search(normalized) is not None
+    if historical_context is not None and historical_action:
         return finish(
             _base(raw, EventKind.AMBIGUOUS, "historical_action_context"),
             "action.historical_context",
