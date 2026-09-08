@@ -8,6 +8,7 @@ from scorpion.decision_packet import (
     DecisionDisposition,
     build_decision_packet,
 )
+from scorpion.domain import BookState
 from scorpion.eligibility import (
     EligibilityDisposition,
     StrategyBucket,
@@ -21,7 +22,6 @@ from scorpion.reducer import reduce_book
 from scorpion.resilience import OperationalMode, ResilienceAssessment
 from scorpion.sequence_guard import SequenceAssessment
 from scorpion.store import Store
-from scorpion.domain import BookState
 
 
 def test_etf_and_lotto_are_research_only_but_core_single_name_is_allowed(raw_factory):
