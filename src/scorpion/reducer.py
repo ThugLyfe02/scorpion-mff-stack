@@ -83,7 +83,7 @@ def reduce_book(
                 Effect(EffectKind.REVIEW, key, event.event_id, 0, "max_open_positions"),
             )
         generation = 1 if existing is None else existing.generation + 1
-        position = PositionState(
+        entry_position = PositionState(
             contract_key=key,
             status=PositionStatus.PENDING_ENTRY,
             generation=generation,
@@ -91,7 +91,7 @@ def reduce_book(
             last_source_ts_utc=event.source_ts_utc.astimezone(UTC),
             last_reason="entry_proposed",
         )
-        state = state.with_position(position)
+        state = state.with_position(entry_position)
         source_day = market_day
         is_first = state.first_entry_proposed_on != source_day
         if is_first:
