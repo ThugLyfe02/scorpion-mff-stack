@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal, ROUND_FLOOR
+from decimal import ROUND_FLOOR, Decimal
 from enum import StrEnum
 
 from .association import associate_followup_with_evidence
-from .config import CHANNELS, MARKET_TZ
-from .domain import BookState, EffectKind, EventKind, RawDiscordMessage
+from .config import CHANNELS
+from .domain import BookState, EffectKind, EventKind, RawDiscordMessage, SignalEvent
 from .eligibility import (
     EligibilityDisposition,
     StrategyBucket,
@@ -177,7 +177,7 @@ def _entry_fill_quote(
 
 
 def _record_leg(
-    event,
+    event: SignalEvent,
     bucket: StrategyBucket,
     status: ForensicStatus,
     *,
