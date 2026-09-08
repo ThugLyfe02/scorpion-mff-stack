@@ -66,12 +66,13 @@ def run_parser_tournament(
     baseline_events = baseline_run.events
 
     for index, candidate in enumerate(candidates):
+        candidate_parser = candidate.parser
         run = (
             baseline_run
             if index == 0
             else run_counterfactual(
                 messages,
-                parser=candidate.parser,
+                parser=candidate_parser,
                 allowed_author_ids=allowed_author_ids,
             )
         )
@@ -85,10 +86,10 @@ def run_parser_tournament(
         grammar_action_leaks = 0
 
         def event_parser(item: RawDiscordMessage) -> SignalEvent:
-            return candidate.parser(item, allowed_author_ids).event
+            return candidate_parser(item, allowed_author_ids).event
 
         for raw in messages:
-            decision = candidate.parser(raw, allowed_author_ids)
+            decision = candidate_parser(raw, allowed_author_ids)
             latencies.append(decision.evidence.latency_us)
             expected = expected_kinds.get(raw.revision_id)
             if expected is not None:
