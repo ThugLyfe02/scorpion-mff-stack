@@ -150,6 +150,29 @@ def _table_exists(db: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
+def _packet_strategy_fields(
+    packet_payload_json: str,
+    ledger_payload: dict[str, object],
+    *,
+    event_id: str,
+    failures: list[str],
+) -> dict[str, Scalar] | None:
+    if "strategy_bucket" not in ledger_payload and "eligibility_reason" not in ledger_payload:
+        return {}
+    try:
+        packet_payload = json.loads(packet_payload_json)
+    except json.JSONDecodeError:
+        failures.append(f"decision_packet_json_invalid:{event_id}")
+        return None
+    if not isinstance(packet_payload, dict):
+        failures.append(f"decision_packet_payload_not_object:{event_id}")
+        return None
+    return {
+        "strategy_bucket": str(packet_payload.get("strategy_bucket", "UNKNOWN")),
+        "eligibility_reason": str(packet_payload.get("eligibility_reason", "")),
+    }
+
+
 def _extended_expected_payload(
     db: sqlite3.Connection,
     *,
@@ -166,7 +189,7 @@ def _extended_expected_payload(
         return None
     packet = db.execute(
         """
-        SELECT packet_id,disposition,system_mode
+        SELECT packet_id,disposition,system_mode,payload_json
         FROM operator_decision_packets WHERE event_id=?
         """,
         (event_id,),
@@ -178,12 +201,21 @@ def _extended_expected_payload(
     effect_status = next(iter(statuses)) if len(statuses) == 1 else ""
     if len(statuses) > 1:
         failures.append(f"mixed_effect_status:{event_id}")
+    strategy_fields = _packet_strategy_fields(
+        str(packet["payload_json"]),
+        payload,
+        event_id=event_id,
+        failures=failures,
+    )
+    if strategy_fields is None:
+        return None
     return {
         **base,
         "effect_status": effect_status,
         "decision_packet_id": str(packet["packet_id"]),
         "decision_disposition": str(packet["disposition"]),
         "operational_mode": str(packet["system_mode"]),
+        **strategy_fields,
     }
 
 
