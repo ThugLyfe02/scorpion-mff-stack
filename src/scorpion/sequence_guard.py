@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
-from typing import Sequence
 
 from .domain import BookState, EventKind, PositionStatus, SignalEvent
 
@@ -64,7 +64,11 @@ def assess_sequence(
                     f"{event.kind.value} has no resolved contract",
                 )
             )
-        elif status not in {PositionStatus.PENDING_ENTRY, PositionStatus.OPEN, PositionStatus.CLOSING}:
+        elif status not in {
+            PositionStatus.PENDING_ENTRY,
+            PositionStatus.OPEN,
+            PositionStatus.CLOSING,
+        }:
             findings.append(
                 SequenceFinding(
                     "orphan_followup",
