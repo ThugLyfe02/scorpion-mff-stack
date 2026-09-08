@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .decision_packet import OperatorDecisionPacket
 
-_SCHEMA = """
+_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS operator_decision_packets (
     packet_id TEXT PRIMARY KEY,
     event_id TEXT NOT NULL UNIQUE,
@@ -21,14 +21,17 @@ CREATE TABLE IF NOT EXISTS operator_decision_packets (
     resolved_by TEXT,
     resolution TEXT,
     resolution_note TEXT NOT NULL DEFAULT ''
-);
+)
+"""
+_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_operator_packet_disposition
-ON operator_decision_packets(disposition,created_ts_utc);
+ON operator_decision_packets(disposition,created_ts_utc)
 """
 
 
 def ensure_decision_packet_schema(db: sqlite3.Connection) -> None:
-    db.executescript(_SCHEMA)
+    db.execute(_TABLE_SQL)
+    db.execute(_INDEX_SQL)
 
 
 def _payload(packet: OperatorDecisionPacket) -> str:
