@@ -4,7 +4,6 @@ from hypothesis import strategies as st
 from scorpion.domain import EventKind
 from scorpion.parser import parse_message
 
-
 ACTIONABLE = {EventKind.ENTRY, EventKind.ADD, EventKind.TRIM, EventKind.EXIT}
 
 
