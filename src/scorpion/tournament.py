@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from .accuracy import ACTIONABLE_KINDS, percentile
@@ -12,6 +12,8 @@ from .counterfactual import (
     run_counterfactual,
 )
 from .domain import EventKind, RawDiscordMessage, SignalEvent
+
+EventParser = Callable[[RawDiscordMessage], SignalEvent]
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +49,16 @@ def _safe_div(numerator: int, denominator: int) -> float:
     return numerator / denominator if denominator else 0.0
 
 
+def _event_parser(
+    parser: EvidenceParser,
+    allowed_author_ids: frozenset[str] | None,
+) -> EventParser:
+    def parse(item: RawDiscordMessage) -> SignalEvent:
+        return parser(item, allowed_author_ids).event
+
+    return parse
+
+
 def run_parser_tournament(
     messages: Sequence[RawDiscordMessage],
     candidates: Sequence[TournamentCandidate],
@@ -67,6 +79,7 @@ def run_parser_tournament(
 
     for index, candidate in enumerate(candidates):
         candidate_parser = candidate.parser
+        event_parser = _event_parser(candidate_parser, allowed_author_ids)
         run = (
             baseline_run
             if index == 0
@@ -84,9 +97,6 @@ def run_parser_tournament(
         surface_kind_changes = 0
         surface_contract_changes = 0
         grammar_action_leaks = 0
-
-        def event_parser(item: RawDiscordMessage) -> SignalEvent:
-            return candidate_parser(item, allowed_author_ids).event
 
         for raw in messages:
             decision = candidate_parser(raw, allowed_author_ids)
