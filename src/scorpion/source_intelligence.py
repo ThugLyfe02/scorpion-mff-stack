@@ -38,9 +38,12 @@ def load_source_behavior_profile(
     author_id: str,
     channel_id: str,
     limit: int = 200,
+    offset: int = 0,
 ) -> SourceBehaviorProfile:
     if limit <= 0:
         raise ValueError("limit must be positive")
+    if offset < 0:
+        raise ValueError("offset cannot be negative")
     db = sqlite3.connect(str(path))
     db.row_factory = sqlite3.Row
     try:
@@ -49,9 +52,9 @@ def load_source_behavior_profile(
             SELECT message_id,edited_ts_utc FROM raw_discord_events
             WHERE author_id=? AND channel_id=?
             ORDER BY source_ts_utc DESC,received_ts_utc DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (author_id, channel_id, limit),
+            (author_id, channel_id, limit, offset),
         ).fetchall()
         message_ids = [str(row["message_id"]) for row in raw_rows]
         if not message_ids:
