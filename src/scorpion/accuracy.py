@@ -8,7 +8,6 @@ from enum import StrEnum
 
 from .domain import EventKind
 
-
 ACTIONABLE_KINDS = frozenset({
     EventKind.ENTRY,
     EventKind.ADD,
