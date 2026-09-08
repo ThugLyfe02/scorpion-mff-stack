@@ -12,6 +12,7 @@ from typing import Protocol
 from .accuracy import AssociationEvidence, DecisionEvidence
 from .domain import Effect, SignalEvent
 from .integrity import append_integrity_record
+from .stage_trace import append_stage_trace
 from .store import Store
 
 
@@ -21,6 +22,7 @@ class TransitionCommitResult:
     effect_count: int
     pipeline_latency_us: int
     transaction_latency_us: int
+    db_precommit_us: int
 
 
 class TransitionCommitter(Protocol):
@@ -35,6 +37,7 @@ class TransitionCommitter(Protocol):
         association: AssociationEvidence,
         started_ns: int,
         heartbeat_metadata: Mapping[str, object],
+        stage_latencies_us: Mapping[str, int],
     ) -> TransitionCommitResult: ...
 
 
@@ -43,7 +46,7 @@ class SQLiteTransitionCommitter:
 
     Raw receipt remains a separate FULL-sync transaction so a crash can never erase
     evidence that Discord delivered the message. Everything after parsing is committed
-    together: signal, effects, audit, integrity record, raw completion marker, and heartbeat.
+    together: signal, effects, audit, integrity, stage trace, raw completion, and heartbeat.
     """
 
     def commit(
@@ -57,6 +60,7 @@ class SQLiteTransitionCommitter:
         association: AssociationEvidence,
         started_ns: int,
         heartbeat_metadata: Mapping[str, object],
+        stage_latencies_us: Mapping[str, int],
     ) -> TransitionCommitResult:
         transaction_started_ns = time.perf_counter_ns()
         created = datetime.now(UTC).isoformat()
@@ -153,8 +157,22 @@ class SQLiteTransitionCommitter:
                     "WHERE raw_event_id=?",
                     (created, raw_revision_id),
                 )
+                db_precommit_us = max(
+                    0,
+                    (time.perf_counter_ns() - transaction_started_ns) // 1_000,
+                )
+                if inserted:
+                    append_stage_trace(
+                        db,
+                        event_id=event.event_id,
+                        raw_revision_id=raw_revision_id,
+                        stage_latencies_us=stage_latencies_us,
+                        db_precommit_us=db_precommit_us,
+                        created_ts_utc=created,
+                    )
                 metadata = dict(heartbeat_metadata)
                 metadata["pipeline_latency_us"] = pipeline_latency_us
+                metadata["db_precommit_us"] = db_precommit_us
                 db.execute(
                     """
                     INSERT INTO heartbeats(component,last_seen_ts_utc,metadata_json)
@@ -179,4 +197,5 @@ class SQLiteTransitionCommitter:
             effect_count=effect_count,
             pipeline_latency_us=pipeline_latency_us,
             transaction_latency_us=transaction_latency_us,
+            db_precommit_us=db_precommit_us,
         )
