@@ -151,7 +151,9 @@ class DiscordHistorySynchronizer:
 
 def history_sync_main() -> None:
     parser = argparse.ArgumentParser(
-        description="Read-only exhaustive Discord channel history sync using an authorized bot token."
+        description=(
+            "Read-only exhaustive Discord channel history sync using an authorized bot token."
+        )
     )
     parser.add_argument("--archive", default="scorpion-history.db")
     parser.add_argument(
