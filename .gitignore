@@ -7,3 +7,10 @@ __pycache__/
 *.pem
 secrets/
 raw_hist/
+*.db
+*.db-*
+*.sqlite
+logs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

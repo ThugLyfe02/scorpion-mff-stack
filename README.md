@@ -1,47 +1,77 @@
 # Scorpion MFF Stack
 
-Trading stack for **Scorpion Capital**: MoneyForFun Discord options hone → Robinhood Agentic, plus Ross-style gapper research desk.
+Trading-control research stack for **Scorpion Capital**: MoneyForFun Discord options signals,
+deterministic signal/replay infrastructure, and a Ross-style gapper research desk.
 
 ## Status (2026-09-08)
 
 | Layer | State |
 |---|---|
-| Live Discord → RH executor | **LLM agent + browser** (failed open: queue starvation). **Needs coded hot path.** |
-| Backtest / signal corpus | In `mff-backtest/` (tape BT + scrapes) |
-| Gapper scanner | Agent cron + Ross skill — **no scanner binary** |
+| Discord ingest | **V2 push-based component implemented** in `src/scorpion/ingest/discord.py` |
+| Parser / state | **Deterministic V2 implemented** with explicit ambiguity + event-sourced reducer |
+| Durable audit | **SQLite WAL event/effect/heartbeat store implemented** |
+| Execution | **Paper/shadow + review-only boundary implemented**; no autonomous live submission |
+| Backtest / signal corpus | Legacy evidence in `mff-backtest/`; correctness caveats documented |
+| Gapper scanner | Agent research only — no scanner binary |
 
-## Repo layout
+The former browser/LLM cron path is retained only as operational history. It must not be treated as a
+sub-second control plane.
 
-```
-mff-backtest/          # tape backtest, channel IDs, trades.json, bars
-skills/                # Ross gapper skill
-config/                # agent profiles + cron routine snapshots (prompts)
-docs/HANDOFF.md        # full architecture + 9/8 failure + build target
-```
+## V2 architecture
 
-## Primary files
-
-1. `docs/HANDOFF.md` — start here
-2. `mff-backtest/bt_full/discord_channel_ids.json`
-3. `mff-backtest/bt_full/run_tape_bt.py`
-4. `mff-backtest/bt_full/trades.json`
-5. `mff-backtest/bt_full/sep8_alerts.json`
-
-## Build target (hot path)
-
-```
-Discord Gateway MESSAGE_CREATE (4 channel IDs)
-  → parse Entry|Exit|Ignore
-  → state machine (1-lot pipe → size; max 2; +25% skip; no chase closed)
-  → Robinhood Agentic order adapter
-  → structured fill log + kill switch
+```text
+Discord Gateway MESSAGE_CREATE
+  -> immutable UTC RawDiscordMessage
+  -> durable event store
+  -> deterministic parse Entry|Add|Trim|Exit|Ignore|Ambiguous
+  -> conservative association
+  -> pure event reducer + generation/idempotency controls
+  -> durable proposed effects
+  -> paper/shadow OR explicit operator review
 ```
 
-Keep LLM agents for gapper desk / ops / STOP — not sub-10s exits.
+Research/chat/scanner workloads are outside this path and cannot block Discord ingestion.
 
-## Secrets
+## Start here
 
-Do **not** commit Robinhood tokens, Discord bot tokens, or `.env`. Channel IDs are included (guild membership still required).
+1. `docs/ARCHITECTURE_V2.md`
+2. `docs/IMPLEMENTATION_STATUS.md`
+3. `docs/BACKTEST_CORRECTNESS.md`
+4. `docs/SECURITY.md`
+5. `live/RULES.lock.md`
+6. `docs/HANDOFF.md`
+
+## Development
+
+Python 3.13:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+pytest
+```
+
+Runtime Discord ingest requires an authorized bot token and a strict signal-author allowlist:
+
+```bash
+export SCORPION_DISCORD_TOKEN='...'
+export SCORPION_SIGNAL_AUTHOR_IDS='1234567890'
+export SCORPION_DB='scorpion.db'
+scorpion-ingest
+```
+
+Do not put tokens, cookies, broker credentials, or account identifiers in Git.
+
+## Historical research
+
+`mff-backtest/` contains the legacy tape/upper-bound research. Do **not** use its headline outputs as
+live sizing evidence without the corrections described in `docs/BACKTEST_CORRECTNESS.md`.
+
+## Repository security
+
+This repository contains sensitive operational information and should be private. Masking sensitive
+values in a later commit does not purge earlier Git history; see `docs/SECURITY.md`.
 
 ## License
 
