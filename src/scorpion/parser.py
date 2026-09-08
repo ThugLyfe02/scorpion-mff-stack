@@ -332,11 +332,12 @@ def parse_message_with_evidence(
             _base(raw, EventKind.AMBIGUOUS, "percentage_without_explicit_action"),
             referenced_pct=pct,
         )
+        matched_pct = pct_match.group(0) if pct_match is not None else str(pct)
         return finish(
             event,
             "action.percentage_only",
             0.30,
-            matched_terms=(pct_match.group(0),),
+            matched_terms=(matched_pct,),
         )
 
     return finish(
