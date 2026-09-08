@@ -27,8 +27,8 @@ from scorpion.recovery import create_verified_backup
 from scorpion.resilience import OperationalMode
 from scorpion.schema_contract import inspect_schema
 from scorpion.selective import SelectiveObservation, SelectivePolicy, choose_selective_policy
-from scorpion.slo import BurnSeverity, ModeHysteresis, SLOBudget, TimedOutcome, evaluate_burn_rate
 from scorpion.sizing_lab import SizingConstraints
+from scorpion.slo import BurnSeverity, ModeHysteresis, SLOBudget, TimedOutcome, evaluate_burn_rate
 from scorpion.storage_health import checkpoint_wal, inspect_storage
 from scorpion.store import Store
 from scorpion.tournament import (
