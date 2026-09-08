@@ -10,6 +10,16 @@ from pathlib import Path
 
 Scalar = str | int | float | bool | None
 _GENESIS = "0" * 64
+_INTEGRITY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS integrity_ledger (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_id TEXT NOT NULL UNIQUE,
+    previous_hash TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    record_hash TEXT NOT NULL UNIQUE,
+    created_ts_utc TEXT NOT NULL
+)
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +88,43 @@ def verify_chain(records: Sequence[IntegrityRecord]) -> IntegrityVerification:
     return IntegrityVerification(True, len(records))
 
 
+def ensure_integrity_schema(db: sqlite3.Connection) -> None:
+    db.execute(_INTEGRITY_SCHEMA)
+
+
+def append_integrity_record(
+    db: sqlite3.Connection,
+    record_id: str,
+    payload: Mapping[str, Scalar],
+    *,
+    created_ts_utc: str | None = None,
+) -> IntegrityRecord:
+    ensure_integrity_schema(db)
+    payload_sha256 = _payload_hash(canonical_payload(payload))
+    row = db.execute(
+        "SELECT sequence,record_hash FROM integrity_ledger ORDER BY sequence DESC LIMIT 1"
+    ).fetchone()
+    sequence = int(row["sequence"]) + 1 if row else 1
+    previous_hash = str(row["record_hash"]) if row else _GENESIS
+    record_hash = compute_record_hash(sequence, record_id, previous_hash, payload_sha256)
+    db.execute(
+        """
+        INSERT INTO integrity_ledger
+        (sequence,record_id,previous_hash,payload_sha256,record_hash,created_ts_utc)
+        VALUES (?,?,?,?,?,?)
+        """,
+        (
+            sequence,
+            record_id,
+            previous_hash,
+            payload_sha256,
+            record_hash,
+            created_ts_utc or datetime.now(UTC).isoformat(),
+        ),
+    )
+    return IntegrityRecord(sequence, record_id, previous_hash, payload_sha256, record_hash)
+
+
 class IntegrityLedger:
     """Append-only SHA-256 hash chain for forensic evidence.
 
@@ -88,19 +135,11 @@ class IntegrityLedger:
 
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
-        with self._connect() as db:
-            db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS integrity_ledger (
-                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                    record_id TEXT NOT NULL UNIQUE,
-                    previous_hash TEXT NOT NULL,
-                    payload_sha256 TEXT NOT NULL,
-                    record_hash TEXT NOT NULL UNIQUE,
-                    created_ts_utc TEXT NOT NULL
-                )
-                """
-            )
+        db = self._connect()
+        try:
+            ensure_integrity_schema(db)
+        finally:
+            db.close()
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, isolation_level=None)
@@ -108,44 +147,12 @@ class IntegrityLedger:
         return db
 
     def append(self, record_id: str, payload: Mapping[str, Scalar]) -> IntegrityRecord:
-        payload_sha256 = _payload_hash(canonical_payload(payload))
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute(
-                "SELECT sequence,record_hash FROM integrity_ledger ORDER BY sequence DESC LIMIT 1"
-            ).fetchone()
-            sequence = int(row["sequence"]) + 1 if row else 1
-            previous_hash = str(row["record_hash"]) if row else _GENESIS
-            record_hash = compute_record_hash(
-                sequence,
-                record_id,
-                previous_hash,
-                payload_sha256,
-            )
-            db.execute(
-                """
-                INSERT INTO integrity_ledger
-                (sequence,record_id,previous_hash,payload_sha256,record_hash,created_ts_utc)
-                VALUES (?,?,?,?,?,?)
-                """,
-                (
-                    sequence,
-                    record_id,
-                    previous_hash,
-                    payload_sha256,
-                    record_hash,
-                    datetime.now(UTC).isoformat(),
-                ),
-            )
+            record = append_integrity_record(db, record_id, payload)
             db.execute("COMMIT")
-            return IntegrityRecord(
-                sequence,
-                record_id,
-                previous_hash,
-                payload_sha256,
-                record_hash,
-            )
+            return record
         except Exception:
             db.execute("ROLLBACK")
             raise
