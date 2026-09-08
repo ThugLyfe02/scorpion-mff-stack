@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,21 +15,47 @@ class HistoricalQuote:
     ts_utc: datetime
     bid: Decimal
     ask: Decimal
+    bid_size: int | None = None
+    ask_size: int | None = None
+    source: str = ""
 
     def __post_init__(self) -> None:
         if self.ts_utc.tzinfo is None or self.ts_utc.utcoffset() is None:
             raise ValueError("quote timestamp must be timezone-aware")
         if self.bid <= 0 or self.ask <= 0 or self.ask < self.bid:
             raise ValueError("invalid historical quote")
+        if self.bid_size is not None and self.bid_size <= 0:
+            raise ValueError("bid_size must be positive when present")
+        if self.ask_size is not None and self.ask_size <= 0:
+            raise ValueError("ask_size must be positive when present")
         object.__setattr__(self, "ts_utc", self.ts_utc.astimezone(UTC))
+
+    @property
+    def spread_fraction(self) -> Decimal:
+        midpoint = (self.bid + self.ask) / Decimal("2")
+        return (self.ask - self.bid) / midpoint if midpoint > 0 else Decimal("0")
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalFillEvidence:
+    side: Literal["BUY", "SELL"]
+    requested_quantity: int
+    filled_quantity: int
+    price: Decimal
+    quote: HistoricalQuote
+    depth_known: bool
+
+    @property
+    def complete(self) -> bool:
+        return self.filled_quantity == self.requested_quantity
 
 
 class HistoricalQuoteTape:
     """In-memory, contract-indexed NBBO-like quote tape.
 
-    JSONL is intentionally provider-neutral. Each record needs contract_key, ts_utc, bid, ask.
-    The execution-forensics engine only calls quotes at or after the simulated decision time, so
-    it cannot accidentally use a pre-alert future-insensitive midpoint.
+    JSONL is provider-neutral. Required fields are contract_key, ts_utc, bid and ask; optional
+    bid_size/ask_size/source improve execution-evidence quality. Lookups are causal: no quote
+    before the simulated decision timestamp can be used for a fill.
     """
 
     def __init__(self, quotes: tuple[HistoricalQuote, ...]) -> None:
@@ -58,9 +85,16 @@ class HistoricalQuoteTape:
                         ts_utc=datetime.fromisoformat(str(row["ts_utc"])),
                         bid=Decimal(str(row["bid"])),
                         ask=Decimal(str(row["ask"])),
+                        bid_size=(
+                            int(row["bid_size"]) if row.get("bid_size") is not None else None
+                        ),
+                        ask_size=(
+                            int(row["ask_size"]) if row.get("ask_size") is not None else None
+                        ),
+                        source=str(row.get("source", "")),
                     )
                 )
-            except (KeyError, ValueError) as exc:
+            except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError(f"invalid quote JSONL at line {line_number}") from exc
         return cls(tuple(quotes))
 
@@ -112,3 +146,57 @@ class HistoricalQuoteTape:
             if quote.ask <= limit_price:
                 return quote
         return None
+
+    def bounded_buy_fill(
+        self,
+        contract_key: str,
+        target_ts_utc: datetime,
+        *,
+        quantity: int,
+        limit_price: Decimal,
+        max_wait: timedelta = timedelta(seconds=5),
+    ) -> HistoricalFillEvidence | None:
+        if quantity <= 0:
+            raise ValueError("quantity must be positive")
+        quote = self.first_ask_at_or_below(
+            contract_key,
+            target_ts_utc,
+            limit_price,
+            max_wait=max_wait,
+        )
+        if quote is None:
+            return None
+        depth_known = quote.ask_size is not None
+        available = quote.ask_size if quote.ask_size is not None else quantity
+        return HistoricalFillEvidence(
+            side="BUY",
+            requested_quantity=quantity,
+            filled_quantity=min(quantity, available),
+            price=quote.ask,
+            quote=quote,
+            depth_known=depth_known,
+        )
+
+    def bounded_sell_fill(
+        self,
+        contract_key: str,
+        target_ts_utc: datetime,
+        *,
+        quantity: int,
+        max_lag: timedelta = timedelta(seconds=3),
+    ) -> HistoricalFillEvidence | None:
+        if quantity <= 0:
+            raise ValueError("quantity must be positive")
+        quote = self.at_or_after(contract_key, target_ts_utc, max_lag=max_lag)
+        if quote is None:
+            return None
+        depth_known = quote.bid_size is not None
+        available = quote.bid_size if quote.bid_size is not None else quantity
+        return HistoricalFillEvidence(
+            side="SELL",
+            requested_quantity=quantity,
+            filled_quantity=min(quantity, available),
+            price=quote.bid,
+            quote=quote,
+            depth_known=depth_known,
+        )
