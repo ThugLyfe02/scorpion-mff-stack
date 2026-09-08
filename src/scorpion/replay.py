@@ -8,6 +8,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
+from .config import DEFAULT_POLICY, Policy
 from .domain import BookState, Effect, SignalEvent
 from .reducer import reduce_book
 
@@ -54,7 +55,10 @@ def same_bar_target_resolution(
     return AmbiguousFill(None, None, "target_not_printed")
 
 
-def replay(events: Sequence[SignalEvent]) -> tuple[BookState, tuple[Effect, ...]]:
+def replay(
+    events: Sequence[SignalEvent],
+    policy: Policy = DEFAULT_POLICY,
+) -> tuple[BookState, tuple[Effect, ...]]:
     ordered = sorted(
         events,
         key=lambda event: (event.source_ts_utc, event.received_ts_utc, event.event_id),
@@ -62,7 +66,7 @@ def replay(events: Sequence[SignalEvent]) -> tuple[BookState, tuple[Effect, ...]
     state = BookState()
     effects: list[Effect] = []
     for event in ordered:
-        state, produced = reduce_book(state, event)
+        state, produced = reduce_book(state, event, policy)
         effects.extend(produced)
     return state, tuple(effects)
 
