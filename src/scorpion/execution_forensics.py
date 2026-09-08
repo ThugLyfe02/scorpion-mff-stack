@@ -135,8 +135,6 @@ def _to_raw(message: ArchivedDiscordMessage) -> RawDiscordMessage:
         author_id=message.author_id,
         content=message.content,
         source_ts_utc=message.source_ts_utc,
-        # Historical archive time is intentionally not substituted for market latency.
-        # Forensics applies ExecutionProfile.decision_latency explicitly below.
         received_ts_utc=message.source_ts_utc,
         edited_ts_utc=message.edited_ts_utc,
         referenced_message_id=message.referenced_message_id,
@@ -317,21 +315,21 @@ def run_execution_forensics(
                     )
                 )
                 continue
-            status, quote, limit = _entry_fill_quote(
+            entry_status, entry_quote, entry_limit_price = _entry_fill_quote(
                 quote_tape,
                 key,
                 target_ts,
                 reference,
                 profile,
             )
-            if status is not ForensicStatus.FILLED or quote is None:
+            if entry_status is not ForensicStatus.FILLED or entry_quote is None:
                 legs.append(
                     _record_leg(
                         event,
                         eligibility.bucket,
-                        status,
-                        limit_price=limit,
-                        quote=quote,
+                        entry_status,
+                        limit_price=entry_limit_price,
+                        quote=entry_quote,
                     )
                 )
                 continue
@@ -340,7 +338,7 @@ def run_execution_forensics(
             else:
                 quantity = _quantity_for_budget(
                     profile.base_budget(event.channel_id),
-                    quote.ask,
+                    entry_quote.ask,
                 )
             if quantity <= 0:
                 legs.append(
@@ -348,8 +346,8 @@ def run_execution_forensics(
                         event,
                         eligibility.bucket,
                         ForensicStatus.UNAFFORDABLE,
-                        limit_price=limit,
-                        quote=quote,
+                        limit_price=entry_limit_price,
+                        quote=entry_quote,
                         note="configured clip cannot buy one contract",
                     )
                 )
@@ -359,10 +357,10 @@ def run_execution_forensics(
                 key,
                 effect.generation,
                 quantity,
-                quote.ask,
+                entry_quote.ask,
             )
             assert_valid_book(filled_state)
-            cash_in = quote.ask * quantity * _OPTION_MULTIPLIER
+            cash_in = entry_quote.ask * quantity * _OPTION_MULTIPLIER
             ledgers[key] = _TradeLedger(
                 entry_event_id=event.event_id,
                 contract_key=key,
@@ -380,9 +378,9 @@ def run_execution_forensics(
                     eligibility.bucket,
                     ForensicStatus.FILLED,
                     quantity=quantity,
-                    limit_price=limit,
-                    fill_price=quote.ask,
-                    quote=quote,
+                    limit_price=entry_limit_price,
+                    fill_price=entry_quote.ask,
+                    quote=entry_quote,
                 )
             )
             continue
@@ -402,10 +400,8 @@ def run_execution_forensics(
 
         if effect.kind is EffectKind.PROPOSE_ADD:
             reference = event.referenced_price
-            quote: HistoricalQuote | None
-            limit: Decimal | None
             if reference is not None:
-                status, quote, limit = _entry_fill_quote(
+                add_status, add_quote, add_limit_price = _entry_fill_quote(
                     quote_tape,
                     key,
                     target_ts,
@@ -413,35 +409,39 @@ def run_execution_forensics(
                     profile,
                 )
             else:
-                quote = quote_tape.at_or_after(
+                add_quote = quote_tape.at_or_after(
                     key,
                     target_ts,
                     max_lag=profile.quote_max_lag,
                 )
-                status = ForensicStatus.FILLED if quote is not None else ForensicStatus.NO_QUOTE
-                limit = quote.ask if quote is not None else None
-            if status is not ForensicStatus.FILLED or quote is None:
+                add_status = (
+                    ForensicStatus.FILLED
+                    if add_quote is not None
+                    else ForensicStatus.NO_QUOTE
+                )
+                add_limit_price = add_quote.ask if add_quote is not None else None
+            if add_status is not ForensicStatus.FILLED or add_quote is None:
                 legs.append(
                     _record_leg(
                         event,
                         eligibility.bucket,
-                        status,
-                        limit_price=limit,
-                        quote=quote,
+                        add_status,
+                        limit_price=add_limit_price,
+                        quote=add_quote,
                         note="source add was not synthesized",
                     )
                 )
                 continue
             source_channel = position.source_channel_id or ledger.channel_id
-            quantity = _quantity_for_budget(profile.add_budget(source_channel), quote.ask)
+            quantity = _quantity_for_budget(profile.add_budget(source_channel), add_quote.ask)
             if quantity <= 0:
                 legs.append(
                     _record_leg(
                         event,
                         eligibility.bucket,
                         ForensicStatus.UNAFFORDABLE,
-                        limit_price=limit,
-                        quote=quote,
+                        limit_price=add_limit_price,
+                        quote=add_quote,
                     )
                 )
                 continue
@@ -450,9 +450,9 @@ def run_execution_forensics(
                 key,
                 effect.generation,
                 quantity,
-                quote.ask,
+                add_quote.ask,
             )
-            ledger.gross_premium_in += quote.ask * quantity * _OPTION_MULTIPLIER
+            ledger.gross_premium_in += add_quote.ask * quantity * _OPTION_MULTIPLIER
             ledger.add_count += 1
             state = filled_state
             legs.append(
@@ -461,15 +461,15 @@ def run_execution_forensics(
                     eligibility.bucket,
                     ForensicStatus.FILLED,
                     quantity=quantity,
-                    limit_price=limit,
-                    fill_price=quote.ask,
-                    quote=quote,
+                    limit_price=add_limit_price,
+                    fill_price=add_quote.ask,
+                    quote=add_quote,
                 )
             )
             continue
 
-        quote = quote_tape.at_or_after(key, target_ts, max_lag=profile.quote_max_lag)
-        if quote is None:
+        exit_quote = quote_tape.at_or_after(key, target_ts, max_lag=profile.quote_max_lag)
+        if exit_quote is None:
             legs.append(
                 _record_leg(
                     event,
@@ -489,7 +489,7 @@ def run_execution_forensics(
                         event,
                         eligibility.bucket,
                         ForensicStatus.NO_POSITION_QUANTITY,
-                        quote=quote,
+                        quote=exit_quote,
                         note="already at one runner contract",
                     )
                 )
@@ -499,9 +499,9 @@ def run_execution_forensics(
                 key,
                 effect.generation,
                 -quantity,
-                quote.bid,
+                exit_quote.bid,
             )
-            ledger.gross_proceeds += quote.bid * quantity * _OPTION_MULTIPLIER
+            ledger.gross_proceeds += exit_quote.bid * quantity * _OPTION_MULTIPLIER
             ledger.trim_count += 1
             state = filled_state
             legs.append(
@@ -510,8 +510,8 @@ def run_execution_forensics(
                     eligibility.bucket,
                     ForensicStatus.FILLED,
                     quantity=quantity,
-                    fill_price=quote.bid,
-                    quote=quote,
+                    fill_price=exit_quote.bid,
+                    quote=exit_quote,
                     note="trim-to-one; no synthetic runner exit is invented",
                 )
             )
@@ -526,7 +526,7 @@ def run_execution_forensics(
                         event,
                         eligibility.bucket,
                         ForensicStatus.NO_POSITION_QUANTITY,
-                        quote=quote,
+                        quote=exit_quote,
                     )
                 )
                 continue
@@ -535,10 +535,10 @@ def run_execution_forensics(
                 key,
                 effect.generation,
                 -quantity,
-                quote.bid,
+                exit_quote.bid,
                 final=True,
             )
-            proceeds = quote.bid * quantity * _OPTION_MULTIPLIER
+            proceeds = exit_quote.bid * quantity * _OPTION_MULTIPLIER
             ledger.gross_proceeds += proceeds
             pnl = ledger.gross_proceeds - ledger.gross_premium_in
             return_fraction = (
@@ -576,8 +576,8 @@ def run_execution_forensics(
                     eligibility.bucket,
                     ForensicStatus.FILLED,
                     quantity=quantity,
-                    fill_price=quote.bid,
-                    quote=quote,
+                    fill_price=exit_quote.bid,
+                    quote=exit_quote,
                 )
             )
 
