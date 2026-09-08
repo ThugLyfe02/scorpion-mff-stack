@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
@@ -72,6 +72,8 @@ def _normalize(value: object) -> object:
         return value.astimezone(UTC).isoformat()
     if isinstance(value, date):
         return value.isoformat()
+    if isinstance(value, timedelta):
+        return {"seconds": format(Decimal(str(value.total_seconds())), "f")}
     if isinstance(value, Enum):
         return _normalize(value.value)
     if isinstance(value, Path):
