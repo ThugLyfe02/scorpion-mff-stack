@@ -53,13 +53,7 @@ def _effect_status(packet: OperatorDecisionPacket) -> str:
 
 
 class SQLiteTransitionCommitter:
-    """Atomically commits the normalized half of a Discord transition.
-
-    Raw receipt remains a separate FULL-sync transaction so a crash can never erase
-    evidence that Discord delivered the message. Everything after parsing is committed
-    together: signal, effects, decision packet, audit, integrity, stage trace, raw completion,
-    and heartbeat.
-    """
+    """Atomically commits the normalized half of a Discord transition."""
 
     def commit(
         self,
@@ -171,6 +165,7 @@ class SQLiteTransitionCommitter:
                             "operational_mode": decision_packet.system_mode.value,
                             "strategy_bucket": decision_packet.strategy_bucket.value,
                             "eligibility_reason": decision_packet.eligibility_reason,
+                            "policy_fingerprint": decision_packet.policy_fingerprint,
                         },
                         created_ts_utc=created,
                     )
