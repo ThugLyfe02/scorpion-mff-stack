@@ -50,9 +50,8 @@ def assess_ensemble(
     if total_weight <= 0.0:
         return EnsembleAssessment(None, 0.0, 0.0, 0.0, len(action_states) > 1, True, {})
 
-    distribution = {
-        kind: mass / total_weight for kind, mass in sorted(vote_mass.items(), key=lambda item: item[0].value)
-    }
+    ordered_votes = sorted(vote_mass.items(), key=lambda item: item[0].value)
+    distribution = {kind: mass / total_weight for kind, mass in ordered_votes}
     ranked = sorted(distribution.items(), key=lambda item: (-item[1], item[0].value))
     consensus_kind, consensus_confidence = ranked[0]
     second = ranked[1][1] if len(ranked) > 1 else 0.0
