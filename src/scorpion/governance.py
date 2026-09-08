@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from .canary import CanaryReport, CanaryStatus
 from .selective import SelectivePolicy
 from .tournament import CandidateScore
+from .uncertainty_envelope import ExecutionUncertaintyEnvelope
 from .walk_forward import WalkForwardReport
 
 
@@ -23,6 +25,9 @@ class PromotionEvidence:
     dataset_complete: bool = False
     quote_coverage_ok: bool = False
     depth_coverage_ok: bool = False
+    canary: CanaryReport | None = None
+    execution_uncertainty: ExecutionUncertaintyEnvelope | None = None
+    runtime_certified: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,8 +41,8 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
     """Decide whether a candidate has enough evidence for *human* promotion review.
 
     This function never deploys or activates a parser/model/strategy. It exists to keep
-    research, validation, and deployment authority separated even as the system becomes more
-    automated.
+    research, validation, canary observation, runtime certification, and deployment authority
+    separated even as the system becomes more automated.
     """
     failures: list[str] = []
     if not evidence.candidate.qualified:
@@ -58,18 +63,32 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         failures.append("quote_coverage_insufficient")
     if not evidence.depth_coverage_ok:
         failures.append("depth_coverage_insufficient")
+    if evidence.canary is not None:
+        if evidence.canary.status is CanaryStatus.QUARANTINE:
+            failures.append("shadow_canary_quarantined")
+            failures.extend(f"canary:{item}" for item in evidence.canary.failures)
+        elif evidence.canary.status is not CanaryStatus.READY_FOR_OPERATOR_REVIEW:
+            failures.append("shadow_canary_not_mature")
+            failures.extend(f"canary:{item}" for item in evidence.canary.failures)
+    if evidence.execution_uncertainty is not None and not evidence.execution_uncertainty.robust:
+        failures.append("execution_uncertainty_not_robust")
+        failures.extend(
+            f"uncertainty:{item}" for item in evidence.execution_uncertainty.failures
+        )
+    if evidence.runtime_certified is False:
+        failures.append("runtime_certification_failed")
 
     if failures:
         return PromotionDecision(
             PromotionStatus.BLOCKED,
             tuple(failures),
-            "candidate remains research-only until every independent evidence gate passes",
+            "candidate remains research-only until every supplied independent evidence gate passes",
         )
     return PromotionDecision(
         PromotionStatus.READY_FOR_OPERATOR_REVIEW,
         (),
         (
-            "all automated evidence gates passed; explicit operator review is still required "
-            "before any production policy/model change"
+            "all supplied automated evidence gates passed; explicit operator review is still "
+            "required before any production policy/model change"
         ),
     )
