@@ -84,11 +84,16 @@ def certify_runtime(
             backup_path,
             overwrite=overwrite_backup,
         )
+        backup_detail = (
+            "backup state/evidence matches source"
+            if backup.verified
+            else ",".join(backup.failures)
+        )
         checks.append(
             CertificationCheck(
                 "verified_backup_replay_equivalence",
                 backup.verified,
-                "backup state/evidence matches source" if backup.verified else ",".join(backup.failures),
+                backup_detail,
             )
         )
     return RuntimeCertificationReport(
