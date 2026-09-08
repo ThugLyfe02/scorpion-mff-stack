@@ -1,0 +1,4 @@
+BLIND WEEK REDO — RTH ONLY (corrected)
+Rules: Discord alerts only | fill = first RTH 5m bar where close ≈ alert bid (±5%) | size ≈ $1,200 premium (1R=$300 = −25% stop) | stop −25% from NEXT bar | half @ +50% CoS+1 bar | rest @ +100% CoS+1 bar | max 2 | skip lotto | no adds this week
+Tape: option 5m bars (real prints only)
+Week: Tue 9/1 – Thu 9/3 signals (Fri quiet in scrape). Mon 8/31 not in this alert set.

@@ -1,0 +1,58 @@
+{
+  "add15_multi": {
+    "n_taken": 13,
+    "n_skipped": 80,
+    "total_pnl": 12210.16,
+    "end_book": 17210.16,
+    "max_dd": 2785.3,
+    "n_wins": 9,
+    "n_losses": 3,
+    "win_rate": 0.6923,
+    "avg_R": 1.8785
+  },
+  "no_add_multi": {
+    "n_taken": 13,
+    "n_skipped": 80,
+    "total_pnl": 6017.5,
+    "end_book": 11017.5,
+    "max_dd": 1888.0,
+    "n_wins": 9,
+    "n_losses": 3,
+    "win_rate": 0.6923,
+    "avg_R": 0.9258
+  },
+  "add15_max2": {
+    "n_taken": 8,
+    "n_skipped": 85,
+    "total_pnl": 8620.1,
+    "end_book": 13620.1,
+    "max_dd": 2460.0,
+    "n_wins": 6,
+    "n_losses": 1,
+    "win_rate": 0.75,
+    "avg_R": 2.155
+  },
+  "no_add_max2": {
+    "n_taken": 8,
+    "n_skipped": 85,
+    "total_pnl": 5179.2,
+    "end_book": 10179.2,
+    "max_dd": 1740.0,
+    "n_wins": 6,
+    "n_losses": 1,
+    "win_rate": 0.75,
+    "avg_R": 1.2948
+  },
+  "hard25_no_add_multi": {
+    "n_taken": 13,
+    "n_skipped": 80,
+    "total_pnl": -566.8,
+    "end_book": 4433.2,
+    "max_dd": 1142.8,
+    "n_wins": 5,
+    "n_losses": 7,
+    "win_rate": 0.3846,
+    "avg_R": -0.0872
+  }
+}
+WROTE /workspace/mff-backtest/bt_full/summary.md

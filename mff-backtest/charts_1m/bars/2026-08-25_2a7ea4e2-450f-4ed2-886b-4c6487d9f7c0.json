@@ -1,0 +1,14 @@
+{
+  "instrument_id": "2a7ea4e2-450f-4ed2-886b-4c6487d9f7c0",
+  "date": "2026-08-25",
+  "interval": "5minute",
+  "bars": [
+    {
+      "begins_at": "2026-08-25T20:10:00Z",
+      "open": 0.01,
+      "high": 0.01,
+      "low": 0.01,
+      "close": 0.01
+    }
+  ]
+}

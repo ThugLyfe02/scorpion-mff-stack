@@ -1,0 +1,60 @@
+channel,date,time_et,ticker,side,strike,expiry,entry_bid,exit_pct,outcome,notes
+options-king,2026-08-17,6:42 AM,TSLA,CALL,345,Aug 19,2.30,24,closed,Entry SL 25% light position; partial close 2.65 then runners 3.00 fully; later msg said 75% if still holding
+options-king,2026-08-20,6:58 AM,AAPL,CALL,320,,1.50,,closed,1.50 avg -> 1.65; expiry truncated in screenshot
+options-king,2026-08-20,7:49 AM,NVDA,CALL,225,,3.80,14,closed,Close remaining contracts for 14%; expiry truncated
+options-king,2026-08-24,6:40 AM,NVDA,CALL,225,Aug 28,2.15,,unknown,Entry only Current BID Price $2.15
+high-confidence-options,2026-08-20,10:06 AM,SOXL,PUT,120,Aug 21,2.67,,unknown,SL 25% Light position; entry only
+high-confidence-options,2026-08-24,7:20 AM,TSLA,CALL,360,,2.75,,closed,Trim half 2.75->3.00 then close remaining at 2.80; expiry truncated; cover NVDA loss note
+etf-options,2026-08-25,6:38 AM,QQQ,CALL,714,,1.10,35,closed,AVG at 1.10; close at 20% then close remaining 35%; expiry truncated Exp T...
+platinum-options,2024-04-11,7:59 AM,AAPL,CALL,170,Apr 26,263,,unknown,OCR as-written BID $263 (likely missing decimal $2.63); entry only
+platinum-options,2024-04-11,12:38 PM,BAC,PUT,36,Apr 19 2024,0.56,,unknown,Entry only Current BID $.56
+platinum-options,2024-07-12,6:39 AM,C,PUT,65,Jul 19 2024,0.97,,unknown,ER LOTTO; msg also says In the Money; no exit price
+platinum-options,2024-07-15,6:39 AM,DJT,PUT,35,Jul 26,295,,unknown,OCR as-written BID $295 (likely $2.95); entry only
+platinum-options,2024-09-26,6:33 AM,MU,PUT,113,Sept 27,2.90,,unknown,SL 20%; entry only
+platinum-options,2024-09-26,12:26 PM,COST,PUT,855,Sept 27 2024,310,,unknown,Er Lotto; OCR as-written BID $310 (likely $3.10); entry only partially obscured
+platinum-options,2024-12-03,,AAPL,,240,Dec 6,1.80,,unknown,Side cut off at top of screenshot; entry only
+platinum-options,2024-12-03,7:18 AM,QQQ,PUT,513,Dec 3,0.35,,unknown,0DTE LOTTO; entry only
+platinum-options,2025-02-06,7:15 AM,GAP,CALL,23.5,Feb 21,0.52,,unknown,Entry only
+platinum-options,2025-02-06,11:56 AM,AFRM,CALL,65,Feb 7,2.58,,unknown,CALL/er lotto; ER after hrs; entry only
+platinum-options,2025-03-19,10:52 AM,QQQ,CALL,480,Today,1.05,60,closed,FOMC LOTTO 100% RISKY; update Up 40% then 60%; no absolute exit price
+platinum-options,2025-04-25,6:36 AM,TSLA,CALL,265,Today,1.90,,unknown,0DTE LOTTO; entry only
+platinum-options,2025-05-15,6:41 AM,GOOGL,PUT,165,May 16,1.75,,unknown,Entry only
+platinum-options,2025-07-09,6:43 AM,U,CALL,30.5,Jul 11,0.72,,unknown,Entry only
+platinum-options,2025-07-09,8:11 AM,U,CALL,29.5,Jul 11,0.60,,unknown,Second U call same day; entry only; time OCR ambiguous B.I1->8:11
+platinum-options,2025-08-19,7:02 AM,AMD,PUT,170,Aug 22,3.20,10,closed,Update 10%+; no absolute exit price
+platinum-options,2025-08-19,7:02 AM,TSLA,CALL,350,Aug 29,4.25,30,closed,Update 30%+; expiry OCR Aub->Aug; no absolute exit price
+platinum-options,2025-08-19,8:16 AM,FSLR,PUT,200,Aug 29,2.25,,unknown,Entry only; partially behind Jump To Present overlay
+platinum-options,2025-10-02,12:55 PM,TSLA,PUT,450,Oct 3,2.30,600,closed,600%+ Banger update; strike OCR sometimes 5450 corrected to 450 from vision context
+platinum-options,2025-10-03,7:14 AM,TSLA,PUT,450,Oct 3,2.30,1500,closed,Same contract update 1500%+; OCR $200 to $2100 (likely $20 to $210?); recorded as OCR showed with caveat in notes
+platinum-options,2025-11-06,7:35 AM,AMD,PUT,240,Nov 7,1.80,,closed,$1.80 to $4.90; OCR misread exit as $490; vision confirms $4.90; also 200%+ ITM note
+platinum-options,2025-11-25,6:30 AM,NVDA,CALL,180,Dec 5,3.25,,unknown,Adding at 3.00 at 6:35; entry-focused; no exit
+platinum-options,2025-12-22,6:51 AM,TSLA,CALL,530,Dec 26,1.25,,unknown,Entry only; Jump To Present overlay
+platinum-options,2026-02-03,7:01 AM,NVDA,PUT,180,Feb 4,1.99,75,closed,Update 75%; no absolute exit price
+platinum-options,2026-03-05,7:54 AM,QQQ,CALL,610,March 6,3.50,,closed,Traded twice 3.30->3.65; sold runners at 3.90
+options-king,2022-05-10,9:03 AM,TSLA,CALL,810,May 20,3400,,unknown,Buy to open; STOP LOSS at $2800.
+options-king,2022-05-09,8:21 AM,NFLX,CALL,180,June 24,13.25,,unknown,Buy to open; Stop loss at $9.50; exit at $16+.
+options-king,2022-05-06,7:39 AM,OLED,CALL,140,Jan 20 2023,21.40,,unknown,Buy to open; long swing; stop loss at $1700 or less; exit at $2700+.
+options-king,2022-05-05,8:32 AM,SHOP,CALL,405,May 13,2165,,unknown,Buy to open; stop loss at $1700; exit around $2500+.
+options-king,2022-05-04,7:23 AM,AMZN,CALL,2600,May 20,23.80,,unknown,Buy to open; swing play; stop loss at $1700 or less; exit at $30+.
+options-king,2022-04-29,8:02 AM,NVDA,CALL,195,June 17,18.40,,unknown,Buy to open; swing play; stop loss at $15 or less; exit at $20+.
+options-king,2022-04-28,6:54 AM,UNH,CALL,520,June 17,20.60,,unknown,Buy to open; swing play; exit at $2400+; stop loss at $1600.
+options-king,2022-04-28,6:34 AM,COST,PUT,550,June 17,23.30,,unknown,Buy to open; swing play.
+high-confidence-options,2026-09-03,6:31 AM,QQQ,CALL,712,Today,1.30,400,closed,Progression: added; 20% close; back to 25% close fully; 55% all out; 105%+; 150%; 300%+; 400%.
+high-confidence-options,2026-01-08,6:44 AM,PLTR,PUT,180,Jan 9,1.95,,unknown,Entry; avg at 1.40 reported later.
+etf-options,2024-05-07,7:49 AM,IWM,PUT,204,May 7,0.10,,closed,Executed at .09; SL .07.
+etf-options,2024-05-06,7:20 AM,SPY,PUT,514,May 8 2024,1.80,7,closed,Up 7%; close if heavy; entry alert.
+etf-options,2024-05-02,9:22 AM,IWM,PUT,190,May 17 2024,0.80,,unknown,Average or close; adding at .25; entry alert.
+etf-options,2024-04-29,9:55 AM,TSLL,PUT,9.5,May 3 2024,0.60,100,closed,Close at 20%; later update says up 100% if held overnight.
+etf-options,2024-04-29,6:38 AM,SPY,PUT,500,May 17,260,,closed,Close at $285; entry text BID $260.
+etf-options,2024-04-24,7:57 AM,IWM,PUT,197,Apr 25,0.80,20,closed,Close at 13%; closing runners at 20%.
+etf-options,2024-04-22,8:21 AM,QQQ,CALL,415,Apr 24,305,25,closed,10% update; close at 8%; close runners at 25%; entry text BID $305.
+platinum-options,2022-03-21,7:40 AM,AMD,CALL,115,Apr 1,3.70,,unknown,Buy to open; swing trade. Later updates AMD at 4.30 and 530 from 3.70$.
+platinum-options,2022-03-21,7:08 AM,TSLA,CALL,950,March 25,12.50,,unknown,Buy to open; swing trade. Later update at 14$ from 12.50 average.
+platinum-options,2022-03-16,12:52 PM,LEN,PUT,85,March 18,1.60,,unknown,Buy to open; swing; adding 5 puts ER lotto.
+platinum-options,2022-03-16,7:47 AM,ARKK,CALL,60,Apr 22,3.95,,unknown,Buy to open; swing; adding 3 calls.
+platinum-options,2022-03-14,9:46 AM,NIO,PUT,14,March 25,1.20,,unknown,Buy to open; no more support on NIO.
+platinum-options,2022-03-09,9:44 AM,COIN,CALL,200,May 20,15,,unknown,Buy to open; swing; adding 2 calls.
+platinum-options,2026-09-03,6:54 AM,TSLA,CALL,390,Sept 4,1.90,150,closed,"Progression: added; 1.35->1.55/1.65; 1.35->1.92+; 50%+; 100%+; final 1.50->3.75, 150%."
+platinum-options,2026-09-02,7:12 AM,TSLA,CALL,355,Today,1.27,100,closed,Progression: 10%; 30%; 50%; final in the money 100%.
+platinum-options,2026-08-31,6:41 AM,NVDA,PUT,210,Sept 11,2.00,30,closed,Entry; later print at opening 30% if bought dip; in at 1.82.
+platinum-options,2026-08-27,7:08 AM,NVDA,CALL,230,Aug 31,1.40,110,closed,"Filled 1.32; updates 14%, 17%, 55%, final 110%."

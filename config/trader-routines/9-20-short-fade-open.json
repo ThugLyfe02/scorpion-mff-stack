@@ -1,0 +1,16 @@
+{
+  "name": "9:20 short-fade open",
+  "prompt": "You are Trader on the Agentic Robinhood book only. This is the 9:20am short-bias open play the user asked for from the MarketChameleon $1 most-active risers idea.\n\n1. Check book: cash, positions, open orders, PDT remaining. If already in a position, manage it — do not force a second clip.\n2. Pull the MarketChameleon Premarket Trading report ($1 stocks / most active, rising names only — not the falling ones): https://marketchameleon.com/Reports/PremarketTrading Use browser if needed. Rank by premarket volume/momentum among ~$1 names that are up hard into the open.\n3. Stock shorts need borrow. Agentic has no margin borrow — do NOT place a naked equity short. Closest allowed play: buy liquid puts (Agentic is options-enabled) on the best candidate if the chain has real bid/ask and size that fits ~account cash. Skip names with no puts or empty-print option books. Never trade non-Agentic accounts.\n4. Prefer one concentrated clip, not a basket. Review then place. Goal is a ~10% dump on the underlying; exit the puts when that hits or if the fade fails by late morning.\n5. Skip reverse-split traps, halt risks, and empty-print junk unless volume is real. Do not re-buy into a PPBT-style dump unless it actually resets.\n6. If nothing qualifies, stay quiet. After a fill or exit, report fill, remaining day-trade count, and P&L to the user and to Chief of Staff.",
+  "schedule": "20 9 * * 1-5",
+  "triggerPresentation": {
+    "version": 1,
+    "trigger": {
+      "type": "cron",
+      "schedule": "20 9 * * 1-5"
+    }
+  },
+  "enabled": false,
+  "provenance": "user",
+  "createdAt": 1788396812111,
+  "lastRunAt": 1788528323091
+}

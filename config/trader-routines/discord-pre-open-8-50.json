@@ -1,0 +1,16 @@
+{
+  "name": "Discord pre-open 8:50",
+  "prompt": "Mon–Thu 8:50 ET only (skip Fridays + market holidays). ONLY job: open the 4 MoneyForFun Discord tabs — high-confidence-options, options-king, etf-options, platinum-options — and leave them open. No portfolio. No scrapes. No prompt rewrites. No trades. Under 60 seconds. Then ping user: WATCH PRE-OPEN — 4 MFF tabs ready for 9:20 arm. Exit immediately.",
+  "schedule": "50 8 * * 1-4",
+  "triggerPresentation": {
+    "version": 1,
+    "trigger": {
+      "type": "cron",
+      "schedule": "50 8 * * 1-4"
+    }
+  },
+  "enabled": true,
+  "provenance": "untrusted",
+  "createdAt": 1788879890216,
+  "lastRunAt": null
+}

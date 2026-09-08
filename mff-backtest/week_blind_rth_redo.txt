@@ -1,0 +1,39 @@
+BLIND RTH REDO — week of Sep 1–4 2026
+Fill = first RTH time price is ~alert bid (≤5%). 1R=$300 at -25% stop. Mechanical scales. CoS +5m. Max 2. Skip lotto. No Discord final-%.
+
+## QQQ $710 PUT 0DTE
+Alert $1.15 → enter Tue 2026-09-01 10:40 ET @ $1.17 (close≤5%)
+  FILL Tue 10:40 ET · BUY 10 @ $1.17 = $1170 prem · stop $0.88 (−$292 ≈1R)
+  11:05 SIGNAL half (+50%, close $1.78) → ping CoS
+  11:10 CoS FILL sell 5 @ $1.77 (+50% signal close $1.78) → $+300 | left 5
+           stop → BE $1.17
+  11:20 STOP (low $1.15) sell 5 @ $1.17 → $+0
+  DONE realized $+300 (+1.00R)
+
+## QQQ $705 PUT 0DTE
+Alert $1.25 → enter Wed 2026-09-02 09:30 ET @ $1.22 (close≤5%)
+  FILL Wed 09:30 ET · BUY 9 @ $1.22 = $1098 prem · stop $0.92 (−$274 ≈1R)
+  09:40 STOP (low $0.87) sell 9 @ $0.92 → $-274
+  DONE realized $-274 (-0.91R)
+
+## TSLA $355 CALL 0DTE
+Alert $1.27 → enter Wed 2026-09-02 09:40 ET @ $1.27 (close≤5%)
+  FILL Wed 09:40 ET · BUY 9 @ $1.27 = $1143 prem · stop $0.95 (−$286 ≈1R)
+  10:00 STOP (low $0.90) sell 9 @ $0.95 → $-286
+  DONE realized $-286 (-0.95R)
+
+## GOOGL $340 CALL Sep9
+Alert $3.05 → enter Wed 2026-09-02 09:50 ET @ $3.05 (close≤5%)
+SKIP max 2 positions
+
+## QQQ $712 CALL 0DTE
+Alert $1.30 → enter Thu 2026-09-03 09:30 ET @ $1.27 (close≤5%)
+  FILL Thu 09:30 ET · BUY 9 @ $1.27 = $1143 prem · stop $0.95 (−$286 ≈1R)
+  09:35 STOP (low $0.83) sell 9 @ $0.95 → $-286
+  DONE realized $-286 (-0.95R)
+
+## TSLA $390 CALL Sep4
+Alert $1.90 → enter Thu 2026-09-03 09:40 ET @ $1.90 (close≤5%)
+  FILL Thu 09:40 ET · BUY 6 @ $1.90 = $1140 prem · stop $1.42 (−$285 ≈1R)
+  09:40 STOP same-bar wick (low $1.40) sell 6 @ $1.42 → $-285
+  DONE realized $-285 (-0.95R)

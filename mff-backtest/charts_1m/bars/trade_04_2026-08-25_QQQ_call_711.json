@@ -1,0 +1,13 @@
+{
+  "trade_index": 4,
+  "instrument_id": "86d1e64d-9c8d-4b0f-a4fc-b2d46c0616f9",
+  "bars": [
+    {
+      "begins_at": "2026-08-25T20:10:00Z",
+      "open": 0.24,
+      "high": 0.3,
+      "low": 0.18,
+      "close": 0.19
+    }
+  ]
+}

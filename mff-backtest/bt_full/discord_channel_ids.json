@@ -1,0 +1,34 @@
+{
+  "guild_id": "912747256736800838",
+  "guild_name": "MoneyForFun Options KING",
+  "channels": {
+    "options-king": {
+      "name": "💎︱options-king💎",
+      "id": "968352649437126676",
+      "url": "https://discord.com/channels/912747256736800838/968352649437126676",
+      "category": "💎 DIAMOND 💎"
+    },
+    "high-confidence-options": {
+      "name": "💎︱high-confidence-options-💎",
+      "id": "1448448931116748993",
+      "url": "https://discord.com/channels/912747256736800838/1448448931116748993",
+      "category": "💎 DIAMOND 💎"
+    },
+    "etf-options": {
+      "name": "💎︱etf-options💎",
+      "id": "1231301953972207667",
+      "url": "https://discord.com/channels/912747256736800838/1231301953972207667",
+      "category": "💎 DIAMOND 💎"
+    },
+    "platinum-options": {
+      "name": "🔥︱platinum-options",
+      "id": "946975031399972884",
+      "url": "https://discord.com/channels/912747256736800838/946975031399972884",
+      "category": "🔱 Platinum 🔱"
+    }
+  },
+  "excluded": {
+    "lotto-options": "1374221522159272076",
+    "lotto-friday": "1385605849531154522"
+  }
+}

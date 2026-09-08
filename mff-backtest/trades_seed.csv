@@ -1,0 +1,36 @@
+channel,date,time_et,ticker,side,strike,expiry,entry_bid,exit_price,exit_pct,outcome,notes,source_file
+options-king,2026-08-17,6:42 AM,TSLA,CALL,345,Aug 19,2.30,3.00,24,closed,Entry SL 25% light position; partial close 2.65 then runners 3.00 fully; later msg said 75% if still holding,3e18526d751517b0e3ac97d5e7ccdc0792f414c7550adbc72c615c0d6ba338ad.webp
+options-king,2026-08-20,6:58 AM,AAPL,CALL,320,,1.50,1.65,,closed,1.50 avg -> 1.65; expiry truncated in screenshot,ed384d883c20ae8e4c1accac4363a8ff2c6db3363d18ef31810ec45454f4ad0e.webp
+options-king,2026-08-20,7:49 AM,NVDA,CALL,225,,3.80,4.20,14,closed,Close remaining contracts for 14%; expiry truncated,ed384d883c20ae8e4c1accac4363a8ff2c6db3363d18ef31810ec45454f4ad0e.webp
+options-king,2026-08-24,6:40 AM,NVDA,CALL,225,Aug 28,2.15,,,unknown,Entry only Current BID Price $2.15,ed384d883c20ae8e4c1accac4363a8ff2c6db3363d18ef31810ec45454f4ad0e.webp
+high-confidence-options,2026-08-20,10:06 AM,SOXL,PUT,120,Aug 21,2.67,,,unknown,SL 25% Light position; entry only,df810729caeb8ce3a85afb59b901d83c0f74eb4164e2362530910fc00f778b02.webp
+high-confidence-options,2026-08-24,7:20 AM,TSLA,CALL,360,,2.75,2.80,,closed,Trim half 2.75->3.00 then close remaining at 2.80; expiry truncated; cover NVDA loss note,942b6d287c011a22a0c571e016f98570ab90368787cf85fcb1dc2ba509068b01.webp
+etf-options,2026-08-25,6:38 AM,QQQ,CALL,714,,1.10,,35,closed,AVG at 1.10; close at 20% then close remaining 35%; expiry truncated Exp T...,f2ec829088918ae680bcb971e15881cd71b6e5dbb671b9a3b2a2ded4f12b8a70.webp
+lotto-friday,2026-08-07,6:49 AM,TSLA,CALL,330,,,,45,closed,Exit updates only (15%/25%/45% closed fully); entry bid not visible; expiry truncated Exp T...,6320866f8b679ff3ac08c2b1fa24fef568150db86f8598564213be938f0b374d.webp
+lotto-friday,2026-08-07,6:49 AM,MSFT,CALL,507.5,,,,16,closed,Exit at 16%; entry bid not visible; expiry truncated,6320866f8b679ff3ac08c2b1fa24fef568150db86f8598564213be938f0b374d.webp
+lotto-friday,2026-09-04,8:23 AM,TSLA,CALL,,,1.39,,,closed,Strike truncated $3...; added more 1.30 new avg 1.39; closed as not moving as expected; no numeric exit,b3ed5f664e78e9015ab56154fef454c73b028556579c93a05ca6a2d1342216db.webp
+platinum-options,2024-04-11,7:59 AM,AAPL,CALL,170,Apr 26,263,,,unknown,OCR as-written BID $263 (likely missing decimal $2.63); entry only,bfa2ce2b2b88b63fca8d1ae33630107e428e66c0c4641de5e1dc8763c1aca72a.webp
+platinum-options,2024-04-11,12:38 PM,BAC,PUT,36,Apr 19 2024,0.56,,,unknown,Entry only Current BID $.56,bfa2ce2b2b88b63fca8d1ae33630107e428e66c0c4641de5e1dc8763c1aca72a.webp
+platinum-options,2024-07-12,6:39 AM,C,PUT,65,Jul 19 2024,0.97,,,unknown,ER LOTTO; msg also says In the Money; no exit price,3c7012da8ad1888df104e63c23e35fd57b4061c10c3287ea3116004e86149bf5.webp
+platinum-options,2024-07-15,6:39 AM,DJT,PUT,35,Jul 26,295,,,unknown,OCR as-written BID $295 (likely $2.95); entry only,3c7012da8ad1888df104e63c23e35fd57b4061c10c3287ea3116004e86149bf5.webp
+platinum-options,2024-09-26,6:33 AM,MU,PUT,113,Sept 27,2.90,,,unknown,SL 20%; entry only,2c25888997d9b95dc88869609d44954785d71456fbd134ebe90aa4af94c3f177.webp
+platinum-options,2024-09-26,12:26 PM,COST,PUT,855,Sept 27 2024,310,,,unknown,Er Lotto; OCR as-written BID $310 (likely $3.10); entry only partially obscured,2c25888997d9b95dc88869609d44954785d71456fbd134ebe90aa4af94c3f177.webp
+platinum-options,2024-12-03,,AAPL,,240,Dec 6,1.80,,,unknown,Side cut off at top of screenshot; entry only,0f9374ecde5863f6ec369667d14c884854f7eb10a357dff486d975b73f7400ec.webp
+platinum-options,2024-12-03,7:18 AM,QQQ,PUT,513,Dec 3,0.35,,,unknown,0DTE LOTTO; entry only,0f9374ecde5863f6ec369667d14c884854f7eb10a357dff486d975b73f7400ec.webp
+platinum-options,2025-02-06,7:15 AM,GAP,CALL,23.5,Feb 21,0.52,,,unknown,Entry only,169a1cdc1168aebb716efa63576cac355af83ab469aa40280cf3a5fcebf282e2.webp
+platinum-options,2025-02-06,11:56 AM,AFRM,CALL,65,Feb 7,2.58,,,unknown,CALL/er lotto; ER after hrs; entry only,169a1cdc1168aebb716efa63576cac355af83ab469aa40280cf3a5fcebf282e2.webp
+platinum-options,2025-03-19,10:52 AM,QQQ,CALL,480,Today,1.05,,60,closed,FOMC LOTTO 100% RISKY; update Up 40% then 60%; no absolute exit price,42071099bd7c04064a49c90c1b778a4a15d6bd49f4822e7578ac1275ac3ce617.webp
+platinum-options,2025-04-25,6:36 AM,TSLA,CALL,265,Today,1.90,,,unknown,0DTE LOTTO; entry only,c1d4b5c48d6ad09bbd392a581a8100fbe622cca8557637f8ebe66a0ecbc9786a.webp
+platinum-options,2025-05-15,6:41 AM,GOOGL,PUT,165,May 16,1.75,,,unknown,Entry only,5b966ecc8275a1dae33af7863b053bdcec252b5e3988b5b3bb5a124ad4f37016.webp
+platinum-options,2025-07-09,6:43 AM,U,CALL,30.5,Jul 11,0.72,,,unknown,Entry only,3a7e164dffa831ddc496bd3829920ecfa7e42970e83173b7dd528387191f3c8e.webp
+platinum-options,2025-07-09,8:11 AM,U,CALL,29.5,Jul 11,0.60,,,unknown,Second U call same day; entry only; time OCR ambiguous B.I1->8:11,3a7e164dffa831ddc496bd3829920ecfa7e42970e83173b7dd528387191f3c8e.webp
+platinum-options,2025-08-19,7:02 AM,AMD,PUT,170,Aug 22,3.20,,10,closed,Update 10%+; no absolute exit price,9464c480c2fc28fa9fd77851985d0aa9010ae3aceafbeac30466f12b03dd99b3.webp
+platinum-options,2025-08-19,7:02 AM,TSLA,CALL,350,Aug 29,4.25,,30,closed,Update 30%+; expiry OCR Aub->Aug; no absolute exit price,9464c480c2fc28fa9fd77851985d0aa9010ae3aceafbeac30466f12b03dd99b3.webp
+platinum-options,2025-08-19,8:16 AM,FSLR,PUT,200,Aug 29,2.25,,,unknown,Entry only; partially behind Jump To Present overlay,9464c480c2fc28fa9fd77851985d0aa9010ae3aceafbeac30466f12b03dd99b3.webp
+platinum-options,2025-10-02,12:55 PM,TSLA,PUT,450,Oct 3,2.30,,600,closed,600%+ Banger update; strike OCR sometimes 5450 corrected to 450 from vision context,373875ba1e6bb03d68e63a595907f9690fe21b6f60d365bc55158da42ad8b89c.webp
+platinum-options,2025-10-03,7:14 AM,TSLA,PUT,450,Oct 3,2.30,2100,1500,closed,Same contract update 1500%+; OCR $200 to $2100 (likely $20 to $210?); recorded as OCR showed with caveat in notes,373875ba1e6bb03d68e63a595907f9690fe21b6f60d365bc55158da42ad8b89c.webp
+platinum-options,2025-11-06,7:35 AM,AMD,PUT,240,Nov 7,1.80,4.90,,closed,$1.80 to $4.90; OCR misread exit as $490; vision confirms $4.90; also 200%+ ITM note,0370edb94ac511d4009eae041aca5a3d32c70b9ad8ea5020ad5eb14c83e10382.webp
+platinum-options,2025-11-25,6:30 AM,NVDA,CALL,180,Dec 5,3.25,,,unknown,Adding at 3.00 at 6:35; entry-focused; no exit,2d4bde66415cbf20391b82903b66160db40c5e4b87c4df5c6c5e20429729754c.webp
+platinum-options,2025-12-22,6:51 AM,TSLA,CALL,530,Dec 26,1.25,,,unknown,Entry only; Jump To Present overlay,53d223ef529752af38f76f41953c556c5e02c81e4c5baa3e2bb3d9a4b60b7347.webp
+platinum-options,2026-02-03,7:01 AM,NVDA,PUT,180,Feb 4,1.99,,75,closed,Update 75%; no absolute exit price,7833f98f307090d8c95c8fcc3bbdeb2f142ad2c4d805c557cf7e9ac3f14a5fb8.webp
+platinum-options,2026-03-05,7:54 AM,QQQ,CALL,610,March 6,3.50,3.90,,closed,Traded twice 3.30->3.65; sold runners at 3.90,edea63eee67cbbd7e9e03bde7b3715c6b1f522c2689d6afa6d5c8976a1c247ab.webp

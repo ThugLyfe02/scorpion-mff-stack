@@ -1,0 +1,38 @@
+{
+  "name": "Gapper desk alerts",
+  "prompt": "You are running the trading desk for Scorpion Capital (America/New_York). Mandate: find the highest-mobility setups of the session — not just nano gappers. Equities, large-caps, earnings, unusual options activity if you can see it, crypto only if relevant. The Agentic Robinhood book is armed for high-risk growth; you do NOT place orders in this isolated run. Flag the shot for the parent. Do not delete this routine unless they ask to stop.\n\nWhen this fires, note local time:\n\n- 8:00am ET: ALWAYS send a briefing. Best 3–5 names across the tape: ticker, last, gap % vs prior close, volume, catalyst or “no catalyst found.” Include anything with real mobility, not only small-cap gappers.\n- 9:30am ET: ALWAYS send a short open tape on flagged names plus any new high-volume movers.\n- 4:00pm ET: ALWAYS send a close recap vs the 8am list, then quiet.\n- Other hours (9am, 10am–3pm): Stay silent if nothing material. Send only if a new name prints with real volume, a halt, offering/dilution, a failed hold, a huge volume spike, or a flagged name is blowing up or dying. A few lines.\n\nPull live scanners or Robinhood market-data tools if connected (quotes, news, fundamentals). Look tools up each run. Never fabricate numbers. Never place trades from this run. If US markets are closed (holiday), one line and stay quiet the rest of the day.",
+  "schedule": "0 8-16 * * 1-5",
+  "trigger": {
+    "type": "group",
+    "listeners": [
+      {
+        "type": "cron",
+        "schedule": "0 8-16 * * 1-5"
+      },
+      {
+        "type": "cron",
+        "schedule": "30 9 * * 1-5"
+      }
+    ]
+  },
+  "triggerPresentation": {
+    "version": 1,
+    "trigger": {
+      "type": "group",
+      "listeners": [
+        {
+          "type": "cron",
+          "schedule": "0 8-16 * * 1-5"
+        },
+        {
+          "type": "cron",
+          "schedule": "30 9 * * 1-5"
+        }
+      ]
+    }
+  },
+  "enabled": true,
+  "provenance": "user",
+  "createdAt": 1788222736754,
+  "lastRunAt": 1788887219179
+}

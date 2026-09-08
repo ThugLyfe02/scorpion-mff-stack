@@ -1,0 +1,16 @@
+{
+  "name": "Weekday 7am premarket scan",
+  "prompt": "Weekday 7am ET US premarket board (America/New_York). Run the Ross-style small-cap gapper scan: price $2–$20, relative volume ≥5x average daily, float ≤20M, news preferred, gap vs prior close ≥10%. Four of five boxes is a pass; news is the skippable box (China/no-news ramps still make the board if the other four hit). Rank gap-and-go vs fade.\n\nDeliver a tight board to the user in this chat: ticker, last, gap %, PM volume, rvol vs ADV, float, boxes hit (e.g. 4/5 missed news), one-line catalyst or \"none found.\" Skip buyouts and unverified OTC. Never invent prices, volume, or float. If the market is closed for a holiday, say so in one line and stay otherwise quiet. If nothing hits 4/5, say none found.\n\nA one-line \"outside the box\" footnote is OK for liquid mega-cap earnings gappers the user already follows, but do not mix them into the Ross ranked list.",
+  "schedule": "0 7 * * 1-5",
+  "triggerPresentation": {
+    "version": 1,
+    "trigger": {
+      "type": "cron",
+      "schedule": "0 7 * * 1-5"
+    }
+  },
+  "enabled": true,
+  "provenance": "user",
+  "createdAt": 1788227459676,
+  "lastRunAt": 1788865733764
+}

@@ -1,0 +1,16 @@
+{
+  "name": "Discord arm 9:20",
+  "prompt": "CRITICAL Mon–Thu 9:20 ET (skip Fridays + market holidays). Watch LIVE by 9:25 sharp.\n\nMORNING PRIORITY LOCK: Until you have sent WATCH LIVE, Discord arm PREEMPTS all other chat — no AOUT postmortems, no strategy Q&A, no short-reminder novels, no CoS essays. Eyes first.\n\nORDER (hard):\n1) Discord tabs FIRST — high-confidence-options, options-king, etf-options, platinum-options. Target under 60 seconds. If 8:50 pre-open already left them open, verify only.\n2) Immediately tell user: WATCH LIVE — all 4 MFF channels open.\n3) ONLY THEN: quick Agentic L3 + BP; tell user ARMED with BP + ladder (1-lot pipe test first).\n\nNO CoS buy/sell gate. NO daily stop. Obey STOP/stand-down only.\nSIZE: first trade = 1 contract. Clean timing → king/etf/platinum $1500 (add $2250); high-confidence $3000 (add $4500). Max 2.\nENTRY min(ask, bid×1.15); skip >+25%. NEVER chase a closed trade.\nEXIT Discord close/trim/%/stop/sold runners → trim to 1 + BE or flatten last. Exit under ~10s priority.\nSKIP lotto + NKE. Report fills + slip + P&L + latency to CoS after.",
+  "schedule": "20 9 * * 1-4",
+  "triggerPresentation": {
+    "version": 1,
+    "trigger": {
+      "type": "cron",
+      "schedule": "20 9 * * 1-4"
+    }
+  },
+  "enabled": true,
+  "provenance": "untrusted",
+  "createdAt": 1788727371495,
+  "lastRunAt": 1788875786052
+}

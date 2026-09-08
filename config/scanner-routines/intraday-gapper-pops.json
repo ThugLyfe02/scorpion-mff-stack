@@ -1,0 +1,16 @@
+{
+  "name": "Intraday gapper pops",
+  "prompt": "Weekday US session watcher (America/New_York), premarket and RTH. Hunt NEW small/micro-cap pops using Ross-style boxes: price $2–$20, relative volume ≥5x average daily, float ≤20M, news preferred, gap or day change ≥10%. Four of five is a pass; news is skippable. Also ping material flips on names already on the board (held vs faded, new news). Rank go vs fade.\n\nDeliver a tight alert to the user in this chat: ticker, last, gap %, volume (note if PM-only), rvol, float, boxes hit, catalyst or \"none found.\" Skip buyouts. Never invent prices, volume, or float. Research and tape only — no orders, no P&L.\n\nStay quiet if nothing new versus the last board (no filler). Holiday closed: stay quiet. After 4pm ET cash close, only send if a name is still printing unusual extended-hours volume and still hits 4/5.",
+  "schedule": "*/30 8-15 * * 1-5",
+  "triggerPresentation": {
+    "version": 1,
+    "trigger": {
+      "type": "cron",
+      "schedule": "*/30 8-15 * * 1-5"
+    }
+  },
+  "enabled": true,
+  "provenance": "user",
+  "createdAt": 1788352123556,
+  "lastRunAt": 1788887339366
+}

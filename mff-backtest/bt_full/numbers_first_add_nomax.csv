@@ -1,0 +1,90 @@
+date,ticker,side,strike,expiry,channel,bid,pct,qty,avg,exit,added,pnl,book,R,outcome,notes
+2026-03-10,QQQ,put,610,2026-03-10,etf-options,0.95,200.0,33,0.8982,2.85,True,6441.0,11441.0,12.88,win_partial,33% closing runners; 100% 09:06; 200% 12:24
+2026-03-12,QQQ,call,600,2026-03-12,etf-options,1.3,23.08,24,1.2269,1.6,True,895.6,12336.6,1.79,win,Reentry moved fast; 10% ready-to-close 10:35; 1.30 -> 1.60 and all out 10:36; 4m latency
+2026-03-19,QQQ,call,592,2026-03-19,etf-options,2.05,7.0,14,1.9402,2.1935,True,354.65,12691.25,0.71,win_partial,Close at 7% 07:05; 12m latency
+2026-04-01,QQQ,call,585,2026-04-01,etf-options,1.5,225.0,20,1.4212,4.875,True,6907.5,19598.75,13.81,win_partial,Avg .80/new .85; 38% full close 07:04; .85 -> 2.10 / 165% 08:08; 225% 10:18
+2026-04-02,QQQ,call,577,2026-04-02,etf-options,1.01,1000.0,30,0.9544,11.11,True,30466.65,50065.4,60.93,win,76% 06:51; 200% 06:58; 400% 07:22; 1000% last runner 07:49
+2026-04-13,QQQ,put,609,2026-04-13,etf-options,1.85,20.0,16,1.7459,2.22,True,758.5,50823.9,1.52,win_partial,Close runners at 20% 06:46; 11m latency
+2026-05-13,SQQQ,call,43,2026-05-15,etf-options,1.05,45.0,30,0.9922,1.5225,True,1590.75,52414.65,3.18,win_partial,9% then 17%; 22% close 06:45; runners at 45% 07:08; 32m latency
+2026-05-13,ORCL,call,190,2026-05-15,options-king,2.9,65.0,10,2.726,4.785,True,2059.0,54473.65,4.12,win_partial,ORCL at 65%; close runners if still holding
+2026-05-14,NVDA,call,237.5,2026-05-15,options-king,1.3,95.0,24,1.2269,2.535,True,3139.5,57613.15,6.28,win_partial,1.30 -> 1.60 (27%) at 06:45; closed runners at 70%; later 2.20 / 95% update
+2026-05-14,NVDA,call,227.5,2026-05-15,options-king,2.6,211.54,11,2.4582,8.1,True,6206.04,63819.19,12.41,win,100%+ at 06:44; 2.60 -> 8.10 at 11:17
+2026-05-14,POET,call,10,2026-07-17,options-king,1.75,500.0,17,1.6574,10.5,True,15032.5,78851.69,30.06,win_partial,"POET 500% update; swing contract, runner outcome shown"
+2026-05-18,NKE,call,42.5,2026-06-18,options-king,1.4,375.0,22,1.3236,6.65,True,11718.0,90569.69,23.44,win_partial,13% half close at 06:46 (14m); 1.40 -> 5.00 / 375% on 05/28; runners
+2026-05-19,AAPL,call,300,2026-05-22,options-king,3.0,20.0,9,2.85,3.6,True,675.0,91244.69,1.35,win_partial,15% update at 06:41; 20% close at 06:50 (9m latency)
+2026-05-20,NOW,call,105,2026-05-29,options-king,2.55,63.1,11,2.4109,4.159,True,1922.95,93167.64,3.85,win_partial,Last runner 63% sold majority; screenshot showed 05/29 buy at 3.05 and +63.10%
+2026-05-21,NVDA,call,240,2026-05-29,options-king,0.95,7.0,33,0.8982,1.0165,True,390.45,93558.09,0.78,win_partial,7% close at 07:01; 8m same-morning latency
+2026-05-26,NOW,call,108,2026-06-18,options-king,3.25,100.0,9,3.0875,6.5,True,3071.25,96629.34,6.14,win,15% closed at 06:59; later 3.25 -> 6.25 and 100% close; runners reached 400%
+2026-05-27,NVDA,put,210,2026-05-27,options-king,0.95,100.0,33,0.8982,1.9,True,3306.0,99935.34,6.61,win,80% fully closed at 06:44; 100% banger at 07:20
+2026-05-28,SNOW,put,220,2026-05-29,options-king,2.9,-6.9,10,2.726,2.6999,True,-26.1,99909.24,-0.05,loss,Closed 2.70 at 06:39; not moving as expected; 5m rapid-loss latency
+2026-06-04,NVDA,call,215,2026-06-08,options-king,2.25,75.0,13,2.1202,3.9375,True,2362.5,102271.74,4.73,win_partial,18% close at 07:39; later 75% banger at 08:42
+2026-06-04,NVDA,call,215,2026-06-05,options-king,2.3,75.0,13,2.1673,4.025,True,2415.0,104686.74,4.83,win_partial,Avg 1.78; 2/2 printing; 75% banger update
+2026-06-08,NVDA,put,207.5,2026-06-10,options-king,2.75,12.0,11,2.6,3.08,True,528.0,105214.74,1.06,win_partial,Closed at 3.10 for 12% at 06:55 (20m); runners at 3.85
+2026-06-09,QQQ,put,720,2026-06-09,etf-options,2.16,1200.0,14,2.0443,28.08,True,36450.0,141664.74,72.9,win_partial,SL moved up quickly 06:47; runners 100% 07:14; 1200% banger 09:07
+2026-06-10,NVDA,call,207.5,2026-06-12,options-king,2.65,15.0,11,2.5055,3.0475,True,596.25,142260.99,1.19,win_partial,15% close at 07:25; 11m latency
+2026-06-11,ORCL,call,200,2026-07-17,options-king,5.0,100.0,6,4.75,10.0,True,3150.0,145410.99,6.3,win,18% partial update on 06/11; fully closed 06/15
+2026-06-15,QQQ,put,738,2026-06-15,etf-options,1.3,0.0,15,1.3,1.3,False,0.0,145410.99,0.0,scratch,PUT lotto; closed at breakeven 07:39; 5m latency
+2026-06-15,NVDA,call,220,2026-06-29,options-king,2.1,16.67,14,1.9875,2.4501,True,647.6,146058.59,1.3,win_partial,Partial close 2.10 -> 2.45 at 08:01; later banger updates
+2026-06-17,NVDA,call,210,2026-06-29,options-king,3.1,50.0,9,2.945,4.65,True,1534.5,147593.09,3.07,win_partial,3.10 -> 3.70 instant banger; later 3.10 -> 4.65 / 65% and PT50%+
+2026-06-22,QQQ,call,746,2026-06-22,etf-options,1.25,45.0,25,1.1825,1.8125,True,1575.0,149168.09,3.15,win_partial,"Added more at .90, new avg 1.10; 23% close 06:36; 45% runners 06:38; 7m latency"
+2026-06-24,GOOGL,call,355,2026-06-26,options-king,2.45,40.0,12,2.3275,3.43,True,1323.0,150491.09,2.65,win_partial,Avg 2.15; 5% close at 06:58; 40% cash at 07:06 (22m latency)
+2026-06-25,NOW,call,95,2026-07-10,options-king,2.5,350.0,12,2.375,11.25,True,10650.0,161141.09,21.3,win_partial,10% at 06:42; 20% close 07:09; 350% runners update on 06/29
+2026-06-29,TSLA,call,400,2026-07-01,options-king,2.9,100.0,10,2.726,5.8,True,3074.0,164215.09,6.15,win,35% half close at 06:48; 30% runners at 06:50; TSLA 100% at 07:33
+2026-06-30,QQQ,call,730,2026-06-30,etf-options,1.75,135.0,17,1.6574,4.1125,True,4173.75,168388.84,8.35,win_partial,75%+ close 06:36; 135% cashout 06:55; 1.75 -> 4.20 07:05
+2026-07-01,CRWV,call,91,2026-07-02,high-confidence-options,2.05,-25.0,14,1.9402,1.5375,True,-563.75,167825.09,-1.13,loss,Averaged at 1.70/1.45; explicit 1.25 SL at 07:22; ~40m latency
+2026-07-06,QQQ,call,723,2026-07-06,etf-options,2.0,100.0,15,1.9,4.0,True,3150.0,170975.09,6.3,win_partial,Closed 06:40; 30% 06:51; runners at 100% 08:32
+2026-07-06,TSLA,put,385,2026-07-08,options-king,2.99,-25.0,9,2.8405,2.2425,True,-538.2,170436.89,-1.08,loss,SL close at 06:46; 4m rapid-stop latency
+2026-07-06,NVDA,call,197.5,2026-07-08,options-king,1.95,71.15,16,1.8403,3.3374,True,2395.38,172832.27,4.79,win,20% close at 07:06; 71% close at 07/08 07:26; screenshot 1.95 -> 4.45
+2026-07-07,QQQ,put,708,2026-07-07,etf-options,1.4,20.0,22,1.3236,1.68,True,784.0,173616.27,1.57,win_partial,20% close 06:38; screenshot showed average 1.42; 2m latency
+2026-07-08,NVDA,call,200,2026-07-10,high-confidence-options,2.25,-25.0,13,2.1202,1.6875,True,-562.5,173053.77,-1.12,loss,Filled 2.30 at 08:03; explicit SL at 08:27; 26m latency
+2026-07-09,QQQ,call,724,2026-07-09,etf-options,1.3,20.0,24,1.2269,1.56,True,799.5,173853.27,1.6,win_partial,20% close 06:51; 3m latency
+2026-07-22,SPX,call,7530,2026-07-22,etf-options,2.55,50.0,11,2.4109,3.825,True,1555.5,175408.77,3.11,win_partial,30%+ 06:30 follow-up; 50% 09:19; same-day runner
+2026-07-22,NVDA,call,207.5,2026-07-22,high-confidence-options,1.15,650.0,27,1.0861,8.625,True,20355.0,195763.77,40.71,win,Filled 1.15 at 06:43; bought more 1.00; 60% then 100%; 450% 08:20 and 650% 09:18
+2026-07-23,SPY,call,743,2026-07-23,etf-options,1.2,35.0,25,1.1352,1.62,True,1212.0,196975.77,2.42,win_partial,10% close 06:37; 35% runners 06:43; 8m latency
+2026-07-23,TSLA,put,325,2026-07-24,options-king,2.0,235.0,15,1.9,6.7,True,7200.0,204175.77,14.4,win_partial,235%; later 450% if holding and 485% runner note
+2026-07-27,NVDA,put,205,2026-07-29,options-king,2.4,48.0,12,2.28,3.552,True,1526.4,205702.17,3.05,win,30% trim half; 48% closed full position
+2026-07-28,NVDA,call,195,2026-07-29,options-king,2.1,68.9,14,1.9875,3.5469,True,2183.16,207885.33,4.37,win,50%; 2.10 -> 3.55
+2026-07-29,SPY,put,736,2026-07-29,etf-options,1.8,300.0,17,1.7047,7.2,True,9342.0,217227.33,18.68,win_partial,20% trim 06:47; 65% fully closed 06:53; 125% 07:14; 300% 12:45
+2026-07-30,CRWV,call,75,2026-08-14,options-king,2.85,130.0,11,2.6945,6.555,True,4246.5,221473.83,8.49,win,130% close fully
+2026-08-03,SPCX,call,130,2026-08-14,options-king,3.3,55.0,9,3.135,5.115,True,1782.0,223255.83,3.56,win_partial,55% if still holding
+2026-08-04,SMCI,call,30,2026-08-28,options-king,2.9,300.0,10,2.726,11.6,True,8874.0,232129.83,17.75,win,2.90 -> 11.00; 300%+
+2026-08-05,QQQ,call,730,2026-08-05,etf-options,2.15,30.0,14,2.0348,2.795,True,1064.25,233194.08,2.13,win_partial,30% all out 06:40; 9m latency
+2026-08-05,MSFT,put,487.5,2026-08-05,high-confidence-options,1.0,0.0,20,1.0,1.0,False,0.0,233194.08,0.0,scratch,Premium not moving; closed no profit/no loss at 07:48; 8m latency
+2026-08-06,QQQ,call,713,2026-08-06,etf-options,2.13,46.0,14,2.0159,3.1098,True,1531.47,234725.55,3.06,win_partial,46% banger/close 06:36; 1m latency
+2026-08-06,SPY,call,772,2026-08-06,high-confidence-options,1.3,10.0,24,1.2269,1.43,True,487.5,235213.05,0.98,win_partial,10% at 06:52; added at 0.99 07:01; closed at 10% 07:02; 11m latency
+2026-08-06,SLV,call,58,2026-08-21,options-king,1.4,90.0,22,1.3236,2.66,True,2940.0,238153.05,5.88,win,Average 1.08/new 1.20; later 90% close
+2026-08-06,POET,call,9,2026-08-21,options-king,0.68,27.0,46,0.6423,0.8636,True,1017.96,239171.01,2.04,win_partial,27% close
+2026-08-10,NVDA,put,220,2026-08-12,options-king,1.65,30.0,19,1.5588,2.145,True,1113.75,240284.76,2.23,win_partial,9% close; 30% secure profits if holding
+2026-08-10,NVDA,call,225,2026-08-19,options-king,2.53,40.0,11,2.392,3.542,True,1265.0,241549.76,2.53,win_partial,Avg 1.99/new 2.20; 11% take profits; close runners at 40%
+2026-08-11,SPY,put,773,2026-08-11,etf-options,0.99,200.0,31,0.9373,2.97,True,6301.35,247851.11,12.6,win_partial,200% update 11:54; extended hold
+2026-08-13,QQQ,call,732,2026-08-13,etf-options,0.99,30.0,31,0.9373,1.287,True,1084.05,248935.16,2.17,win_partial,20% close 06:49; 30% sold remaining 06:52; rapid same-morning exit
+2026-08-13,NVDA,call,227.50,2026-08-17,options-king,1.99,18.0,15,1.8905,2.3482,True,686.55,249621.71,1.37,win_partial,Holding fully then 18% close
+2026-08-13,WDAY,put,205,2026-08-14,high-confidence-options,4.5,44.44,6,4.275,6.4998,True,1334.88,250956.59,2.67,win,Close screenshot at 12:11; 1m latency; later 45% banger note
+2026-08-17,TSLA,call,345,2026-08-19,options-king,2.3,30.43,13,2.1673,2.9999,True,1082.36,252038.95,2.16,win,24%; close at 2.65; runners at 3.00 closed fully
+2026-08-18,NVDA,call,230,2026-08-28,options-king,3.5,15.0,8,3.3031,4.025,True,577.5,252616.45,1.15,win_partial,10%; planning to close for 15%; added at 3.45
+2026-08-18,SPX,call,7710,2026-08-18,etf-options,1.3,-25.0,24,1.2269,0.975,True,-604.5,252011.95,-1.21,loss,SL at 11:03 (6m latency); later 1.30 -> 2.30 rebound if not stopped
+2026-08-18,QQQ,call,718,2026-08-19,etf-options,2.65,5.66,11,2.5055,2.8,True,323.99,252335.94,0.65,win_partial,Go-light swing; closed 2.80 at 11:35; 15m latency
+2026-08-19,QQQ,put,717,2026-08-19,etf-options,0.99,350.0,31,0.9373,4.455,True,10904.85,263240.79,21.81,win,85% close runners 06:40; 300% 06:53; 0.99 -> 4.50 at 07:16; 42m latency
+2026-08-19,NVDA,call,225,2026-08-28,options-king,3.8,19.0,8,3.5862,4.522,True,748.6,263989.39,1.5,win_partial,10% holding; 19% close half; later 34% still holding with stop at breakeven
+2026-08-20,QQQ,put,710,2026-08-20,etf-options,1.35,15.0,22,1.2764,1.5525,True,607.5,264596.89,1.21,win_partial,15% close at 07:03; 4m latency
+2026-08-20,SOXL,put,120,2026-08-21,high-confidence-options,2.67,25.0,11,2.5244,3.3375,True,894.45,265491.34,1.79,win_partial,Light position; 25% update at 11:11; 65m latency
+2026-08-24,NVDA,call,225,2026-08-28,options-king,2.15,-30.0,14,2.0348,1.505,True,-741.75,264749.59,-1.48,loss,Stop loss; out at -30%
+2026-08-24,QQQ,call,706,2026-08-24,etf-options,1.05,100.0,30,0.9922,2.1,True,3323.25,268072.84,6.65,win,Close at 15%; QQQ .95 -> 1.90 100%
+2026-08-25,QQQ,call,714,2026-08-25,etf-options,1.25,20.0,25,1.1825,1.5,True,793.75,268866.59,1.59,win_partial,Avg 1.10; close at 20%
+2026-08-25,QQQ,call,711,2026-08-25,high-confidence-options,0.73,25.0,43,0.6893,0.9125,True,959.95,269826.54,1.92,win_partial,Added at .57/.65; +12%; sold remaining calls at 25%
+2026-08-25,SPX,call,7670,2026-08-25,etf-options,1.8,110.0,17,1.7047,3.78,True,3528.0,273354.54,7.06,win,Trim 25%; 65%; then 110%
+2026-08-26,TSLA,call,360,2026-08-31,platinum-options,2.6,9.8,11,2.4582,2.8548,True,436.28,273790.82,0.87,win_partial,Loading; holding fully; 2.55 -> 2.80
+2026-08-26,QQQ,call,712,2026-08-26,etf-options,1.39,8.33,22,1.3142,1.5058,True,421.53,274212.35,0.84,win_partial,Avg 1.10/new 1.20; closed small profits; sold remaining runners 1.20 -> 1.30
+2026-08-27,QQQ,call,720,2026-08-27,etf-options,0.9,10.0,35,0.8499,0.99,True,490.5,274702.85,0.98,win_partial,Going heavy; avg .60; close 10%
+2026-08-27,NVDA,call,230,2026-08-31,platinum-options,1.4,17.0,22,1.3236,1.638,True,691.6,275394.45,1.38,win_partial,17%
+2026-08-27,TSLA,call,360,2026-08-31,platinum-options,2.6,28.78,11,2.4582,3.3483,True,979.11,276373.56,1.96,win_partial,Banger; screenshot showed today's return +28.78%
+2026-08-31,TSLA,call,360,2026-09-04,options-king,3.7,50.0,8,3.4919,5.55,True,1646.5,278020.06,3.29,win_partial,30%+ close; 50% closing runners
+2026-08-31,TSLL,call,10,2026-10-16,options-king,0.75,22.0,41,0.7088,0.915,True,845.25,278865.31,1.69,win_partial,10% closed half; 22% profits; stop at breakeven for runners
+2026-08-31,NVDA,put,210,2026-09-11,platinum-options,2.0,30.0,15,1.9,2.6,True,1050.0,279915.31,2.1,win_partial,In at 1.82; next-day print at opening 30%
+2026-08-31,TSLA,call,360,2026-08-31,platinum-options,2.6,100.0,11,2.4582,5.2,True,3016.0,282931.31,6.03,win,Tesla 100%+
+2026-09-01,QQQ,put,710,2026-09-01,etf-options,1.15,20.0,27,1.0861,1.38,True,793.5,283724.81,1.59,win_partial,15% take profits; 20% sold remaining
+2026-09-02,TSLA,call,355,2026-09-02,platinum-options,1.27,100.0,24,1.1986,2.54,True,3219.45,286944.26,6.44,win,30%; 50%; in the money 100%
+2026-09-02,QQQ,put,705,2026-09-02,etf-options,1.25,50.0,25,1.1825,1.875,True,1731.25,288675.51,3.46,win_partial,22%; 50% close runners
+2026-09-02,GOOGL,call,340,2026-09-09,options-king,3.05,100.0,9,2.8975,6.1,True,2882.25,291557.76,5.76,win,100% close posted 09/03
+2026-09-03,QQQ,call,712,2026-09-03,high-confidence-options,1.3,400.0,24,1.2269,6.5,True,12655.5,304213.26,25.31,win,"Added 06:32; updates 150%, 300%, 400%"
+2026-09-03,TSLA,call,390,2026-09-04,platinum-options,1.9,150.0,16,1.7931,4.75,True,4731.0,308944.26,9.46,win,50%; 100%+; 1.50 -> 3.75 150%

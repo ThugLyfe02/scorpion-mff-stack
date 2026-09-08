@@ -1,0 +1,302 @@
+{
+  "start_date": "2026-03-10",
+  "end_date": "2026-09-03",
+  "n_signals": 93,
+  "n_with_bars": 54,
+  "R": 500.0,
+  "start_book": 5000.0,
+  "note": "P&L is from tape fills only \u2014 Discord exit_pct is a TARGET label, not credited unless high/low prints it after entry. If target never prints, flatten at last bar / 0DTE 15:45 (can be a loss). Bars coverage: 54/93 trades have non-interpolated RTH 5m bars; older Mar\u2013Jul often missing on RH.",
+  "variants": {
+    "add15_multi": {
+      "variant": "add15_multi",
+      "start": 5000.0,
+      "end_book": 17210.16,
+      "total_pnl": 12210.16,
+      "n_taken": 13,
+      "n_skipped": 80,
+      "skip_reasons": {
+        "no_bars": 39,
+        "skip_no_bars_on_trade_date": 35,
+        "skip_no_fill_match": 6
+      },
+      "n_wins": 9,
+      "n_losses": 3,
+      "n_scratch": 1,
+      "win_rate": 0.6923,
+      "avg_R": 1.8785,
+      "best": 8067.45,
+      "worst": -2785.3,
+      "max_dd": 2785.3,
+      "monthly_pnl": {
+        "2026-08": 3091.31,
+        "2026-09": 9118.85
+      },
+      "losing_trades": [
+        {
+          "date": "2026-08-31",
+          "trade": "NVDA put 210",
+          "pnl": -2460.0,
+          "exit_reason": "eod_last_bar_flag",
+          "entry_fill": 2.0,
+          "discord_exit_pct": 30.0,
+          "added": true
+        },
+        {
+          "date": "2026-09-02",
+          "trade": "QQQ put 705",
+          "pnl": -2785.3,
+          "exit_reason": "0dte_1545",
+          "entry_fill": 1.22,
+          "discord_exit_pct": 50.0,
+          "added": true
+        },
+        {
+          "date": "2026-09-03",
+          "trade": "TSLA call 390",
+          "pnl": -488.0,
+          "exit_reason": "eod_last_bar_flag",
+          "entry_fill": 1.9,
+          "discord_exit_pct": 150.0,
+          "added": true
+        }
+      ]
+    },
+    "no_add_multi": {
+      "variant": "no_add_multi",
+      "start": 5000.0,
+      "end_book": 11017.5,
+      "total_pnl": 6017.5,
+      "n_taken": 13,
+      "n_skipped": 80,
+      "skip_reasons": {
+        "no_bars": 39,
+        "skip_no_bars_on_trade_date": 35,
+        "skip_no_fill_match": 6
+      },
+      "n_wins": 9,
+      "n_losses": 3,
+      "n_scratch": 1,
+      "win_rate": 0.6923,
+      "avg_R": 0.9258,
+      "best": 4205.0,
+      "worst": -1888.0,
+      "max_dd": 1888.0,
+      "monthly_pnl": {
+        "2026-08": 1044.0,
+        "2026-09": 4973.5
+      },
+      "losing_trades": [
+        {
+          "date": "2026-08-31",
+          "trade": "NVDA put 210",
+          "pnl": -1740.0,
+          "exit_reason": "eod_last_bar_flag",
+          "entry_fill": 2.0,
+          "discord_exit_pct": 30.0,
+          "added": false
+        },
+        {
+          "date": "2026-09-02",
+          "trade": "QQQ put 705",
+          "pnl": -1888.0,
+          "exit_reason": "0dte_1545",
+          "entry_fill": 1.22,
+          "discord_exit_pct": 50.0,
+          "added": false
+        },
+        {
+          "date": "2026-09-03",
+          "trade": "TSLA call 390",
+          "pnl": -470.0,
+          "exit_reason": "eod_last_bar_flag",
+          "entry_fill": 1.9,
+          "discord_exit_pct": 150.0,
+          "added": false
+        }
+      ]
+    },
+    "add15_max2": {
+      "variant": "add15_max2",
+      "start": 5000.0,
+      "end_book": 13620.1,
+      "total_pnl": 8620.1,
+      "n_taken": 8,
+      "n_skipped": 85,
+      "skip_reasons": {
+        "no_bars": 39,
+        "skip_no_bars_on_trade_date": 35,
+        "skip_no_fill_match": 6,
+        "max_concurrent": 5
+      },
+      "n_wins": 6,
+      "n_losses": 1,
+      "n_scratch": 1,
+      "win_rate": 0.75,
+      "avg_R": 2.155,
+      "best": 8067.45,
+      "worst": -2460.0,
+      "max_dd": 2460.0,
+      "monthly_pnl": {
+        "2026-08": -1499.8,
+        "2026-09": 10119.9
+      },
+      "losing_trades": [
+        {
+          "date": "2026-08-31",
+          "trade": "NVDA put 210",
+          "pnl": -2460.0,
+          "exit_reason": "eod_last_bar_flag",
+          "entry_fill": 2.0,
+          "discord_exit_pct": 30.0,
+          "added": true
+        }
+      ]
+    },
+    "no_add_max2": {
+      "variant": "no_add_max2",
+      "start": 5000.0,
+      "end_book": 10179.2,
+      "total_pnl": 5179.2,
+      "n_taken": 8,
+      "n_skipped": 85,
+      "skip_reasons": {
+        "no_bars": 39,
+        "skip_no_bars_on_trade_date": 35,
+        "skip_no_fill_match": 6,
+        "max_concurrent": 5
+      },
+      "n_wins": 6,
+      "n_losses": 1,
+      "n_scratch": 1,
+      "win_rate": 0.75,
+      "avg_R": 1.2948,
+      "best": 4205.0,
+      "worst": -1740.0,
+      "max_dd": 1740.0,
+      "monthly_pnl": {
+        "2026-08": -779.8,
+        "2026-09": 5959.0
+      },
+      "losing_trades": [
+        {
+          "date": "2026-08-31",
+          "trade": "NVDA put 210",
+          "pnl": -1740.0,
+          "exit_reason": "eod_last_bar_flag",
+          "entry_fill": 2.0,
+          "discord_exit_pct": 30.0,
+          "added": false
+        }
+      ]
+    },
+    "hard25_no_add_multi": {
+      "variant": "hard25_no_add_multi",
+      "start": 5000.0,
+      "end_book": 4433.2,
+      "total_pnl": -566.8,
+      "n_taken": 13,
+      "n_skipped": 80,
+      "skip_reasons": {
+        "no_bars": 39,
+        "skip_no_bars_on_trade_date": 35,
+        "skip_no_fill_match": 6
+      },
+      "n_wins": 5,
+      "n_losses": 7,
+      "n_scratch": 1,
+      "win_rate": 0.3846,
+      "avg_R": -0.0872,
+      "best": 1372.5,
+      "worst": -500.0,
+      "max_dd": 1142.8,
+      "monthly_pnl": {
+        "2026-08": -1142.8,
+        "2026-09": 576.0
+      },
+      "losing_trades": [
+        {
+          "date": "2026-08-27",
+          "trade": "QQQ call 720",
+          "pnl": -495.0,
+          "exit_reason": "hard_-25",
+          "entry_fill": 0.9,
+          "discord_exit_pct": 10.0,
+          "added": false
+        },
+        {
+          "date": "2026-08-27",
+          "trade": "TSLA call 360",
+          "pnl": -455.0,
+          "exit_reason": "hard_-25",
+          "entry_fill": 2.6,
+          "discord_exit_pct": 28.78,
+          "added": false
+        },
+        {
+          "date": "2026-08-31",
+          "trade": "NVDA put 210",
+          "pnl": -500.0,
+          "exit_reason": "hard_-25",
+          "entry_fill": 2.0,
+          "discord_exit_pct": 30.0,
+          "added": false
+        },
+        {
+          "date": "2026-08-31",
+          "trade": "TSLA call 360",
+          "pnl": -455.0,
+          "exit_reason": "hard_-25",
+          "entry_fill": 2.6,
+          "discord_exit_pct": 100.0,
+          "added": false
+        },
+        {
+          "date": "2026-09-02",
+          "trade": "QQQ put 705",
+          "pnl": -488.0,
+          "exit_reason": "hard_-25",
+          "entry_fill": 1.22,
+          "discord_exit_pct": 50.0,
+          "added": false
+        },
+        {
+          "date": "2026-09-03",
+          "trade": "QQQ call 712",
+          "pnl": -476.25,
+          "exit_reason": "hard_-25",
+          "entry_fill": 1.27,
+          "discord_exit_pct": 400.0,
+          "added": false
+        },
+        {
+          "date": "2026-09-03",
+          "trade": "TSLA call 390",
+          "pnl": -475.0,
+          "exit_reason": "hard_-25",
+          "entry_fill": 1.9,
+          "discord_exit_pct": 150.0,
+          "added": false
+        }
+      ]
+    }
+  },
+  "primary": "add15_multi / no_add_multi (all concurrent as posted); also max2_*",
+  "coverage": {
+    "n_signals": 93,
+    "n_with_any_bars_file": 54,
+    "skip_breakdown_add15_multi": {
+      "no_bars": 39,
+      "skip_no_bars_on_trade_date": 35,
+      "skip_no_fill_match": 6
+    },
+    "n_tape_taken_add15_multi": 13,
+    "note": "Most Mar\u2013early-Aug signals lack usable non-interpolated RTH 5m bars on the trade date in RH. Results below are the tape-resolvable subset only \u2014 NOT the full Discord ledger."
+  },
+  "fantasy_discord_pct_upper_bound": {
+    "description": "Naive $2000 * discord_exit_pct/100 on every signal with an exit_pct \u2014 NOT a real fill model. Shown only to contrast with tape P&L.",
+    "n_signals_with_exit_pct": 89,
+    "sum_pnl_usd": 191859.6,
+    "tape_add15_multi_pnl": 12210.16,
+    "gap_fantasy_minus_tape": 179649.44
+  }
+}

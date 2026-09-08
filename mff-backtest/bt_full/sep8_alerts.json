@@ -1,0 +1,57 @@
+{
+  "date": "2026-09-08",
+  "timezone_note": "Discord times shown (Pacific; approximately ET-3)",
+  "channels": [
+    {
+      "channel": "high-confidence-options",
+      "channel_id": "1448448931116748993",
+      "entries_today": [],
+      "notes": "No Sep 8 call/put posts observed; latest visible messages were Sep 3 old QQQ % posts and were ignored."
+    },
+    {
+      "channel": "options-king",
+      "channel_id": "968352649437126676",
+      "entries_today": [
+        {
+          "discord_time": "7:02 AM",
+          "side": "PUT",
+          "ticker": "NVDA",
+          "strike": "$227.5",
+          "expiry": "Sep 11",
+          "his_bid": "$2.63",
+          "stop_loss": "25%",
+          "followups": [
+            {"discord_time": "7:03 AM", "text": "2.65/2.70 premium moved fast"},
+            {"discord_time": "7:05 AM", "text": "19% close; stop loss on runners at breakeven"},
+            {"discord_time": "7:18 AM", "text": "Closing runners 19%+"}
+          ]
+        }
+      ]
+    },
+    {
+      "channel": "etf-options",
+      "channel_id": "1231301953972207667",
+      "entries_today": [
+        {
+          "discord_time": "6:50 AM",
+          "side": "CALL",
+          "ticker": "QQQ",
+          "strike": "$719",
+          "expiry": "TODAY (0DTE)",
+          "his_bid": "$1.01",
+          "stop_loss": "25%",
+          "followups": [
+            {"discord_time": "6:56 AM", "text": "Printing; close at 10%; Nice bounce"}
+          ]
+        }
+      ]
+    },
+    {
+      "channel": "platinum",
+      "channel_id": "946975031399972884",
+      "entries_today": [],
+      "notes": "No Sep 8 call/put posts observed; latest visible messages were Sep 3 old TSLA % posts and were ignored."
+    }
+  ],
+  "no_trades_placed": true
+}

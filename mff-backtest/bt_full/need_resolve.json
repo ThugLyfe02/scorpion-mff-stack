@@ -1,0 +1,996 @@
+[
+  {
+    "key": "QQQ|put|610.0000|2026-03-10",
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "610.0000",
+    "expiry": "2026-03-10",
+    "sample_date": "2026-03-10",
+    "instrument_id": null,
+    "trade_indices": [
+      0
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "QQQ|call|600.0000|2026-03-12",
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "600.0000",
+    "expiry": "2026-03-12",
+    "sample_date": "2026-03-12",
+    "instrument_id": null,
+    "trade_indices": [
+      1
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "QQQ|call|592.0000|2026-03-19",
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "592.0000",
+    "expiry": "2026-03-19",
+    "sample_date": "2026-03-19",
+    "instrument_id": null,
+    "trade_indices": [
+      2
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "QQQ|call|585.0000|2026-04-01",
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "585.0000",
+    "expiry": "2026-04-01",
+    "sample_date": "2026-04-01",
+    "instrument_id": null,
+    "trade_indices": [
+      3
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "QQQ|call|577.0000|2026-04-02",
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "577.0000",
+    "expiry": "2026-04-02",
+    "sample_date": "2026-04-02",
+    "instrument_id": null,
+    "trade_indices": [
+      4
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "QQQ|put|609.0000|2026-04-13",
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "609.0000",
+    "expiry": "2026-04-13",
+    "sample_date": "2026-04-13",
+    "instrument_id": null,
+    "trade_indices": [
+      5
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "SPY|call|712.0000|2026-04-21",
+    "ticker": "SPY",
+    "side": "call",
+    "strike": "712.0000",
+    "expiry": "2026-04-21",
+    "sample_date": "2026-04-21",
+    "instrument_id": null,
+    "trade_indices": [
+      6
+    ],
+    "state": "expired",
+    "chain_symbol": "SPY"
+  },
+  {
+    "key": "SQQQ|call|43.0000|2026-05-15",
+    "ticker": "SQQQ",
+    "side": "call",
+    "strike": "43.0000",
+    "expiry": "2026-05-15",
+    "sample_date": "2026-05-13",
+    "instrument_id": null,
+    "trade_indices": [
+      7
+    ],
+    "state": "expired",
+    "chain_symbol": "SQQQ"
+  },
+  {
+    "key": "ORCL|call|190.0000|2026-05-15",
+    "ticker": "ORCL",
+    "side": "call",
+    "strike": "190.0000",
+    "expiry": "2026-05-15",
+    "sample_date": "2026-05-13",
+    "instrument_id": null,
+    "trade_indices": [
+      8
+    ],
+    "state": "expired",
+    "chain_symbol": "ORCL"
+  },
+  {
+    "key": "NVDA|call|237.5000|2026-05-15",
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "237.5000",
+    "expiry": "2026-05-15",
+    "sample_date": "2026-05-14",
+    "instrument_id": null,
+    "trade_indices": [
+      9
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "NVDA|call|227.5000|2026-05-15",
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "227.5000",
+    "expiry": "2026-05-15",
+    "sample_date": "2026-05-14",
+    "instrument_id": null,
+    "trade_indices": [
+      10
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "POET|call|10.0000|2026-07-17",
+    "ticker": "POET",
+    "side": "call",
+    "strike": "10.0000",
+    "expiry": "2026-07-17",
+    "sample_date": "2026-05-14",
+    "instrument_id": null,
+    "trade_indices": [
+      11
+    ],
+    "state": "expired",
+    "chain_symbol": "POET"
+  },
+  {
+    "key": "NKE|call|42.5000|2026-06-18",
+    "ticker": "NKE",
+    "side": "call",
+    "strike": "42.5000",
+    "expiry": "2026-06-18",
+    "sample_date": "2026-05-18",
+    "instrument_id": null,
+    "trade_indices": [
+      12
+    ],
+    "state": "expired",
+    "chain_symbol": "NKE"
+  },
+  {
+    "key": "AAPL|call|300.0000|2026-05-22",
+    "ticker": "AAPL",
+    "side": "call",
+    "strike": "300.0000",
+    "expiry": "2026-05-22",
+    "sample_date": "2026-05-19",
+    "instrument_id": null,
+    "trade_indices": [
+      13
+    ],
+    "state": "expired",
+    "chain_symbol": "AAPL"
+  },
+  {
+    "key": "NOW|call|105.0000|2026-05-29",
+    "ticker": "NOW",
+    "side": "call",
+    "strike": "105.0000",
+    "expiry": "2026-05-29",
+    "sample_date": "2026-05-20",
+    "instrument_id": null,
+    "trade_indices": [
+      14
+    ],
+    "state": "expired",
+    "chain_symbol": "NOW"
+  },
+  {
+    "key": "NVDA|call|240.0000|2026-05-29",
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "240.0000",
+    "expiry": "2026-05-29",
+    "sample_date": "2026-05-21",
+    "instrument_id": null,
+    "trade_indices": [
+      15
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "NOW|call|108.0000|2026-06-18",
+    "ticker": "NOW",
+    "side": "call",
+    "strike": "108.0000",
+    "expiry": "2026-06-18",
+    "sample_date": "2026-05-26",
+    "instrument_id": null,
+    "trade_indices": [
+      16
+    ],
+    "state": "expired",
+    "chain_symbol": "NOW"
+  },
+  {
+    "key": "NVDA|put|210.0000|2026-05-27",
+    "ticker": "NVDA",
+    "side": "put",
+    "strike": "210.0000",
+    "expiry": "2026-05-27",
+    "sample_date": "2026-05-27",
+    "instrument_id": null,
+    "trade_indices": [
+      17
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "SNOW|put|220.0000|2026-05-29",
+    "ticker": "SNOW",
+    "side": "put",
+    "strike": "220.0000",
+    "expiry": "2026-05-29",
+    "sample_date": "2026-05-28",
+    "instrument_id": null,
+    "trade_indices": [
+      18
+    ],
+    "state": "expired",
+    "chain_symbol": "SNOW"
+  },
+  {
+    "key": "NVDA|call|215.0000|2026-06-08",
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "215.0000",
+    "expiry": "2026-06-08",
+    "sample_date": "2026-06-04",
+    "instrument_id": null,
+    "trade_indices": [
+      19
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "NVDA|call|215.0000|2026-06-05",
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "215.0000",
+    "expiry": "2026-06-05",
+    "sample_date": "2026-06-04",
+    "instrument_id": null,
+    "trade_indices": [
+      20
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "NVDA|put|207.5000|2026-06-10",
+    "ticker": "NVDA",
+    "side": "put",
+    "strike": "207.5000",
+    "expiry": "2026-06-10",
+    "sample_date": "2026-06-08",
+    "instrument_id": null,
+    "trade_indices": [
+      21
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "QQQ|put|720.0000|2026-06-09",
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "720.0000",
+    "expiry": "2026-06-09",
+    "sample_date": "2026-06-09",
+    "instrument_id": null,
+    "trade_indices": [
+      22
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "NVDA|call|207.5000|2026-06-12",
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "207.5000",
+    "expiry": "2026-06-12",
+    "sample_date": "2026-06-10",
+    "instrument_id": null,
+    "trade_indices": [
+      23
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "ORCL|call|200.0000|2026-07-17",
+    "ticker": "ORCL",
+    "side": "call",
+    "strike": "200.0000",
+    "expiry": "2026-07-17",
+    "sample_date": "2026-06-11",
+    "instrument_id": null,
+    "trade_indices": [
+      24
+    ],
+    "state": "expired",
+    "chain_symbol": "ORCL"
+  },
+  {
+    "key": "QQQ|put|738.0000|2026-06-15",
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "738.0000",
+    "expiry": "2026-06-15",
+    "sample_date": "2026-06-15",
+    "instrument_id": null,
+    "trade_indices": [
+      25
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "NVDA|call|220.0000|2026-06-29",
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "220.0000",
+    "expiry": "2026-06-29",
+    "sample_date": "2026-06-15",
+    "instrument_id": null,
+    "trade_indices": [
+      26
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "NVDA|call|210.0000|2026-06-29",
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "210.0000",
+    "expiry": "2026-06-29",
+    "sample_date": "2026-06-17",
+    "instrument_id": null,
+    "trade_indices": [
+      27
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "QQQ|call|746.0000|2026-06-22",
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "746.0000",
+    "expiry": "2026-06-22",
+    "sample_date": "2026-06-22",
+    "instrument_id": null,
+    "trade_indices": [
+      28
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "GOOGL|call|355.0000|2026-06-26",
+    "ticker": "GOOGL",
+    "side": "call",
+    "strike": "355.0000",
+    "expiry": "2026-06-26",
+    "sample_date": "2026-06-24",
+    "instrument_id": null,
+    "trade_indices": [
+      29
+    ],
+    "state": "expired",
+    "chain_symbol": "GOOGL"
+  },
+  {
+    "key": "NOW|call|95.0000|2026-07-10",
+    "ticker": "NOW",
+    "side": "call",
+    "strike": "95.0000",
+    "expiry": "2026-07-10",
+    "sample_date": "2026-06-25",
+    "instrument_id": null,
+    "trade_indices": [
+      30
+    ],
+    "state": "expired",
+    "chain_symbol": "NOW"
+  },
+  {
+    "key": "TSLA|call|400.0000|2026-07-01",
+    "ticker": "TSLA",
+    "side": "call",
+    "strike": "400.0000",
+    "expiry": "2026-07-01",
+    "sample_date": "2026-06-29",
+    "instrument_id": null,
+    "trade_indices": [
+      31
+    ],
+    "state": "expired",
+    "chain_symbol": "TSLA"
+  },
+  {
+    "key": "QQQ|call|730.0000|2026-06-30",
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "730.0000",
+    "expiry": "2026-06-30",
+    "sample_date": "2026-06-30",
+    "instrument_id": null,
+    "trade_indices": [
+      32
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "CRWV|call|91.0000|2026-07-02",
+    "ticker": "CRWV",
+    "side": "call",
+    "strike": "91.0000",
+    "expiry": "2026-07-02",
+    "sample_date": "2026-07-01",
+    "instrument_id": null,
+    "trade_indices": [
+      33
+    ],
+    "state": "expired",
+    "chain_symbol": "CRWV"
+  },
+  {
+    "key": "QQQ|call|723.0000|2026-07-06",
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "723.0000",
+    "expiry": "2026-07-06",
+    "sample_date": "2026-07-06",
+    "instrument_id": null,
+    "trade_indices": [
+      34
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "TSLA|put|385.0000|2026-07-08",
+    "ticker": "TSLA",
+    "side": "put",
+    "strike": "385.0000",
+    "expiry": "2026-07-08",
+    "sample_date": "2026-07-06",
+    "instrument_id": null,
+    "trade_indices": [
+      35
+    ],
+    "state": "expired",
+    "chain_symbol": "TSLA"
+  },
+  {
+    "key": "NVDA|call|197.5000|2026-07-08",
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "197.5000",
+    "expiry": "2026-07-08",
+    "sample_date": "2026-07-06",
+    "instrument_id": null,
+    "trade_indices": [
+      36
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "QQQ|put|708.0000|2026-07-07",
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "708.0000",
+    "expiry": "2026-07-07",
+    "sample_date": "2026-07-07",
+    "instrument_id": null,
+    "trade_indices": [
+      37
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "NVDA|call|200.0000|2026-07-10",
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "200.0000",
+    "expiry": "2026-07-10",
+    "sample_date": "2026-07-08",
+    "instrument_id": null,
+    "trade_indices": [
+      38
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "QQQ|call|724.0000|2026-07-09",
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "724.0000",
+    "expiry": "2026-07-09",
+    "sample_date": "2026-07-09",
+    "instrument_id": null,
+    "trade_indices": [
+      39
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "SPX|call|7530.0000|2026-07-22",
+    "ticker": "SPX",
+    "side": "call",
+    "strike": "7530.0000",
+    "expiry": "2026-07-22",
+    "sample_date": "2026-07-22",
+    "instrument_id": null,
+    "trade_indices": [
+      40
+    ],
+    "state": "expired",
+    "chain_symbol": "SPXW"
+  },
+  {
+    "key": "NVDA|call|207.5000|2026-07-22",
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "207.5000",
+    "expiry": "2026-07-22",
+    "sample_date": "2026-07-22",
+    "instrument_id": null,
+    "trade_indices": [
+      41
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "SPY|call|743.0000|2026-07-23",
+    "ticker": "SPY",
+    "side": "call",
+    "strike": "743.0000",
+    "expiry": "2026-07-23",
+    "sample_date": "2026-07-23",
+    "instrument_id": null,
+    "trade_indices": [
+      42
+    ],
+    "state": "expired",
+    "chain_symbol": "SPY"
+  },
+  {
+    "key": "TSLA|put|325.0000|2026-07-24",
+    "ticker": "TSLA",
+    "side": "put",
+    "strike": "325.0000",
+    "expiry": "2026-07-24",
+    "sample_date": "2026-07-23",
+    "instrument_id": null,
+    "trade_indices": [
+      43
+    ],
+    "state": "expired",
+    "chain_symbol": "TSLA"
+  },
+  {
+    "key": "NVDA|put|205.0000|2026-07-29",
+    "ticker": "NVDA",
+    "side": "put",
+    "strike": "205.0000",
+    "expiry": "2026-07-29",
+    "sample_date": "2026-07-27",
+    "instrument_id": null,
+    "trade_indices": [
+      44
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "NVDA|call|195.0000|2026-07-29",
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "195.0000",
+    "expiry": "2026-07-29",
+    "sample_date": "2026-07-28",
+    "instrument_id": null,
+    "trade_indices": [
+      45
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "SPY|put|736.0000|2026-07-29",
+    "ticker": "SPY",
+    "side": "put",
+    "strike": "736.0000",
+    "expiry": "2026-07-29",
+    "sample_date": "2026-07-29",
+    "instrument_id": null,
+    "trade_indices": [
+      46
+    ],
+    "state": "expired",
+    "chain_symbol": "SPY"
+  },
+  {
+    "key": "CRWV|call|75.0000|2026-08-14",
+    "ticker": "CRWV",
+    "side": "call",
+    "strike": "75.0000",
+    "expiry": "2026-08-14",
+    "sample_date": "2026-07-30",
+    "instrument_id": null,
+    "trade_indices": [
+      47
+    ],
+    "state": "expired",
+    "chain_symbol": "CRWV"
+  },
+  {
+    "key": "SPCX|call|130.0000|2026-08-14",
+    "ticker": "SPCX",
+    "side": "call",
+    "strike": "130.0000",
+    "expiry": "2026-08-14",
+    "sample_date": "2026-08-03",
+    "instrument_id": null,
+    "trade_indices": [
+      48
+    ],
+    "state": "expired",
+    "chain_symbol": "SPCX"
+  },
+  {
+    "key": "SMCI|call|30.0000|2026-08-28",
+    "ticker": "SMCI",
+    "side": "call",
+    "strike": "30.0000",
+    "expiry": "2026-08-28",
+    "sample_date": "2026-08-04",
+    "instrument_id": null,
+    "trade_indices": [
+      49
+    ],
+    "state": "expired",
+    "chain_symbol": "SMCI"
+  },
+  {
+    "key": "QQQ|call|730.0000|2026-08-05",
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "730.0000",
+    "expiry": "2026-08-05",
+    "sample_date": "2026-08-05",
+    "instrument_id": null,
+    "trade_indices": [
+      50
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "MSFT|put|487.5000|2026-08-05",
+    "ticker": "MSFT",
+    "side": "put",
+    "strike": "487.5000",
+    "expiry": "2026-08-05",
+    "sample_date": "2026-08-05",
+    "instrument_id": null,
+    "trade_indices": [
+      51
+    ],
+    "state": "expired",
+    "chain_symbol": "MSFT"
+  },
+  {
+    "key": "QQQ|call|713.0000|2026-08-06",
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "713.0000",
+    "expiry": "2026-08-06",
+    "sample_date": "2026-08-06",
+    "instrument_id": null,
+    "trade_indices": [
+      52
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "SPY|call|772.0000|2026-08-06",
+    "ticker": "SPY",
+    "side": "call",
+    "strike": "772.0000",
+    "expiry": "2026-08-06",
+    "sample_date": "2026-08-06",
+    "instrument_id": null,
+    "trade_indices": [
+      53
+    ],
+    "state": "expired",
+    "chain_symbol": "SPY"
+  },
+  {
+    "key": "SLV|call|58.0000|2026-08-21",
+    "ticker": "SLV",
+    "side": "call",
+    "strike": "58.0000",
+    "expiry": "2026-08-21",
+    "sample_date": "2026-08-06",
+    "instrument_id": null,
+    "trade_indices": [
+      54
+    ],
+    "state": "expired",
+    "chain_symbol": "SLV"
+  },
+  {
+    "key": "POET|call|9.0000|2026-08-21",
+    "ticker": "POET",
+    "side": "call",
+    "strike": "9.0000",
+    "expiry": "2026-08-21",
+    "sample_date": "2026-08-06",
+    "instrument_id": null,
+    "trade_indices": [
+      55
+    ],
+    "state": "expired",
+    "chain_symbol": "POET"
+  },
+  {
+    "key": "NVDA|put|220.0000|2026-08-12",
+    "ticker": "NVDA",
+    "side": "put",
+    "strike": "220.0000",
+    "expiry": "2026-08-12",
+    "sample_date": "2026-08-10",
+    "instrument_id": null,
+    "trade_indices": [
+      56
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "NVDA|call|225.0000|2026-08-19",
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "225.0000",
+    "expiry": "2026-08-19",
+    "sample_date": "2026-08-10",
+    "instrument_id": null,
+    "trade_indices": [
+      57
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "SPY|put|773.0000|2026-08-11",
+    "ticker": "SPY",
+    "side": "put",
+    "strike": "773.0000",
+    "expiry": "2026-08-11",
+    "sample_date": "2026-08-11",
+    "instrument_id": null,
+    "trade_indices": [
+      58
+    ],
+    "state": "expired",
+    "chain_symbol": "SPY"
+  },
+  {
+    "key": "QQQ|put|724.0000|2026-08-12",
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "724.0000",
+    "expiry": "2026-08-12",
+    "sample_date": "2026-08-12",
+    "instrument_id": null,
+    "trade_indices": [
+      59
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "QQQ|call|732.0000|2026-08-13",
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "732.0000",
+    "expiry": "2026-08-13",
+    "sample_date": "2026-08-13",
+    "instrument_id": null,
+    "trade_indices": [
+      60
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "NVDA|call|227.5000|2026-08-17",
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "227.5000",
+    "expiry": "2026-08-17",
+    "sample_date": "2026-08-13",
+    "instrument_id": null,
+    "trade_indices": [
+      61
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "WDAY|put|205.0000|2026-08-14",
+    "ticker": "WDAY",
+    "side": "put",
+    "strike": "205.0000",
+    "expiry": "2026-08-14",
+    "sample_date": "2026-08-13",
+    "instrument_id": null,
+    "trade_indices": [
+      62
+    ],
+    "state": "expired",
+    "chain_symbol": "WDAY"
+  },
+  {
+    "key": "TSLA|call|345.0000|2026-08-19",
+    "ticker": "TSLA",
+    "side": "call",
+    "strike": "345.0000",
+    "expiry": "2026-08-19",
+    "sample_date": "2026-08-17",
+    "instrument_id": null,
+    "trade_indices": [
+      63
+    ],
+    "state": "expired",
+    "chain_symbol": "TSLA"
+  },
+  {
+    "key": "NVDA|call|230.0000|2026-08-28",
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "230.0000",
+    "expiry": "2026-08-28",
+    "sample_date": "2026-08-18",
+    "instrument_id": null,
+    "trade_indices": [
+      64
+    ],
+    "state": "expired",
+    "chain_symbol": "NVDA"
+  },
+  {
+    "key": "SPX|call|7710.0000|2026-08-18",
+    "ticker": "SPX",
+    "side": "call",
+    "strike": "7710.0000",
+    "expiry": "2026-08-18",
+    "sample_date": "2026-08-18",
+    "instrument_id": null,
+    "trade_indices": [
+      65
+    ],
+    "state": "expired",
+    "chain_symbol": "SPXW"
+  },
+  {
+    "key": "QQQ|call|718.0000|2026-08-19",
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "718.0000",
+    "expiry": "2026-08-19",
+    "sample_date": "2026-08-18",
+    "instrument_id": null,
+    "trade_indices": [
+      66
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "QQQ|put|717.0000|2026-08-19",
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "717.0000",
+    "expiry": "2026-08-19",
+    "sample_date": "2026-08-19",
+    "instrument_id": null,
+    "trade_indices": [
+      67
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "AAPL|call|320.0000|2026-08-21",
+    "ticker": "AAPL",
+    "side": "call",
+    "strike": "320.0000",
+    "expiry": "2026-08-21",
+    "sample_date": "2026-08-20",
+    "instrument_id": null,
+    "trade_indices": [
+      69
+    ],
+    "state": "expired",
+    "chain_symbol": "AAPL"
+  },
+  {
+    "key": "QQQ|put|710.0000|2026-08-20",
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "710.0000",
+    "expiry": "2026-08-20",
+    "sample_date": "2026-08-20",
+    "instrument_id": null,
+    "trade_indices": [
+      70
+    ],
+    "state": "expired",
+    "chain_symbol": "QQQ"
+  },
+  {
+    "key": "SOXL|put|120.0000|2026-08-21",
+    "ticker": "SOXL",
+    "side": "put",
+    "strike": "120.0000",
+    "expiry": "2026-08-21",
+    "sample_date": "2026-08-20",
+    "instrument_id": null,
+    "trade_indices": [
+      71
+    ],
+    "state": "expired",
+    "chain_symbol": "SOXL"
+  }
+]

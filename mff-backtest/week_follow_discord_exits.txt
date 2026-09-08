@@ -1,0 +1,39 @@
+**QQQ 710P** · 15% then 20%
+Buy Tue 10:40 @ $1.17 × 10 ($1170) · dipped -56% first hour — held
+  → sell 5 @ $1.47 (+26%) $+150
+  → sell 5 @ $1.47 (+26%) $+150
+  **clip $+300** · book $5,300
+
+**QQQ 705P** · 22% then runners ~+34%
+Buy Wed 9:30 @ $1.22 × 9 ($1098) · dipped -66% first hour — held
+  → sell 4 @ $1.49 (+22%) $+107
+  → sell 4 @ $1.63 (+34%) $+166
+  → flatten leftover @ $1.13 $-9
+  **clip $+264** · book $5,564
+
+**TSLA 355C** · half +50% / rest +100%
+Buy Wed 9:40 @ $1.27 × 9 ($1143) · dipped -29% first hour — held
+  → sell 4 @ $1.91 (+50%) $+254
+  → sell 4 @ $2.54 (+100%) $+508
+  → flatten leftover @ $2.66 $+139
+  **clip $+901** · book $6,465
+
+**GOOGL 340C** · +100% flat
+Buy Wed 9:50 @ $3.05 × 3 ($915) · dipped -15% first hour — held
+  → sell 3 @ $6.10 (+100%) $+915
+  **clip $+915** · book $7,380
+
+**QQQ 712C** · half +150% / rest +400%
+Buy Thu 9:30 @ $1.27 × 9 ($1143) · dipped -35% first hour — held
+  → sell 4 @ $3.17 (+150%) $+762
+  → sell 4 @ $6.35 (+400%) $+2032
+  → flatten leftover @ $6.67 $+540
+  **clip $+3334** · book $10,714
+
+**TSLA 390C** · half +50% / rest @ 3.75
+Buy Thu 9:40 @ $1.90 × 6 ($1140) · dipped -41% first hour — held
+  → sell 3 @ $2.96 (+56%) $+318
+  → sell 3 @ $3.75 (+97%) $+555
+  **clip $+873** · book $11,587
+
+NET $+6587 END $11587

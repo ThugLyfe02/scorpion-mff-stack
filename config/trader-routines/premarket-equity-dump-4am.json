@@ -1,0 +1,16 @@
+{
+  "name": "Premarket equity dump 4am",
+  "prompt": "Weekdays 4:00 ET (true premarket). NEVER gate equity dumps to the 9:20/9:25 MFF Discord arm.\n\n1) Check memory / standing CoS or user orders for any equity dump (e.g. flatten X shares of TICKER at live bid).\n2) If NO dump is ordered: stay quiet and exit — do not message.\n3) If a dump IS ordered: sell on Agentic at live bid immediately (even at $1 unless halt or absurdly wide — then ping CoS/user and wait). Report fill after. Standing rule: do not hold microcaps over weekends.\n4) Do not open Discord. Do not run MFF checklist. Equity dump only.",
+  "schedule": "0 4 * * 1-5",
+  "triggerPresentation": {
+    "version": 1,
+    "trigger": {
+      "type": "cron",
+      "schedule": "0 4 * * 1-5"
+    }
+  },
+  "enabled": true,
+  "provenance": "untrusted",
+  "createdAt": 1788879931798,
+  "lastRunAt": null
+}

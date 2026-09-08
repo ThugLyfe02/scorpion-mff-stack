@@ -1,0 +1,632 @@
+[
+  {
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "610",
+    "expiry": "2026-03-10",
+    "sample_date": "2026-03-10"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "600",
+    "expiry": "2026-03-12",
+    "sample_date": "2026-03-12"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "592",
+    "expiry": "2026-03-19",
+    "sample_date": "2026-03-19"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "585",
+    "expiry": "2026-04-01",
+    "sample_date": "2026-04-01"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "577",
+    "expiry": "2026-04-02",
+    "sample_date": "2026-04-02"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "609",
+    "expiry": "2026-04-13",
+    "sample_date": "2026-04-13"
+  },
+  {
+    "ticker": "SPY",
+    "side": "call",
+    "strike": "712",
+    "expiry": "2026-04-21",
+    "sample_date": "2026-04-21"
+  },
+  {
+    "ticker": "SQQQ",
+    "side": "call",
+    "strike": "43",
+    "expiry": "2026-05-15",
+    "sample_date": "2026-05-13"
+  },
+  {
+    "ticker": "ORCL",
+    "side": "call",
+    "strike": "190",
+    "expiry": "2026-05-15",
+    "sample_date": "2026-05-13"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "237.5",
+    "expiry": "2026-05-15",
+    "sample_date": "2026-05-14"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "227.5",
+    "expiry": "2026-05-15",
+    "sample_date": "2026-05-14"
+  },
+  {
+    "ticker": "POET",
+    "side": "call",
+    "strike": "10",
+    "expiry": "2026-07-17",
+    "sample_date": "2026-05-14"
+  },
+  {
+    "ticker": "NKE",
+    "side": "call",
+    "strike": "42.5",
+    "expiry": "2026-06-18",
+    "sample_date": "2026-05-18"
+  },
+  {
+    "ticker": "AAPL",
+    "side": "call",
+    "strike": "300",
+    "expiry": "2026-05-22",
+    "sample_date": "2026-05-19"
+  },
+  {
+    "ticker": "NOW",
+    "side": "call",
+    "strike": "105",
+    "expiry": "2026-05-29",
+    "sample_date": "2026-05-20"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "240",
+    "expiry": "2026-05-29",
+    "sample_date": "2026-05-21"
+  },
+  {
+    "ticker": "NOW",
+    "side": "call",
+    "strike": "108",
+    "expiry": "2026-06-18",
+    "sample_date": "2026-05-26"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "put",
+    "strike": "210",
+    "expiry": "2026-05-27",
+    "sample_date": "2026-05-27"
+  },
+  {
+    "ticker": "SNOW",
+    "side": "put",
+    "strike": "220",
+    "expiry": "2026-05-29",
+    "sample_date": "2026-05-28"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "215",
+    "expiry": "2026-06-08",
+    "sample_date": "2026-06-04"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "215",
+    "expiry": "2026-06-05",
+    "sample_date": "2026-06-04"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "put",
+    "strike": "207.5",
+    "expiry": "2026-06-10",
+    "sample_date": "2026-06-08"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "720",
+    "expiry": "2026-06-09",
+    "sample_date": "2026-06-09"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "207.5",
+    "expiry": "2026-06-12",
+    "sample_date": "2026-06-10"
+  },
+  {
+    "ticker": "ORCL",
+    "side": "call",
+    "strike": "200",
+    "expiry": "2026-07-17",
+    "sample_date": "2026-06-11"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "738",
+    "expiry": "2026-06-15",
+    "sample_date": "2026-06-15"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "220",
+    "expiry": "2026-06-29",
+    "sample_date": "2026-06-15"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "210",
+    "expiry": "2026-06-29",
+    "sample_date": "2026-06-17"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "746",
+    "expiry": "2026-06-22",
+    "sample_date": "2026-06-22"
+  },
+  {
+    "ticker": "GOOGL",
+    "side": "call",
+    "strike": "355",
+    "expiry": "2026-06-26",
+    "sample_date": "2026-06-24"
+  },
+  {
+    "ticker": "NOW",
+    "side": "call",
+    "strike": "95",
+    "expiry": "2026-07-10",
+    "sample_date": "2026-06-25"
+  },
+  {
+    "ticker": "TSLA",
+    "side": "call",
+    "strike": "400",
+    "expiry": "2026-07-01",
+    "sample_date": "2026-06-29"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "730",
+    "expiry": "2026-06-30",
+    "sample_date": "2026-06-30"
+  },
+  {
+    "ticker": "CRWV",
+    "side": "call",
+    "strike": "91",
+    "expiry": "2026-07-02",
+    "sample_date": "2026-07-01"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "723",
+    "expiry": "2026-07-06",
+    "sample_date": "2026-07-06"
+  },
+  {
+    "ticker": "TSLA",
+    "side": "put",
+    "strike": "385",
+    "expiry": "2026-07-08",
+    "sample_date": "2026-07-06"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "197.5",
+    "expiry": "2026-07-08",
+    "sample_date": "2026-07-06"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "708",
+    "expiry": "2026-07-07",
+    "sample_date": "2026-07-07"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "200",
+    "expiry": "2026-07-10",
+    "sample_date": "2026-07-08"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "724",
+    "expiry": "2026-07-09",
+    "sample_date": "2026-07-09"
+  },
+  {
+    "ticker": "SPX",
+    "side": "call",
+    "strike": "7530",
+    "expiry": "2026-07-22",
+    "sample_date": "2026-07-22"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "207.5",
+    "expiry": "2026-07-22",
+    "sample_date": "2026-07-22"
+  },
+  {
+    "ticker": "SPY",
+    "side": "call",
+    "strike": "743",
+    "expiry": "2026-07-23",
+    "sample_date": "2026-07-23"
+  },
+  {
+    "ticker": "TSLA",
+    "side": "put",
+    "strike": "325",
+    "expiry": "2026-07-24",
+    "sample_date": "2026-07-23"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "put",
+    "strike": "205",
+    "expiry": "2026-07-29",
+    "sample_date": "2026-07-27"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "195",
+    "expiry": "2026-07-29",
+    "sample_date": "2026-07-28"
+  },
+  {
+    "ticker": "SPY",
+    "side": "put",
+    "strike": "736",
+    "expiry": "2026-07-29",
+    "sample_date": "2026-07-29"
+  },
+  {
+    "ticker": "CRWV",
+    "side": "call",
+    "strike": "75",
+    "expiry": "2026-08-14",
+    "sample_date": "2026-07-30"
+  },
+  {
+    "ticker": "SPCX",
+    "side": "call",
+    "strike": "130",
+    "expiry": "2026-08-14",
+    "sample_date": "2026-08-03"
+  },
+  {
+    "ticker": "SMCI",
+    "side": "call",
+    "strike": "30",
+    "expiry": "2026-08-28",
+    "sample_date": "2026-08-04"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "730",
+    "expiry": "2026-08-05",
+    "sample_date": "2026-08-05"
+  },
+  {
+    "ticker": "MSFT",
+    "side": "put",
+    "strike": "487.5",
+    "expiry": "2026-08-05",
+    "sample_date": "2026-08-05"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "713",
+    "expiry": "2026-08-06",
+    "sample_date": "2026-08-06"
+  },
+  {
+    "ticker": "SPY",
+    "side": "call",
+    "strike": "772",
+    "expiry": "2026-08-06",
+    "sample_date": "2026-08-06"
+  },
+  {
+    "ticker": "SLV",
+    "side": "call",
+    "strike": "58",
+    "expiry": "2026-08-21",
+    "sample_date": "2026-08-06"
+  },
+  {
+    "ticker": "POET",
+    "side": "call",
+    "strike": "9",
+    "expiry": "2026-08-21",
+    "sample_date": "2026-08-06"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "put",
+    "strike": "220",
+    "expiry": "2026-08-12",
+    "sample_date": "2026-08-10"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "225",
+    "expiry": "2026-08-19",
+    "sample_date": "2026-08-10"
+  },
+  {
+    "ticker": "SPY",
+    "side": "put",
+    "strike": "773",
+    "expiry": "2026-08-11",
+    "sample_date": "2026-08-11"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "724",
+    "expiry": "2026-08-12",
+    "sample_date": "2026-08-12"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "732",
+    "expiry": "2026-08-13",
+    "sample_date": "2026-08-13"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "227.50",
+    "expiry": "2026-08-17",
+    "sample_date": "2026-08-13"
+  },
+  {
+    "ticker": "WDAY",
+    "side": "put",
+    "strike": "205",
+    "expiry": "2026-08-14",
+    "sample_date": "2026-08-13"
+  },
+  {
+    "ticker": "TSLA",
+    "side": "call",
+    "strike": "345",
+    "expiry": "2026-08-19",
+    "sample_date": "2026-08-17"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "230",
+    "expiry": "2026-08-28",
+    "sample_date": "2026-08-18"
+  },
+  {
+    "ticker": "SPX",
+    "side": "call",
+    "strike": "7710",
+    "expiry": "2026-08-18",
+    "sample_date": "2026-08-18"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "718",
+    "expiry": "2026-08-19",
+    "sample_date": "2026-08-18"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "717",
+    "expiry": "2026-08-19",
+    "sample_date": "2026-08-19"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "225",
+    "expiry": "2026-08-28",
+    "sample_date": "2026-08-24"
+  },
+  {
+    "ticker": "AAPL",
+    "side": "call",
+    "strike": "320",
+    "expiry": "2026-08-21",
+    "sample_date": "2026-08-20"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "710",
+    "expiry": "2026-08-20",
+    "sample_date": "2026-08-20"
+  },
+  {
+    "ticker": "SOXL",
+    "side": "put",
+    "strike": "120",
+    "expiry": "2026-08-21",
+    "sample_date": "2026-08-20"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "706",
+    "expiry": "2026-08-24",
+    "sample_date": "2026-08-24"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "714",
+    "expiry": "2026-08-25",
+    "sample_date": "2026-08-25"
+  },
+  {
+    "ticker": "NKE",
+    "side": "call",
+    "strike": "42.5",
+    "expiry": "2026-12-18",
+    "sample_date": "2026-08-25"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "711",
+    "expiry": "2026-08-25",
+    "sample_date": "2026-08-25"
+  },
+  {
+    "ticker": "SPX",
+    "side": "call",
+    "strike": "7670",
+    "expiry": "2026-08-25",
+    "sample_date": "2026-08-25"
+  },
+  {
+    "ticker": "TSLA",
+    "side": "call",
+    "strike": "360",
+    "expiry": "2026-08-31",
+    "sample_date": "2026-08-31"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "712",
+    "expiry": "2026-08-26",
+    "sample_date": "2026-08-26"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "720",
+    "expiry": "2026-08-27",
+    "sample_date": "2026-08-27"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "call",
+    "strike": "230",
+    "expiry": "2026-08-31",
+    "sample_date": "2026-08-27"
+  },
+  {
+    "ticker": "TSLA",
+    "side": "call",
+    "strike": "360",
+    "expiry": "2026-09-04",
+    "sample_date": "2026-08-31"
+  },
+  {
+    "ticker": "TSLL",
+    "side": "call",
+    "strike": "10",
+    "expiry": "2026-10-16",
+    "sample_date": "2026-08-31"
+  },
+  {
+    "ticker": "NVDA",
+    "side": "put",
+    "strike": "210",
+    "expiry": "2026-09-11",
+    "sample_date": "2026-08-31"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "710",
+    "expiry": "2026-09-01",
+    "sample_date": "2026-09-01"
+  },
+  {
+    "ticker": "TSLA",
+    "side": "call",
+    "strike": "355",
+    "expiry": "2026-09-02",
+    "sample_date": "2026-09-02"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "put",
+    "strike": "705",
+    "expiry": "2026-09-02",
+    "sample_date": "2026-09-02"
+  },
+  {
+    "ticker": "GOOGL",
+    "side": "call",
+    "strike": "340",
+    "expiry": "2026-09-09",
+    "sample_date": "2026-09-02"
+  },
+  {
+    "ticker": "QQQ",
+    "side": "call",
+    "strike": "712",
+    "expiry": "2026-09-03",
+    "sample_date": "2026-09-03"
+  },
+  {
+    "ticker": "TSLA",
+    "side": "call",
+    "strike": "390",
+    "expiry": "2026-09-04",
+    "sample_date": "2026-09-03"
+  }
+]

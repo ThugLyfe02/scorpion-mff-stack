@@ -1,0 +1,35 @@
+{
+  "date": "2026-09-08",
+  "root_cause": "scheduler_queue_starvation",
+  "arm_cron": "25 9",
+  "arm_wake_start_et": "09:56:26",
+  "arm_wake_end_et": "09:58:27",
+  "fills": [],
+  "alerts_missed": [
+    {
+      "channel": "etf-options",
+      "ticker": "QQQ",
+      "side": "CALL",
+      "strike": 719,
+      "expiry": "0DTE",
+      "his_bid": 1.01,
+      "post_et": "09:50",
+      "close_et": "09:56",
+      "exit_pct": 10,
+      "note": "closed as arm started"
+    },
+    {
+      "channel": "options-king",
+      "ticker": "NVDA",
+      "side": "PUT",
+      "strike": 227.5,
+      "expiry": "2026-09-11",
+      "his_bid": 2.63,
+      "post_et": "10:02",
+      "close_et": "~10:05",
+      "exit_pct": 19,
+      "note": "user DO NOT BUY — late"
+    }
+  ],
+  "counterfactual_usd_approx": "295-315"
+}

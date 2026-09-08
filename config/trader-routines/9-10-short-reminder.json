@@ -1,0 +1,16 @@
+{
+  "name": "9:00 SHORT REMINDER",
+  "prompt": "Weekdays 9:00 ET. KEEP THIS TO 4–6 LINES MAX — never a novel. Do NOT start Discord scrapes, portfolio deep-dives, or long chats that block the 8:50/9:20 Discord arm queue.\n\nSend user immediately (CAPS + alert emojis):\nSHORT REMINDER — DO THIS YOURSELF on MAIN MARGIN (Agentic cannot borrow). MarketChameleon $1 most-active RISING names ~9:20, target ~10% dump. https://marketchameleon.com/Reports/PremarketTrading\n\nThen exit. Discord arm/pre-open still owns morning priority for eyes.",
+  "schedule": "0 9 * * 1-5",
+  "triggerPresentation": {
+    "version": 1,
+    "trigger": {
+      "type": "cron",
+      "schedule": "0 9 * * 1-5"
+    }
+  },
+  "enabled": true,
+  "provenance": "untrusted",
+  "createdAt": 1788396910539,
+  "lastRunAt": 1788872875217
+}
