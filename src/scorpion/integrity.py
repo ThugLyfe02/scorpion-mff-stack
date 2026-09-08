@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS integrity_ledger (
     record_id TEXT NOT NULL UNIQUE,
     previous_hash TEXT NOT NULL,
     payload_sha256 TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
     record_hash TEXT NOT NULL UNIQUE,
     created_ts_utc TEXT NOT NULL
 )
@@ -36,6 +37,14 @@ class IntegrityVerification:
     ok: bool
     checked: int
     failure_sequence: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseEvidenceVerification:
+    ok: bool
+    checked: int
+    legacy_uncovered_signals: int
+    failures: tuple[str, ...]
 
 
 def canonical_payload(payload: Mapping[str, Scalar]) -> str:
@@ -90,6 +99,12 @@ def verify_chain(records: Sequence[IntegrityRecord]) -> IntegrityVerification:
 
 def ensure_integrity_schema(db: sqlite3.Connection) -> None:
     db.execute(_INTEGRITY_SCHEMA)
+    columns = {str(row[1]) for row in db.execute("PRAGMA table_info(integrity_ledger)")}
+    if "payload_json" not in columns:
+        db.execute(
+            "ALTER TABLE integrity_ledger "
+            "ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'"
+        )
 
 
 def append_integrity_record(
@@ -100,7 +115,8 @@ def append_integrity_record(
     created_ts_utc: str | None = None,
 ) -> IntegrityRecord:
     ensure_integrity_schema(db)
-    payload_sha256 = _payload_hash(canonical_payload(payload))
+    payload_json = canonical_payload(payload)
+    payload_sha256 = _payload_hash(payload_json)
     row = db.execute(
         "SELECT sequence,record_hash FROM integrity_ledger ORDER BY sequence DESC LIMIT 1"
     ).fetchone()
@@ -110,19 +126,127 @@ def append_integrity_record(
     db.execute(
         """
         INSERT INTO integrity_ledger
-        (sequence,record_id,previous_hash,payload_sha256,record_hash,created_ts_utc)
-        VALUES (?,?,?,?,?,?)
+        (sequence,record_id,previous_hash,payload_sha256,payload_json,record_hash,created_ts_utc)
+        VALUES (?,?,?,?,?,?,?)
         """,
         (
             sequence,
             record_id,
             previous_hash,
             payload_sha256,
+            payload_json,
             record_hash,
             created_ts_utc or datetime.now(UTC).isoformat(),
         ),
     )
     return IntegrityRecord(sequence, record_id, previous_hash, payload_sha256, record_hash)
+
+
+def verify_database_evidence(path: str | Path) -> DatabaseEvidenceVerification:
+    db = sqlite3.connect(str(path))
+    db.row_factory = sqlite3.Row
+    failures: list[str] = []
+    try:
+        ensure_integrity_schema(db)
+        rows = db.execute(
+            "SELECT sequence,record_id,previous_hash,payload_sha256,payload_json,record_hash "
+            "FROM integrity_ledger ORDER BY sequence"
+        ).fetchall()
+        records = tuple(
+            IntegrityRecord(
+                int(row["sequence"]),
+                str(row["record_id"]),
+                str(row["previous_hash"]),
+                str(row["payload_sha256"]),
+                str(row["record_hash"]),
+            )
+            for row in rows
+        )
+        chain = verify_chain(records)
+        if not chain.ok:
+            failures.append(f"chain_failure:{chain.failure_sequence}")
+
+        for row in rows:
+            event_id = str(row["record_id"])
+            payload_json = str(row["payload_json"])
+            if _payload_hash(payload_json) != str(row["payload_sha256"]):
+                failures.append(f"payload_hash_mismatch:{event_id}")
+                continue
+            try:
+                payload = json.loads(payload_json)
+            except json.JSONDecodeError:
+                failures.append(f"payload_json_invalid:{event_id}")
+                continue
+            if not isinstance(payload, dict):
+                failures.append(f"payload_not_object:{event_id}")
+                continue
+
+            signal = db.execute(
+                "SELECT message_id,kind,contract_key FROM signal_events WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            audit = db.execute(
+                "SELECT parser_rule,parser_confidence,association_method "
+                "FROM decision_audit WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            if signal is None or audit is None:
+                failures.append(f"missing_source_evidence:{event_id}")
+                continue
+
+            effects = db.execute(
+                "SELECT kind FROM proposed_effects WHERE source_event_id=? ORDER BY effect_id",
+                (event_id,),
+            ).fetchall()
+            raw_revision_id = str(payload.get("raw_revision_id", ""))
+            raw = db.execute(
+                """
+                SELECT r.message_id,p.status
+                FROM raw_discord_events r
+                JOIN raw_processing p ON p.raw_event_id=r.raw_event_id
+                WHERE r.raw_event_id=?
+                """,
+                (raw_revision_id,),
+            ).fetchone()
+            if raw is None:
+                failures.append(f"missing_raw_revision:{event_id}")
+                continue
+            if raw["status"] != "DONE" or raw["message_id"] != signal["message_id"]:
+                failures.append(f"raw_link_mismatch:{event_id}")
+
+            expected_payload: dict[str, Scalar] = {
+                "raw_revision_id": raw_revision_id,
+                "message_id": str(signal["message_id"]),
+                "kind": str(signal["kind"]),
+                "contract_key": str(signal["contract_key"] or ""),
+                "parser_rule": str(audit["parser_rule"]),
+                "parser_confidence": float(audit["parser_confidence"]),
+                "association_method": str(audit["association_method"]),
+                "effect_count": len(effects),
+                "effect_kinds": ",".join(str(effect["kind"]) for effect in effects),
+            }
+            expected_hash = _payload_hash(canonical_payload(expected_payload))
+            if expected_hash != str(row["payload_sha256"]):
+                failures.append(f"source_evidence_mismatch:{event_id}")
+
+        uncovered = int(
+            db.execute(
+                """
+                SELECT COUNT(*)
+                FROM signal_events s
+                LEFT JOIN integrity_ledger i ON i.record_id=s.event_id
+                WHERE i.record_id IS NULL
+                """
+            ).fetchone()[0]
+        )
+    finally:
+        db.close()
+    return DatabaseEvidenceVerification(
+        ok=not failures,
+        checked=len(rows),
+        legacy_uncovered_signals=uncovered,
+        failures=tuple(failures),
+    )
 
 
 class IntegrityLedger:
@@ -181,6 +305,9 @@ class IntegrityLedger:
 
     def verify(self) -> IntegrityVerification:
         return verify_chain(self.records())
+
+    def verify_database(self) -> DatabaseEvidenceVerification:
+        return verify_database_evidence(self.path)
 
     def head_hash(self) -> str:
         records = self.records()
