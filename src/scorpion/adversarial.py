@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
+from .accuracy import ACTIONABLE_KINDS
 from .domain import RawDiscordMessage, SignalEvent
 
 Parser = Callable[[RawDiscordMessage], SignalEvent]
@@ -28,6 +29,28 @@ class RobustnessReport:
     results: tuple[MutationResult, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class GrammarMutation:
+    label: str
+    text: str
+    should_block_action: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class GrammarMutationResult:
+    label: str
+    text: str
+    predicted_kind: str
+    action_leak: bool
+
+
+@dataclass(frozen=True, slots=True)
+class GrammarRobustnessReport:
+    total: int
+    action_leaks: int
+    results: tuple[GrammarMutationResult, ...]
+
+
 def surface_mutations(text: str) -> tuple[str, ...]:
     tokens = text.split()
     candidates = {
@@ -43,6 +66,16 @@ def surface_mutations(text: str) -> tuple[str, ...]:
         text.replace("%", " % "),
     }
     return tuple(sorted(candidates))
+
+
+def grammar_mutations(text: str) -> tuple[GrammarMutation, ...]:
+    return (
+        GrammarMutation("negated", f"Do not {text}"),
+        GrammarMutation("conditional_if", f"If confirmed, {text}"),
+        GrammarMutation("conditional_maybe", f"Maybe {text}"),
+        GrammarMutation("historical_prefix", f"Yesterday {text}"),
+        GrammarMutation("historical_suffix", f"{text} — recap"),
+    )
 
 
 def evaluate_surface_robustness(
@@ -72,5 +105,33 @@ def evaluate_surface_robustness(
         ),
         kind_changes=kind_changes,
         contract_changes=contract_changes,
+        results=tuple(results),
+    )
+
+
+def evaluate_grammar_robustness(
+    raw: RawDiscordMessage,
+    parser: Parser,
+) -> GrammarRobustnessReport:
+    results: list[GrammarMutationResult] = []
+    for index, mutation in enumerate(grammar_mutations(raw.content)):
+        mutated = replace(
+            raw,
+            message_id=f"{raw.message_id}:grammar:{index}",
+            content=mutation.text,
+        )
+        predicted = parser(mutated)
+        leak = mutation.should_block_action and predicted.kind in ACTIONABLE_KINDS
+        results.append(
+            GrammarMutationResult(
+                label=mutation.label,
+                text=mutation.text,
+                predicted_kind=predicted.kind.value,
+                action_leak=leak,
+            )
+        )
+    return GrammarRobustnessReport(
+        total=len(results),
+        action_leaks=sum(result.action_leak for result in results),
         results=tuple(results),
     )
