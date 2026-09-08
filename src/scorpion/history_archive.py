@@ -25,11 +25,11 @@ _HISTORY_SCHEMA = (
     )
     """,
     """
-    CREATE INDEX IF NOT EXISTS idx_historical_channel_source
+    CREATE INDEX IF NOT EXISTS idx_historical_channel_source_v2
     ON historical_discord_messages(channel_id,source_ts_utc)
     """,
     """
-    CREATE INDEX IF NOT EXISTS idx_historical_message_id
+    CREATE INDEX IF NOT EXISTS idx_historical_message_id_v2
     ON historical_discord_messages(message_id)
     """,
     """
@@ -113,16 +113,64 @@ class HistoryArchive:
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
         with self.connect() as db:
+            self._migrate_message_table(db)
             for statement in _HISTORY_SCHEMA:
                 db.execute(statement)
             self._migrate_checkpoint_columns(db)
             db.commit()
 
     @staticmethod
-    def _migrate_checkpoint_columns(db: sqlite3.Connection) -> None:
-        columns = {
-            str(row[1]) for row in db.execute("PRAGMA table_info(history_channel_checkpoints)")
-        }
+    def _table_columns(db: sqlite3.Connection, table: str) -> set[str]:
+        return {str(row[1]) for row in db.execute(f"PRAGMA table_info({table})")}
+
+    @classmethod
+    def _migrate_message_table(cls, db: sqlite3.Connection) -> None:
+        columns = cls._table_columns(db, "historical_discord_messages")
+        if not columns or "revision_id" in columns:
+            return
+
+        legacy = "historical_discord_messages_legacy_v1"
+        db.execute(f"DROP TABLE IF EXISTS {legacy}")
+        db.execute(f"ALTER TABLE historical_discord_messages RENAME TO {legacy}")
+        db.execute("DROP INDEX IF EXISTS idx_historical_channel_source")
+        db.execute("DROP INDEX IF EXISTS idx_historical_message_id")
+        db.execute(_HISTORY_SCHEMA[0])
+
+        rows = db.execute(f"SELECT * FROM {legacy}").fetchall()
+        for row in rows:
+            content = str(row["content"])
+            content_hash = str(row["content_sha256"])
+            edited = str(row["edited_ts_utc"]) if row["edited_ts_utc"] else None
+            revision_material = f"{row['message_id']}|{edited or 'create'}|{content_hash}"
+            revision_id = hashlib.sha256(revision_material.encode("utf-8")).hexdigest()
+            db.execute(
+                """
+                INSERT OR IGNORE INTO historical_discord_messages
+                (revision_id,message_id,guild_id,channel_id,author_id,source_ts_utc,
+                 edited_ts_utc,referenced_message_id,content,content_sha256,archived_ts_utc)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    revision_id,
+                    str(row["message_id"]),
+                    str(row["guild_id"]),
+                    str(row["channel_id"]),
+                    str(row["author_id"]),
+                    str(row["source_ts_utc"]),
+                    edited,
+                    str(row["referenced_message_id"])
+                    if row["referenced_message_id"]
+                    else None,
+                    content,
+                    content_hash,
+                    str(row["archived_ts_utc"]),
+                ),
+            )
+        db.execute(f"DROP TABLE {legacy}")
+
+    @classmethod
+    def _migrate_checkpoint_columns(cls, db: sqlite3.Connection) -> None:
+        columns = cls._table_columns(db, "history_channel_checkpoints")
         if "unique_message_count" not in columns:
             db.execute(
                 "ALTER TABLE history_channel_checkpoints "
