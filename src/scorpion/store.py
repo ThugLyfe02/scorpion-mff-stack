@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Iterable, Iterator
 
 from .domain import Effect, EventKind, RawDiscordMessage, SignalEvent
 

@@ -36,7 +36,7 @@ class RuntimeSettings:
     allowed_author_ids: frozenset[str]
 
     @classmethod
-    def from_env(cls) -> "RuntimeSettings":
+    def from_env(cls) -> RuntimeSettings:
         token = os.environ.get("SCORPION_DISCORD_TOKEN", "").strip()
         if not token:
             raise RuntimeError("SCORPION_DISCORD_TOKEN is required")

@@ -1,8 +1,8 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from scorpion.replay import Bar, same_bar_target_resolution
 from research.corrected_tape import Lot, position_is_open_at
+from scorpion.replay import Bar, same_bar_target_resolution
 
 
 def test_entry_bar_target_is_not_conservatively_credited():

@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from .association import associate_followup
 from .domain import BookState, Effect, RawDiscordMessage, SignalEvent
 from .parser import parse_message
-from .replay import replay
 from .reducer import reduce_book
+from .replay import replay
 from .store import Store
 
 
