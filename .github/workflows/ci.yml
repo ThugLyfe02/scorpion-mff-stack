@@ -21,6 +21,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[dev]"
-      - run: ruff check src tests
+      - name: Show canonical Ruff diff
+        run: ruff check src tests --fix --diff
       - run: mypy src/scorpion
       - run: pytest
