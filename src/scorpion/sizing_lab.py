@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import random
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import StrEnum
 
@@ -13,6 +13,7 @@ from .execution_forensics import CompletedTrade
 class SizingReadiness(StrEnum):
     INSUFFICIENT_SAMPLE = "INSUFFICIENT_SAMPLE"
     NON_POSITIVE_CONSERVATIVE_EDGE = "NON_POSITIVE_CONSERVATIVE_EDGE"
+    MULTIPLE_TESTING_NOT_SIGNIFICANT = "MULTIPLE_TESTING_NOT_SIGNIFICANT"
     READY_FOR_RESEARCH = "READY_FOR_RESEARCH"
 
 
@@ -29,6 +30,8 @@ class SegmentMetrics:
     max_drawdown: float
     positive_fold_ratio: float
     bootstrap_mean_lower_90: float
+    bootstrap_edge_p_value: float
+    fdr_q_value: float
     shrunk_mean_return: float
     conservative_edge: float
     readiness: SizingReadiness
@@ -39,10 +42,13 @@ class SegmentMetrics:
 class SizingConstraints:
     min_samples: int = 30
     prior_strength: float = 20.0
+    max_fdr_q_value: float = 0.10
     max_risk_fraction: float = 0.10
     candidate_step: float = 0.0025
     horizon_trades: int = 100
     trials: int = 3000
+    bootstrap_resamples: int = 2500
+    block_length: int = 5
     ruin_floor_fraction: float = 0.50
     max_ruin_probability: float = 0.01
     max_drawdown_limit: float = 0.25
@@ -52,12 +58,18 @@ class SizingConstraints:
     def __post_init__(self) -> None:
         if self.min_samples < 1:
             raise ValueError("min_samples must be positive")
+        if not 0 < self.max_fdr_q_value <= 1:
+            raise ValueError("max_fdr_q_value must be in (0,1]")
         if not 0 < self.max_risk_fraction <= 1:
             raise ValueError("max_risk_fraction must be in (0,1]")
         if not 0 < self.candidate_step <= self.max_risk_fraction:
             raise ValueError("candidate_step is invalid")
         if self.horizon_trades <= 0 or self.trials <= 0:
             raise ValueError("simulation horizon and trials must be positive")
+        if self.bootstrap_resamples < 100:
+            raise ValueError("bootstrap_resamples must be >=100")
+        if self.block_length <= 0:
+            raise ValueError("block_length must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,15 +147,15 @@ def _positive_fold_ratio(values: list[float], folds: int = 4) -> float:
     return positive / effective
 
 
-def _bootstrap_mean_lower(
+def _bootstrap_edge_stats(
     values: list[float],
     *,
-    quantile: float = 0.10,
-    resamples: int = 2500,
-    seed: int = 9137,
-) -> float:
+    quantile: float,
+    resamples: int,
+    seed: int,
+) -> tuple[float, float]:
     if not values:
-        return 0.0
+        return 0.0, 1.0
     rng = random.Random(seed)
     means = [
         statistics.fmean(rng.choice(values) for _ in range(len(values)))
@@ -151,7 +163,10 @@ def _bootstrap_mean_lower(
     ]
     means.sort()
     index = min(len(means) - 1, max(0, int(quantile * (len(means) - 1))))
-    return means[index]
+    lower = means[index]
+    non_positive = sum(value <= 0 for value in means)
+    p_value = (non_positive + 1) / (len(means) + 1)
+    return lower, p_value
 
 
 def score_segment(
@@ -168,8 +183,10 @@ def score_segment(
     wins = sum(value > 0 for value in values)
     win_rate = wins / samples if samples else 0.0
     lower = _wilson_lower(wins, samples)
-    bootstrap_lower = _bootstrap_mean_lower(
+    bootstrap_lower, edge_p = _bootstrap_edge_stats(
         values,
+        quantile=0.10,
+        resamples=constraints.bootstrap_resamples,
         seed=constraints.random_seed + sum(ord(char) for char in segment),
     )
     shrinkage = samples / (samples + constraints.prior_strength) if samples else 0.0
@@ -186,8 +203,6 @@ def score_segment(
     else:
         readiness = SizingReadiness.READY_FOR_RESEARCH
 
-    # Ranking is deliberately conservative: reward lower-bound edge, sample depth, and
-    # time-fold stability; penalize realized drawdown and negative tail severity.
     edge_score = (
         max(0.0, conservative_edge)
         * math.sqrt(max(samples, 1))
@@ -207,6 +222,8 @@ def score_segment(
         max_drawdown=drawdown,
         positive_fold_ratio=folds,
         bootstrap_mean_lower_90=bootstrap_lower,
+        bootstrap_edge_p_value=edge_p,
+        fdr_q_value=1.0,
         shrunk_mean_return=shrunk_mean,
         conservative_edge=conservative_edge,
         readiness=readiness,
@@ -214,18 +231,50 @@ def score_segment(
     )
 
 
+def _benjamini_hochberg(metrics: list[SegmentMetrics]) -> list[SegmentMetrics]:
+    if not metrics:
+        return []
+    ordered = sorted(
+        enumerate(metrics),
+        key=lambda pair: pair[1].bootstrap_edge_p_value,
+    )
+    total = len(metrics)
+    q_values = [1.0] * total
+    running = 1.0
+    for reverse_rank in range(total - 1, -1, -1):
+        original_index, metric = ordered[reverse_rank]
+        rank = reverse_rank + 1
+        raw_q = metric.bootstrap_edge_p_value * total / rank
+        running = min(running, raw_q)
+        q_values[original_index] = min(1.0, running)
+    return [replace(metric, fdr_q_value=q_values[index]) for index, metric in enumerate(metrics)]
+
+
 def rank_segments(
     segments: dict[str, tuple[CompletedTrade, ...]],
     *,
     constraints: SizingConstraints | None = None,
 ) -> tuple[SegmentMetrics, ...]:
-    metrics = [
-        score_segment(name, trades, constraints=constraints)
-        for name, trades in segments.items()
+    constraints = constraints or SizingConstraints()
+    metrics = _benjamini_hochberg(
+        [
+            score_segment(name, trades, constraints=constraints)
+            for name, trades in segments.items()
+        ]
+    )
+    adjusted = [
+        replace(
+            metric,
+            readiness=SizingReadiness.MULTIPLE_TESTING_NOT_SIGNIFICANT,
+        )
+        if metric.readiness is SizingReadiness.READY_FOR_RESEARCH
+        and metric.fdr_q_value > constraints.max_fdr_q_value
+        else metric
+        for metric in metrics
     ]
     return tuple(
         sorted(
-            metrics,
+            adjusted,
             key=lambda item: (
                 item.readiness is SizingReadiness.READY_FOR_RESEARCH,
                 item.edge_score,
@@ -234,6 +283,25 @@ def rank_segments(
             reverse=True,
         )
     )
+
+
+def _block_sample(
+    values: list[float],
+    length: int,
+    rng: random.Random,
+    block_length: int,
+) -> list[float]:
+    if len(values) <= 1:
+        return [values[0]] * length
+    block = min(block_length, len(values))
+    result: list[float] = []
+    while len(result) < length:
+        start = rng.randrange(len(values))
+        for offset in range(block):
+            result.append(values[(start + offset) % len(values)])
+            if len(result) >= length:
+                break
+    return result
 
 
 def _simulate_fraction(
@@ -254,8 +322,13 @@ def _simulate_fraction(
         peak = 1.0
         maximum_drawdown = 0.0
         ruined = False
-        for _trade in range(constraints.horizon_trades):
-            sampled_return = rng.choice(values)
+        path = _block_sample(
+            values,
+            constraints.horizon_trades,
+            rng,
+            constraints.block_length,
+        )
+        for sampled_return in path:
             equity *= max(0.0, 1.0 + risk_fraction * sampled_return)
             peak = max(peak, equity)
             if peak > 0:
@@ -285,9 +358,10 @@ def build_sizing_envelope(
     trades: tuple[CompletedTrade, ...],
     *,
     constraints: SizingConstraints | None = None,
+    metrics: SegmentMetrics | None = None,
 ) -> SizingEnvelope:
     constraints = constraints or SizingConstraints()
-    metrics = score_segment(segment, trades, constraints=constraints)
+    metrics = metrics or score_segment(segment, trades, constraints=constraints)
     if metrics.readiness is not SizingReadiness.READY_FOR_RESEARCH:
         return SizingEnvelope(
             segment=segment,
@@ -297,7 +371,8 @@ def build_sizing_envelope(
             simulations=(),
             reason=(
                 f"segment not sizing-ready: {metrics.readiness.value}; "
-                f"samples={metrics.samples}, conservative_edge={metrics.conservative_edge:.4f}"
+                f"samples={metrics.samples}, conservative_edge={metrics.conservative_edge:.4f}, "
+                f"fdr_q={metrics.fdr_q_value:.4f}"
             ),
         )
 
@@ -337,7 +412,7 @@ def build_sizing_envelope(
         selected_simulation=selected,
         simulations=tuple(simulations),
         reason=(
-            "largest tested research risk fraction satisfying configured bootstrap "
+            "largest tested research risk fraction satisfying streak-preserving bootstrap "
             "ruin and drawdown constraints; not a guarantee or live sizing instruction"
         ),
     )
