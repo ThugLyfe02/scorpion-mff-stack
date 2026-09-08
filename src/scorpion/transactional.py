@@ -11,6 +11,7 @@ from typing import Protocol
 
 from .accuracy import AssociationEvidence, DecisionEvidence
 from .domain import Effect, SignalEvent
+from .integrity import append_integrity_record
 from .store import Store
 
 
@@ -42,7 +43,7 @@ class SQLiteTransitionCommitter:
 
     Raw receipt remains a separate FULL-sync transaction so a crash can never erase
     evidence that Discord delivered the message. Everything after parsing is committed
-    together: signal, effects, audit, raw completion marker, and pipeline heartbeat.
+    together: signal, effects, audit, integrity record, raw completion marker, and heartbeat.
     """
 
     def commit(
@@ -129,6 +130,24 @@ class SQLiteTransitionCommitter:
                         created,
                     ),
                 )
+                if inserted:
+                    effect_kinds = ",".join(effect.kind.value for effect in effects)
+                    append_integrity_record(
+                        db,
+                        event.event_id,
+                        {
+                            "raw_revision_id": raw_revision_id,
+                            "message_id": event.message_id,
+                            "kind": event.kind.value,
+                            "contract_key": event.contract_key or "",
+                            "parser_rule": parser.rule_id,
+                            "parser_confidence": parser.confidence,
+                            "association_method": association.method,
+                            "effect_count": effect_count,
+                            "effect_kinds": effect_kinds,
+                        },
+                        created_ts_utc=created,
+                    )
                 db.execute(
                     "UPDATE raw_processing SET status='DONE',updated_ts_utc=?,error='' "
                     "WHERE raw_event_id=?",
