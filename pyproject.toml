@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scorpion-mff"
-version = "0.1.0"
-description = "Deterministic event-sourced control plane for MFF signal ingestion, replay, paper execution, and operator review."
+version = "0.2.0"
+description = "Deterministic event-sourced control plane for MFF signal ingestion, replay, paper execution, operator review, and precision telemetry."
 requires-python = ">=3.13"
 dependencies = [
   "discord.py>=2.4,<3",
@@ -23,6 +23,7 @@ dev = [
 [project.scripts]
 scorpion-replay = "scorpion.cli:replay_main"
 scorpion-health = "scorpion.cli:health_main"
+scorpion-accuracy = "scorpion.cli:accuracy_main"
 scorpion-ingest = "scorpion.runtime:ingest_main"
 
 [tool.hatch.build.targets.wheel]

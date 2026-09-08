@@ -12,10 +12,10 @@ Sink = Callable[[RawDiscordMessage], Awaitable[None]]
 
 
 class DiscordSignalClient(discord.Client):
-    """Push-only Discord ingest.
+    """Push-only Discord ingest with revision-aware edit capture.
 
     This component has no broker dependency and must run in a separate process from chat/research
-    workloads. It emits immutable raw events only.
+    workloads. Both creates and edits are emitted as immutable raw revisions.
     """
 
     def __init__(self, sink: Sink) -> None:
@@ -27,10 +27,9 @@ class DiscordSignalClient(discord.Client):
         self._sink = sink
 
     async def on_ready(self) -> None:
-        # Deliberately no browser fallback or long-running reasoning in the ingest process.
         return None
 
-    async def on_message(self, message: discord.Message) -> None:
+    async def _emit(self, message: discord.Message) -> None:
         if message.guild is None or str(message.guild.id) != GUILD_ID:
             return
         if str(message.channel.id) not in ALLOWED_CHANNEL_IDS:
@@ -54,3 +53,10 @@ class DiscordSignalClient(discord.Client):
             referenced_message_id=ref,
         )
         await self._sink(raw)
+
+    async def on_message(self, message: discord.Message) -> None:
+        await self._emit(message)
+
+    async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
+        del before
+        await self._emit(after)

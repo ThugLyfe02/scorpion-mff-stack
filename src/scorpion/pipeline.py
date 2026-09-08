@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
-from .association import associate_followup
+from .association import associate_followup_with_evidence
 from .domain import BookState, Effect, RawDiscordMessage, SignalEvent
-from .parser import parse_message
+from .invariants import assert_valid_book
+from .parser import parse_message_with_evidence
 from .reducer import reduce_book
-from .replay import replay
+from .replay import replay, state_fingerprint
 from .store import Store
 
 
@@ -17,31 +19,78 @@ class Pipeline:
     state: BookState = field(init=False)
 
     def __post_init__(self) -> None:
-        # Event-sourced crash recovery: rebuild deterministic book state from
-        # durable normalized events.
         self.state, historical_effects = replay(self.store.load_signals())
-        # INSERT OR IGNORE re-materializes any effect lost by a crash after signal persistence.
+        assert_valid_book(self.state)
         self.store.append_effects(historical_effects)
 
+        for raw in self.store.load_pending_raw():
+            try:
+                self._process(raw, persist_raw=False)
+            except Exception as exc:
+                self.store.mark_raw_failed(raw.revision_id, type(exc).__name__)
+                self.store.set_halt(True, f"raw_recovery_failed:{raw.revision_id}")
+                raise RuntimeError("failed to recover pending raw Discord revision") from exc
+
+    def _process(
+        self,
+        raw: RawDiscordMessage,
+        *,
+        persist_raw: bool,
+    ) -> tuple[SignalEvent, tuple[Effect, ...]]:
+        started_ns = time.perf_counter_ns()
+        if persist_raw:
+            self.store.append_raw(raw)
+        try:
+            parsed = parse_message_with_evidence(raw, self.allowed_author_ids)
+            referenced_key = (
+                self.store.contract_for_message(raw.referenced_message_id)
+                if raw.referenced_message_id
+                else None
+            )
+            associated = associate_followup_with_evidence(
+                parsed.event,
+                self.state,
+                referenced_key,
+            )
+            event = associated.event
+            inserted = self.store.append_signal(event)
+            effects: tuple[Effect, ...]
+            if inserted:
+                self.state, effects = reduce_book(self.state, event)
+                assert_valid_book(self.state)
+                self.store.append_effects(effects)
+            else:
+                effects = ()
+
+            pipeline_latency_us = max(0, (time.perf_counter_ns() - started_ns) // 1_000)
+            self.store.append_decision_audit(
+                event,
+                parsed.evidence,
+                associated.evidence,
+                pipeline_latency_us=pipeline_latency_us,
+            )
+            self.store.mark_raw_processed(raw.revision_id)
+            self.store.heartbeat(
+                "pipeline",
+                last_message_id=raw.message_id,
+                last_revision_id=raw.revision_id,
+                last_event_id=event.event_id,
+                effect_count=len(effects),
+                parser_latency_us=parsed.evidence.latency_us,
+                pipeline_latency_us=pipeline_latency_us,
+                state_fingerprint=state_fingerprint(self.state),
+            )
+            return event, effects
+        except Exception as exc:
+            self.store.mark_raw_failed(raw.revision_id, type(exc).__name__)
+            self.store.heartbeat(
+                "pipeline",
+                last_message_id=raw.message_id,
+                last_revision_id=raw.revision_id,
+                status="error",
+                error=type(exc).__name__,
+            )
+            raise
+
     async def handle(self, raw: RawDiscordMessage) -> tuple[SignalEvent, tuple[Effect, ...]]:
-        self.store.append_raw(raw)
-        event = parse_message(raw, self.allowed_author_ids)
-        referenced_key = (
-            self.store.contract_for_message(raw.referenced_message_id)
-            if raw.referenced_message_id
-            else None
-        )
-        event = associate_followup(event, self.state, referenced_key)
-        inserted = self.store.append_signal(event)
-        if not inserted:
-            # Exact duplicate/reconnect delivery. State already includes this event.
-            return event, ()
-        self.state, effects = reduce_book(self.state, event)
-        self.store.append_effects(effects)
-        self.store.heartbeat(
-            "pipeline",
-            last_message_id=raw.message_id,
-            last_event_id=event.event_id,
-            effect_count=len(effects),
-        )
-        return event, effects
+        return self._process(raw, persist_raw=True)

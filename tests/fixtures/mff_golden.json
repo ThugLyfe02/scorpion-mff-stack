@@ -1,0 +1,17 @@
+[
+  {"text":"QQQ 719C 0DTE @ 1.01","kind":"ENTRY"},
+  {"text":"NVDA 227.5P Sep11 bid 2.63","kind":"ENTRY"},
+  {"text":"CALL TSLA 390 Sep 11 premium 1.90","kind":"ENTRY"},
+  {"text":"Added at .85, new avg 1.02","kind":"ADD"},
+  {"text":"Adding one more here","kind":"ADD"},
+  {"text":"Closing half +20%","kind":"TRIM"},
+  {"text":"Take some profits here +12%","kind":"TRIM"},
+  {"text":"Printing; close at 10%; Nice bounce","kind":"EXIT"},
+  {"text":"19% close; stop loss on runners at breakeven","kind":"EXIT"},
+  {"text":"Closing runners 19%+","kind":"EXIT"},
+  {"text":"Nice bounce +10%","kind":"AMBIGUOUS"},
+  {"text":"Ready to close if this loses VWAP","kind":"AMBIGUOUS"},
+  {"text":"Added earlier, all out now","kind":"AMBIGUOUS"},
+  {"text":"NKE 42.5C Sep 11 @ 1.40","kind":"IGNORE"},
+  {"text":"Watching QQQ around VWAP","kind":"IGNORE"}
+]
