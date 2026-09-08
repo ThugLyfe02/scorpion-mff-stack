@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,7 +10,8 @@ from pathlib import Path
 _HISTORY_SCHEMA = (
     """
     CREATE TABLE IF NOT EXISTS historical_discord_messages (
-        message_id TEXT PRIMARY KEY,
+        revision_id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL,
         guild_id TEXT NOT NULL,
         channel_id TEXT NOT NULL,
         author_id TEXT NOT NULL,
@@ -18,12 +20,17 @@ _HISTORY_SCHEMA = (
         referenced_message_id TEXT,
         content TEXT NOT NULL,
         content_sha256 TEXT NOT NULL,
-        archived_ts_utc TEXT NOT NULL
+        archived_ts_utc TEXT NOT NULL,
+        UNIQUE(message_id,content_sha256,edited_ts_utc)
     )
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_historical_channel_source
     ON historical_discord_messages(channel_id,source_ts_utc)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_historical_message_id
+    ON historical_discord_messages(message_id)
     """,
     """
     CREATE TABLE IF NOT EXISTS history_channel_checkpoints (
@@ -33,6 +40,7 @@ _HISTORY_SCHEMA = (
         newest_message_id TEXT,
         newest_source_ts_utc TEXT,
         message_count INTEGER NOT NULL DEFAULT 0,
+        unique_message_count INTEGER NOT NULL DEFAULT 0,
         reached_beginning INTEGER NOT NULL DEFAULT 0,
         last_sync_ts_utc TEXT NOT NULL
     )
@@ -67,25 +75,39 @@ class ArchivedDiscordMessage:
     def content_sha256(self) -> str:
         return hashlib.sha256(self.content.encode("utf-8")).hexdigest()
 
+    @property
+    def revision_id(self) -> str:
+        edited = self.edited_ts_utc.astimezone(UTC).isoformat() if self.edited_ts_utc else "create"
+        material = f"{self.message_id}|{edited}|{self.content_sha256}"
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
 
 @dataclass(frozen=True, slots=True)
 class ChannelCompleteness:
     channel_id: str
-    message_count: int
+    revision_count: int
+    unique_message_count: int
     oldest_source_ts_utc: datetime | None
     newest_source_ts_utc: datetime | None
     reached_beginning: bool
 
     @property
+    def message_count(self) -> int:
+        """Compatibility alias: unique Discord messages, not archived revisions."""
+        return self.unique_message_count
+
+    @property
     def exhaustive(self) -> bool:
-        return self.reached_beginning and self.message_count > 0
+        return self.reached_beginning and self.unique_message_count > 0
 
 
 class HistoryArchive:
-    """Read-only-source archive for legitimate Discord bot history collection.
+    """Separate revision-aware archive for authorized Discord history research.
 
-    This store is intentionally separate from the live raw-processing journal. Historical
-    backfills must never enqueue old Discord messages into the live money-path reducer.
+    Historical backfills never enqueue old messages into the live reducer. Repeated audits are
+    idempotent, while newly observed edits create immutable revisions instead of overwriting
+    earlier evidence. `reached_beginning` means the Discord iterator completed for the bot's
+    accessible channel history; it is not a claim that inaccessible/deleted messages exist.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -93,10 +115,26 @@ class HistoryArchive:
         with self.connect() as db:
             for statement in _HISTORY_SCHEMA:
                 db.execute(statement)
+            self._migrate_checkpoint_columns(db)
+            db.commit()
+
+    @staticmethod
+    def _migrate_checkpoint_columns(db: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1]) for row in db.execute("PRAGMA table_info(history_channel_checkpoints)")
+        }
+        if "unique_message_count" not in columns:
+            db.execute(
+                "ALTER TABLE history_channel_checkpoints "
+                "ADD COLUMN unique_message_count INTEGER NOT NULL DEFAULT 0"
+            )
 
     def connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=10.0)
         db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=NORMAL")
+        db.execute("PRAGMA busy_timeout=10000")
         return db
 
     def start_run(self, channels_requested: int) -> str:
@@ -143,32 +181,54 @@ class HistoryArchive:
             )
             db.commit()
 
-    def append(self, message: ArchivedDiscordMessage) -> bool:
+    @staticmethod
+    def _insert(db: sqlite3.Connection, message: ArchivedDiscordMessage, archived: str) -> int:
         source = message.source_ts_utc.astimezone(UTC)
         edited = message.edited_ts_utc.astimezone(UTC) if message.edited_ts_utc else None
+        cursor = db.execute(
+            """
+            INSERT OR IGNORE INTO historical_discord_messages
+            (revision_id,message_id,guild_id,channel_id,author_id,source_ts_utc,edited_ts_utc,
+             referenced_message_id,content,content_sha256,archived_ts_utc)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                message.revision_id,
+                message.message_id,
+                message.guild_id,
+                message.channel_id,
+                message.author_id,
+                source.isoformat(),
+                edited.isoformat() if edited else None,
+                message.referenced_message_id,
+                message.content,
+                message.content_sha256,
+                archived,
+            ),
+        )
+        return max(cursor.rowcount, 0)
+
+    def append(self, message: ArchivedDiscordMessage) -> bool:
         with self.connect() as db:
-            cursor = db.execute(
-                """
-                INSERT OR IGNORE INTO historical_discord_messages
-                (message_id,guild_id,channel_id,author_id,source_ts_utc,edited_ts_utc,
-                 referenced_message_id,content,content_sha256,archived_ts_utc)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    message.message_id,
-                    message.guild_id,
-                    message.channel_id,
-                    message.author_id,
-                    source.isoformat(),
-                    edited.isoformat() if edited else None,
-                    message.referenced_message_id,
-                    message.content,
-                    message.content_sha256,
-                    datetime.now(UTC).isoformat(),
-                ),
-            )
+            inserted = self._insert(db, message, datetime.now(UTC).isoformat())
             db.commit()
-            return cursor.rowcount == 1
+        return inserted == 1
+
+    def append_many(self, messages: Sequence[ArchivedDiscordMessage]) -> int:
+        if not messages:
+            return 0
+        archived = datetime.now(UTC).isoformat()
+        inserted = 0
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for message in messages:
+                    inserted += self._insert(db, message, archived)
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+        return inserted
 
     def mark_channel_synced(self, channel_id: str, *, reached_beginning: bool) -> None:
         now = datetime.now(UTC).isoformat()
@@ -187,9 +247,16 @@ class HistoryArchive:
                 """,
                 (channel_id,),
             ).fetchone()
-            count = int(
+            revision_count = int(
                 db.execute(
                     "SELECT COUNT(*) FROM historical_discord_messages WHERE channel_id=?",
+                    (channel_id,),
+                ).fetchone()[0]
+            )
+            unique_count = int(
+                db.execute(
+                    "SELECT COUNT(DISTINCT message_id) FROM historical_discord_messages "
+                    "WHERE channel_id=?",
                     (channel_id,),
                 ).fetchone()[0]
             )
@@ -197,14 +264,16 @@ class HistoryArchive:
                 """
                 INSERT INTO history_channel_checkpoints
                 (channel_id,oldest_message_id,oldest_source_ts_utc,newest_message_id,
-                 newest_source_ts_utc,message_count,reached_beginning,last_sync_ts_utc)
-                VALUES (?,?,?,?,?,?,?,?)
+                 newest_source_ts_utc,message_count,unique_message_count,reached_beginning,
+                 last_sync_ts_utc)
+                VALUES (?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(channel_id) DO UPDATE SET
                     oldest_message_id=excluded.oldest_message_id,
                     oldest_source_ts_utc=excluded.oldest_source_ts_utc,
                     newest_message_id=excluded.newest_message_id,
                     newest_source_ts_utc=excluded.newest_source_ts_utc,
                     message_count=excluded.message_count,
+                    unique_message_count=excluded.unique_message_count,
                     reached_beginning=MAX(history_channel_checkpoints.reached_beginning,
                                           excluded.reached_beginning),
                     last_sync_ts_utc=excluded.last_sync_ts_utc
@@ -215,7 +284,8 @@ class HistoryArchive:
                     str(oldest["source_ts_utc"]) if oldest else None,
                     str(newest["message_id"]) if newest else None,
                     str(newest["source_ts_utc"]) if newest else None,
-                    count,
+                    revision_count,
+                    unique_count,
                     int(reached_beginning),
                     now,
                 ),
@@ -229,7 +299,7 @@ class HistoryArchive:
                 (channel_id,),
             ).fetchone()
         if row is None:
-            return ChannelCompleteness(channel_id, 0, None, None, False)
+            return ChannelCompleteness(channel_id, 0, 0, None, None, False)
         oldest = (
             datetime.fromisoformat(str(row["oldest_source_ts_utc"])).astimezone(UTC)
             if row["oldest_source_ts_utc"]
@@ -240,22 +310,33 @@ class HistoryArchive:
             if row["newest_source_ts_utc"]
             else None
         )
+        unique_count = int(row["unique_message_count"] or 0)
+        revision_count = int(row["message_count"] or 0)
         return ChannelCompleteness(
             channel_id=channel_id,
-            message_count=int(row["message_count"]),
+            revision_count=revision_count,
+            unique_message_count=unique_count or revision_count,
             oldest_source_ts_utc=oldest,
             newest_source_ts_utc=newest,
             reached_beginning=bool(row["reached_beginning"]),
         )
 
     def iter_channel(self, channel_id: str) -> tuple[ArchivedDiscordMessage, ...]:
+        """Return the latest observed revision per Discord message in source order."""
         with self.connect() as db:
             rows = db.execute(
                 """
-                SELECT * FROM historical_discord_messages
-                WHERE channel_id=? ORDER BY source_ts_utc,message_id
+                SELECT h.* FROM historical_discord_messages h
+                JOIN (
+                    SELECT message_id,MAX(archived_ts_utc) AS latest_archived
+                    FROM historical_discord_messages
+                    WHERE channel_id=? GROUP BY message_id
+                ) latest
+                ON latest.message_id=h.message_id AND latest.latest_archived=h.archived_ts_utc
+                WHERE h.channel_id=?
+                ORDER BY h.source_ts_utc,h.message_id
                 """,
-                (channel_id,),
+                (channel_id, channel_id),
             ).fetchall()
         return tuple(
             ArchivedDiscordMessage(
