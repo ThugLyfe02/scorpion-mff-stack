@@ -82,7 +82,8 @@ class DiscordHistorySynchronizer:
                         channel = await client.fetch_channel(int(channel_id))
                     if not isinstance(channel, (discord.TextChannel, discord.Thread)):
                         raise RuntimeError(f"channel {channel_id} is not text-readable")
-                    if channel.guild is None or str(channel.guild.id) != self.guild_id:
+                    guild_id = str(channel.guild.id)
+                    if guild_id != self.guild_id:
                         raise RuntimeError(
                             f"channel {channel_id} does not belong to configured guild"
                         )
@@ -104,7 +105,7 @@ class DiscordHistorySynchronizer:
                         batch.append(
                             ArchivedDiscordMessage(
                                 message_id=str(message.id),
-                                guild_id=str(message.guild.id),
+                                guild_id=guild_id,
                                 channel_id=str(channel.id),
                                 author_id=str(message.author.id),
                                 source_ts_utc=message.created_at,
