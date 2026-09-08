@@ -15,7 +15,7 @@ def _normal() -> ResilienceAssessment:
 
 
 def test_high_evidence_entry_is_ready_for_operator_review(raw_factory):
-    parsed = parse_message_with_evidence(raw_factory("QQQ 719C TODAY @ 1.01"))
+    parsed = parse_message_with_evidence(raw_factory("AAPL 200C TODAY @ 1.01"))
     packet = build_decision_packet(
         parsed.event,
         parsed.evidence,
@@ -29,7 +29,7 @@ def test_high_evidence_entry_is_ready_for_operator_review(raw_factory):
 
 
 def test_sequence_warning_forces_review(raw_factory):
-    parsed = parse_message_with_evidence(raw_factory("QQQ 719C TODAY @ 1.01"))
+    parsed = parse_message_with_evidence(raw_factory("AAPL 200C TODAY @ 1.01"))
     sequence = SequenceAssessment(
         (SequenceFinding("source_timestamp_regression", SequenceSeverity.WARNING, "late"),)
     )
@@ -59,7 +59,7 @@ def test_halted_system_blocks_progression(raw_factory):
 
 
 def test_low_parser_confidence_forces_review(raw_factory):
-    parsed = parse_message_with_evidence(raw_factory("QQQ 719C TODAY @ 1.01"))
+    parsed = parse_message_with_evidence(raw_factory("AAPL 200C TODAY @ 1.01"))
     evidence = DecisionEvidence(
         rule_id=parsed.evidence.rule_id,
         confidence=0.80,
