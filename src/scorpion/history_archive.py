@@ -188,7 +188,7 @@ class HistoryArchive:
     def start_run(self, channels_requested: int) -> str:
         started = datetime.now(UTC)
         run_id = hashlib.sha256(
-            f"{started.isoformat()}|{channels_requested}".encode("utf-8")
+            f"{started.isoformat()}|{channels_requested}".encode()
         ).hexdigest()
         with self.connect() as db:
             db.execute(
