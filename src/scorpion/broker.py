@@ -37,7 +37,9 @@ class QuoteProvider(Protocol):
 
 
 class Broker(Protocol):
-    def execute(self, effect: Effect, quantity: int, limit_price: Decimal | None) -> ExecutionResult: ...
+    def execute(
+        self, effect: Effect, quantity: int, limit_price: Decimal | None
+    ) -> ExecutionResult: ...
 
 
 class PaperBroker:
@@ -47,7 +49,9 @@ class PaperBroker:
     in this package; a separate approved integration can consume reviewed effects.
     """
 
-    def execute(self, effect: Effect, quantity: int, limit_price: Decimal | None) -> ExecutionResult:
+    def execute(
+        self, effect: Effect, quantity: int, limit_price: Decimal | None
+    ) -> ExecutionResult:
         if effect.kind not in {
             EffectKind.PROPOSE_OPEN,
             EffectKind.PROPOSE_ADD,
@@ -76,7 +80,9 @@ class PaperBroker:
 
 
 class ReviewOnlyBroker:
-    def execute(self, effect: Effect, quantity: int, limit_price: Decimal | None) -> ExecutionResult:
+    def execute(
+        self, effect: Effect, quantity: int, limit_price: Decimal | None
+    ) -> ExecutionResult:
         return ExecutionResult(
             effect=effect,
             mode=ExecutionMode.REVIEW_ONLY,

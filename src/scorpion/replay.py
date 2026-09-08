@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Iterable, Sequence
+from typing import Sequence
 
 from .domain import BookState, Effect, SignalEvent
 from .reducer import reduce_book

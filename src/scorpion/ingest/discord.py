@@ -37,7 +37,11 @@ class DiscordSignalClient(discord.Client):
             return
         source = message.created_at.astimezone(UTC)
         edited = message.edited_at.astimezone(UTC) if message.edited_at else None
-        ref = str(message.reference.message_id) if message.reference and message.reference.message_id else None
+        ref = (
+            str(message.reference.message_id)
+            if message.reference and message.reference.message_id
+            else None
+        )
         raw = RawDiscordMessage(
             message_id=str(message.id),
             guild_id=str(message.guild.id),

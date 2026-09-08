@@ -17,7 +17,8 @@ class Pipeline:
     state: BookState = field(init=False)
 
     def __post_init__(self) -> None:
-        # Event-sourced crash recovery: rebuild deterministic book state from durable normalized events.
+        # Event-sourced crash recovery: rebuild deterministic book state from
+        # durable normalized events.
         self.state, historical_effects = replay(self.store.load_signals())
         # INSERT OR IGNORE re-materializes any effect lost by a crash after signal persistence.
         self.store.append_effects(historical_effects)

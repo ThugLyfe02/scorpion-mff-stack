@@ -109,7 +109,8 @@ class Store:
             cur = db.execute(
                 """
                 INSERT OR IGNORE INTO raw_discord_events
-                (raw_event_id,message_id,guild_id,channel_id,author_id,source_ts_utc,received_ts_utc,
+                (raw_event_id,message_id,guild_id,channel_id,author_id,source_ts_utc,
+                 received_ts_utc,
                  edited_ts_utc,referenced_message_id,content,content_sha256)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 """,
@@ -167,14 +168,19 @@ class Store:
     def load_signals(self) -> list[SignalEvent]:
         with self.connect() as db:
             rows = db.execute(
-                "SELECT payload_json FROM signal_events ORDER BY source_ts_utc, received_ts_utc, event_id"
+                "SELECT payload_json FROM signal_events "
+                "ORDER BY source_ts_utc, received_ts_utc, event_id"
             ).fetchall()
         events: list[SignalEvent] = []
         for row in rows:
             payload = json.loads(row["payload_json"])
             payload["kind"] = EventKind(payload["kind"])
-            payload["source_ts_utc"] = datetime.fromisoformat(payload["source_ts_utc"]).astimezone(UTC)
-            payload["received_ts_utc"] = datetime.fromisoformat(payload["received_ts_utc"]).astimezone(UTC)
+            payload["source_ts_utc"] = datetime.fromisoformat(
+                payload["source_ts_utc"]
+            ).astimezone(UTC)
+            payload["received_ts_utc"] = datetime.fromisoformat(
+                payload["received_ts_utc"]
+            ).astimezone(UTC)
             if payload.get("expiry"):
                 payload["expiry"] = date.fromisoformat(payload["expiry"])
             for key in ("strike", "referenced_price", "referenced_pct"):
@@ -243,7 +249,8 @@ class Store:
                 """
                 INSERT INTO runtime_flags(key,value,updated_ts_utc)
                 VALUES ('halt',?,?)
-                ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_ts_utc=excluded.updated_ts_utc
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value,updated_ts_utc=excluded.updated_ts_utc
                 """,
                 (value, now),
             )

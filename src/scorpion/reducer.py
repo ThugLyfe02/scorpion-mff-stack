@@ -54,7 +54,9 @@ def reduce_book(
     key = event.contract_key
     if event.kind is EventKind.ENTRY:
         if key is None:
-            return state, (Effect(EffectKind.REVIEW, None, event.event_id, 0, "entry_missing_contract"),)
+            return state, (
+                Effect(EffectKind.REVIEW, None, event.event_id, 0, "entry_missing_contract"),
+            )
         existing = state.positions.get(key)
         if existing and existing.status in {
             PositionStatus.PENDING_ENTRY,
@@ -105,7 +107,8 @@ def reduce_book(
             ),
         )
 
-    # Follow-ups intentionally require an explicit contract association before they can mutate state.
+    # Follow-ups intentionally require an explicit contract association before
+    # they can mutate state.
     # A Discord reply/reference resolver should enrich these events before reducer entry.
     if key is None:
         return state, (
@@ -168,7 +171,13 @@ def reduce_book(
             last_reason="trim_proposed",
         )
         return state.with_position(new_position), (
-            Effect(EffectKind.PROPOSE_TRIM, key, event.event_id, position.generation, "source_trim"),
+            Effect(
+                EffectKind.PROPOSE_TRIM,
+                key,
+                event.event_id,
+                position.generation,
+                "source_trim",
+            ),
         )
 
     if event.kind is EventKind.EXIT:
@@ -179,7 +188,13 @@ def reduce_book(
             last_reason="exit_proposed",
         )
         return state.with_position(new_position), (
-            Effect(EffectKind.PROPOSE_CLOSE, key, event.event_id, position.generation, "source_exit"),
+            Effect(
+                EffectKind.PROPOSE_CLOSE,
+                key,
+                event.event_id,
+                position.generation,
+                "source_exit",
+            ),
         )
 
     return state, ()

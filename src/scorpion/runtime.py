@@ -4,6 +4,7 @@ import asyncio
 import signal
 
 from .config import RuntimeSettings
+from .domain import RawDiscordMessage
 from .ingest.discord import DiscordSignalClient
 from .pipeline import Pipeline
 from .store import Store
@@ -14,7 +15,7 @@ async def run_discord() -> None:
     store = Store(settings.database_path)
     pipeline = Pipeline(store=store, allowed_author_ids=settings.allowed_author_ids)
 
-    async def sink(raw):
+    async def sink(raw: RawDiscordMessage) -> None:
         await pipeline.handle(raw)
 
     client = DiscordSignalClient(sink)

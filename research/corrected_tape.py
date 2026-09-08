@@ -54,7 +54,7 @@ def target_bounds_on_entry_bar(
         printed = bar.high >= target_price
     else:
         printed = bar.low <= target_price
-    return printed, False if printed else False
+    return printed, False
 
 
 def position_is_open_at(exit_ts: datetime, candidate_entry_ts: datetime) -> bool:

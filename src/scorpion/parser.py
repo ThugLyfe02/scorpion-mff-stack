@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from typing import Literal
 
 from .config import ALLOWED_CHANNEL_IDS, EXCLUDED_TICKERS, GUILD_ID, MARKET_TZ
 from .domain import EventKind, RawDiscordMessage, SignalEvent
@@ -81,11 +82,14 @@ def _parse_expiry(text: str, source_ts_utc: datetime) -> date | None:
     return None
 
 
-def _side(cp: str) -> str:
+def _side(cp: str) -> Literal["CALL", "PUT"]:
     return "CALL" if cp.upper() in {"C", "CALL"} else "PUT"
 
 
-def parse_message(raw: RawDiscordMessage, allowed_author_ids: frozenset[str] | None = None) -> SignalEvent:
+def parse_message(
+    raw: RawDiscordMessage,
+    allowed_author_ids: frozenset[str] | None = None,
+) -> SignalEvent:
     if raw.guild_id != GUILD_ID:
         return _base(raw, EventKind.IGNORE, "wrong_guild")
     if raw.channel_id not in ALLOWED_CHANNEL_IDS:
@@ -136,6 +140,9 @@ def parse_message(raw: RawDiscordMessage, allowed_author_ids: frozenset[str] | N
     if any(word in lower for word in ADD_WORDS):
         return _base(raw, EventKind.ADD, "add_language")
     if pct is not None:
-        return replace(_base(raw, EventKind.AMBIGUOUS, "percentage_without_explicit_action"), referenced_pct=pct)
+        return replace(
+            _base(raw, EventKind.AMBIGUOUS, "percentage_without_explicit_action"),
+            referenced_pct=pct,
+        )
 
     return _base(raw, EventKind.IGNORE, "no_supported_signal")
