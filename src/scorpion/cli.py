@@ -7,8 +7,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .accuracy import score_decisions
+from .decision_store import unresolved_packet_count
 from .domain import EventKind, SignalEvent
+from .integrity import IntegrityLedger
 from .replay import replay, state_fingerprint
+from .resilience import assess_resilience
+from .stage_trace import load_stage_latency_report, storage_snapshot
 from .store import Store
 
 
@@ -28,6 +32,39 @@ def accuracy_main() -> None:
     report = score_decisions(samples)
     payload = asdict(report)
     payload["decision_health"] = store.decision_health()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def ops_main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", default="scorpion.db")
+    parser.add_argument("--latency-window", type=int, default=500)
+    args = parser.parse_args()
+    store = Store(args.db)
+    health = store.health_snapshot()
+    storage = storage_snapshot(args.db)
+    resilience = assess_resilience(health, wal_bytes=storage.wal_bytes)
+    latency = load_stage_latency_report(args.db, limit=args.latency_window)
+    integrity = IntegrityLedger(args.db).verify_database()
+    payload = {
+        "operational_mode": resilience.mode.value,
+        "resilience_signals": [
+            {
+                "code": signal.code,
+                "severity": signal.severity.value,
+                "detail": signal.detail,
+            }
+            for signal in resilience.signals
+        ],
+        "recommended_actions": list(resilience.recommended_actions),
+        "unresolved_decision_packets": unresolved_packet_count(args.db),
+        "decision_health": health["decision_health"],
+        "pending_raw_revisions": health["pending_raw_revisions"],
+        "pending_review_effects": health["pending_review_effects"],
+        "stage_latency": asdict(latency),
+        "storage": asdict(storage),
+        "integrity": asdict(integrity),
+    }
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
