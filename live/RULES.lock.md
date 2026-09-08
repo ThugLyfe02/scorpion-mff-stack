@@ -13,7 +13,7 @@ Guild: `912747256736800838`
 - lotto-options, lotto-friday, NKE, Fridays (live hone)
 
 ## Entry
-- Account: Robinhood Agentic only (`717950448`)
+- Account: Robinhood Agentic only (`••••0448`)
 - Limit: `min(live_ask, his_bid * 1.15)`
 - Skip if already `>+25%` off his bid
 - First trade of day: **1 contract** pipe test

@@ -1,7 +1,7 @@
 # Architecture + failure brief (Tue 2026-09-08)
 
 ## Goal
-Mirror MoneyForFun Discord options → Robinhood **Agentic** (`717950448`) in seconds. Gapper desk is research-only.
+Mirror MoneyForFun Discord options → Robinhood **Agentic** (`••••0448`) in seconds. Gapper desk is research-only.
 
 ## Agents
 - **Trader** — live MFF hone executor (orders)
