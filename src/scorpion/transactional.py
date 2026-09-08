@@ -47,6 +47,8 @@ class TransitionCommitter(Protocol):
 def _effect_status(packet: OperatorDecisionPacket) -> str:
     if packet.disposition is DecisionDisposition.BLOCKED_SYSTEM:
         return "BLOCKED_SYSTEM"
+    if packet.disposition is DecisionDisposition.BLOCKED_STRATEGY:
+        return "BLOCKED_STRATEGY"
     return "PENDING_REVIEW"
 
 
