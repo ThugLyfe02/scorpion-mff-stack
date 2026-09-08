@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from scorpion.integrity import IntegrityLedger
 from scorpion.pipeline import Pipeline
 from scorpion.store import Store
 
@@ -22,6 +23,11 @@ def test_atomic_pipeline_commits_normalized_bundle(tmp_path, raw_factory):
     health = store.health_snapshot()
     assert health["pending_review_effects"] == 1
     assert "pipeline" in health["heartbeats"]
+
+    ledger = IntegrityLedger(store.path)
+    assert len(ledger.records()) == 1
+    assert ledger.verify().ok is True
+    assert ledger.head_hash() != "0" * 64
 
 
 def test_failed_normalized_commit_does_not_advance_memory_state(tmp_path, raw_factory):
