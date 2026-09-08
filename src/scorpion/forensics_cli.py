@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 from dataclasses import asdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
@@ -25,6 +25,7 @@ from .sizing_lab import (
     rank_segments,
     segment_completed_trades,
 )
+from .strategy_selector import select_candidates
 
 
 def _json_default(value: object) -> object:
@@ -69,6 +70,8 @@ def forensics_main() -> None:
     authors = _authors(args.author_ids)
     if not authors:
         raise SystemExit("--author-id or SCORPION_SIGNAL_AUTHOR_IDS is required")
+    if args.latency_ms < 0:
+        raise SystemExit("--latency-ms cannot be negative")
     channels = frozenset(args.channel_ids or ALLOWED_CHANNEL_IDS)
     report = run_archive_forensics(
         HistoryArchive(args.archive),
@@ -76,13 +79,14 @@ def forensics_main() -> None:
         channel_ids=channels,
         allowed_author_ids=authors,
         profile=ExecutionProfile(
-            decision_latency=__import__("datetime").timedelta(milliseconds=args.latency_ms)
+            decision_latency=timedelta(milliseconds=args.latency_ms)
         ),
         include_research_only=args.include_research_only,
     )
     segments = segment_completed_trades(report.completed_trades)
     constraints = SizingConstraints()
     rankings = rank_segments(segments, constraints=constraints)
+    selections = select_candidates(rankings)
     completeness_ok = all(item.exhaustive for item in report.completeness)
 
     actionable_legs = [
@@ -113,6 +117,7 @@ def forensics_main() -> None:
             for status in ForensicStatus
         },
         "segment_rankings": [asdict(metric) for metric in rankings],
+        "strategy_candidates": [asdict(candidate) for candidate in selections],
         "sizing_envelopes": [],
         "warnings": [],
     }
