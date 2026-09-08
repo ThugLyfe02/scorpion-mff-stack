@@ -5,7 +5,12 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from .calibration import CalibrationObservation, RuleCalibration, calibrate_rules, wilson_lower_bound
+from .calibration import (
+    CalibrationObservation,
+    RuleCalibration,
+    calibrate_rules,
+    wilson_lower_bound,
+)
 
 
 @dataclass(frozen=True, slots=True)
