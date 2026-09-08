@@ -6,7 +6,6 @@ from scorpion.execution_forensics import ForensicStatus, run_execution_forensics
 from scorpion.history_archive import ArchivedDiscordMessage, HistoryArchive
 from scorpion.quote_tape import HistoricalQuote, HistoricalQuoteTape
 
-
 GUILD = "912747256736800838"
 CHANNEL = "968352649437126676"
 AUTHOR = "author"
