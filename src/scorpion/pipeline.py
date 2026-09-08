@@ -7,8 +7,10 @@ from dataclasses import dataclass, field
 from .association import associate_followup_with_evidence
 from .decision_packet import OperatorDecisionPacket, build_decision_packet
 from .domain import BookState, Effect, RawDiscordMessage, SignalEvent
+from .eligibility import classify_eligibility
 from .invariants import assert_valid_book
 from .parser import parse_message_with_evidence
+from .policy_bundle import RuntimePolicyBundle
 from .reducer import reduce_book
 from .replay import replay, state_fingerprint
 from .resilience import OperationalMode, ResilienceAssessment
@@ -35,13 +37,20 @@ class Pipeline:
     committer: TransitionCommitter = field(default_factory=SQLiteTransitionCommitter)
     resilience_assessment: ResilienceAssessment = field(default_factory=_normal_resilience)
     source_shift_resolver: SourceShiftResolver | None = None
+    runtime_policy: RuntimePolicyBundle = field(default_factory=RuntimePolicyBundle)
     state: BookState = field(init=False)
     recent_events: list[SignalEvent] = field(init=False)
 
     def __post_init__(self) -> None:
         historical_signals = self.store.load_signals()
-        self.state, historical_effects = replay(historical_signals)
-        assert_valid_book(self.state)
+        self.state, historical_effects = replay(
+            historical_signals,
+            self.runtime_policy.base,
+        )
+        assert_valid_book(
+            self.state,
+            max_open_positions=self.runtime_policy.base.max_open_positions,
+        )
         self.store.append_effects(historical_effects)
         self.recent_events = historical_signals[-100:]
 
@@ -91,6 +100,7 @@ class Pipeline:
             reduce_started_ns = time.perf_counter_ns()
             event = associated.event
             sequence = assess_sequence(event, self.state, recent_events=self.recent_events)
+            eligibility = classify_eligibility(event, self.runtime_policy.eligibility)
             packet: OperatorDecisionPacket = build_decision_packet(
                 event,
                 parsed.evidence,
@@ -98,9 +108,19 @@ class Pipeline:
                 self.resilience_assessment,
                 sequence,
                 source_shift=self._source_shift(raw),
+                eligibility=eligibility,
+                policy=self.runtime_policy.selective_review,
+                policy_fingerprint=self.runtime_policy.fingerprint,
             )
-            proposed_state, proposed_effects = reduce_book(self.state, event)
-            assert_valid_book(proposed_state)
+            proposed_state, proposed_effects = reduce_book(
+                self.state,
+                event,
+                self.runtime_policy.base,
+            )
+            assert_valid_book(
+                proposed_state,
+                max_open_positions=self.runtime_policy.base.max_open_positions,
+            )
             proposed_fingerprint = state_fingerprint(proposed_state)
             reduce_validate_us = _elapsed_us(reduce_started_ns)
 
@@ -128,6 +148,7 @@ class Pipeline:
                     "state_fingerprint": proposed_fingerprint,
                     "decision_disposition": packet.disposition.value,
                     "operational_mode": packet.system_mode.value,
+                    "policy_fingerprint": self.runtime_policy.fingerprint,
                 },
                 stage_latencies_us=stage_latencies_us,
             )
@@ -140,9 +161,15 @@ class Pipeline:
                 effects = ()
                 if event.event_id not in self.state.seen_event_ids:
                     historical_signals = self.store.load_signals()
-                    self.state, _ = replay(historical_signals)
+                    self.state, _ = replay(
+                        historical_signals,
+                        self.runtime_policy.base,
+                    )
                     self.recent_events = historical_signals[-100:]
-                    assert_valid_book(self.state)
+                    assert_valid_book(
+                        self.state,
+                        max_open_positions=self.runtime_policy.base.max_open_positions,
+                    )
             return event, effects
         except Exception as exc:
             self.store.mark_raw_failed(raw.revision_id, type(exc).__name__)
@@ -152,6 +179,7 @@ class Pipeline:
                 last_revision_id=raw.revision_id,
                 status="error",
                 error=type(exc).__name__,
+                policy_fingerprint=self.runtime_policy.fingerprint,
             )
             raise
 
