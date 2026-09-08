@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import collections.abc
 import json
 import sqlite3
-from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, date, datetime
@@ -90,7 +90,7 @@ class Store:
             db.executescript(SCHEMA)
 
     @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
+    def connect(self) -> collections.abc.Iterator[sqlite3.Connection]:
         db = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
         db.row_factory = sqlite3.Row
         try:
@@ -201,7 +201,7 @@ class Store:
             ).fetchone()
         return row["contract_key"] if row else None
 
-    def append_effects(self, effects: Iterable[Effect]) -> int:
+    def append_effects(self, effects: collections.abc.Iterable[Effect]) -> int:
         created = datetime.now(UTC).isoformat()
         inserted = 0
         with self.connect() as db:
