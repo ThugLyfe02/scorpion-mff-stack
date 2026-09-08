@@ -13,6 +13,10 @@ from .store import Store
 from .transactional import SQLiteTransitionCommitter, TransitionCommitter
 
 
+def _elapsed_us(started_ns: int) -> int:
+    return max(0, (time.perf_counter_ns() - started_ns) // 1_000)
+
+
 @dataclass(slots=True)
 class Pipeline:
     store: Store
@@ -40,10 +44,17 @@ class Pipeline:
         persist_raw: bool,
     ) -> tuple[SignalEvent, tuple[Effect, ...]]:
         started_ns = time.perf_counter_ns()
+        raw_persist_us = 0
         if persist_raw:
+            raw_started_ns = time.perf_counter_ns()
             self.store.append_raw(raw)
+            raw_persist_us = _elapsed_us(raw_started_ns)
         try:
+            parse_started_ns = time.perf_counter_ns()
             parsed = parse_message_with_evidence(raw, self.allowed_author_ids)
+            parse_us = _elapsed_us(parse_started_ns)
+
+            association_started_ns = time.perf_counter_ns()
             referenced_key = (
                 self.store.contract_for_message(raw.referenced_message_id)
                 if raw.referenced_message_id
@@ -54,10 +65,21 @@ class Pipeline:
                 self.state,
                 referenced_key,
             )
+            association_us = _elapsed_us(association_started_ns)
+
+            reduce_started_ns = time.perf_counter_ns()
             event = associated.event
             proposed_state, proposed_effects = reduce_book(self.state, event)
             assert_valid_book(proposed_state)
             proposed_fingerprint = state_fingerprint(proposed_state)
+            reduce_validate_us = _elapsed_us(reduce_started_ns)
+
+            stage_latencies_us = {
+                "raw_persist_us": raw_persist_us,
+                "parse_us": parse_us,
+                "association_us": association_us,
+                "reduce_validate_us": reduce_validate_us,
+            }
             result = self.committer.commit(
                 self.store,
                 raw_revision_id=raw.revision_id,
@@ -74,6 +96,7 @@ class Pipeline:
                     "parser_latency_us": parsed.evidence.latency_us,
                     "state_fingerprint": proposed_fingerprint,
                 },
+                stage_latencies_us=stage_latencies_us,
             )
             if result.inserted:
                 self.state = proposed_state
