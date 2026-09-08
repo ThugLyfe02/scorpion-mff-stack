@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import time
@@ -138,19 +139,17 @@ class SQLiteTransitionCommitter:
                 db.execute(
                     """
                     INSERT INTO heartbeats(component,last_seen_ts_utc,metadata_json)
-                    VALUES ('pipeline',?,?,?)
-                    """.replace("VALUES ('pipeline',?,?,?)", "VALUES ('pipeline',?,?)")
-                    + " ON CONFLICT(component) DO UPDATE SET "
-                    "last_seen_ts_utc=excluded.last_seen_ts_utc,"
-                    "metadata_json=excluded.metadata_json",
+                    VALUES ('pipeline',?,?)
+                    ON CONFLICT(component) DO UPDATE SET
+                        last_seen_ts_utc=excluded.last_seen_ts_utc,
+                        metadata_json=excluded.metadata_json
+                    """,
                     (created, json.dumps(metadata, sort_keys=True)),
                 )
                 db.execute("COMMIT")
             except Exception:
-                try:
+                with contextlib.suppress(sqlite3.OperationalError):
                     db.execute("ROLLBACK")
-                except sqlite3.OperationalError:
-                    pass
                 raise
         transaction_latency_us = max(
             0,
