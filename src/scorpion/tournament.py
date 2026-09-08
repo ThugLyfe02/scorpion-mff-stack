@@ -11,7 +11,7 @@ from .counterfactual import (
     compare_counterfactual_runs,
     run_counterfactual,
 )
-from .domain import EventKind, RawDiscordMessage
+from .domain import EventKind, RawDiscordMessage, SignalEvent
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +84,9 @@ def run_parser_tournament(
         surface_contract_changes = 0
         grammar_action_leaks = 0
 
+        def event_parser(item: RawDiscordMessage) -> SignalEvent:
+            return candidate.parser(item, allowed_author_ids).event
+
         for raw in messages:
             decision = candidate.parser(raw, allowed_author_ids)
             latencies.append(decision.evidence.latency_us)
@@ -95,10 +98,6 @@ def run_parser_tournament(
                     predicted_actionable += 1
                     correct_actionable += int(decision.event.kind is expected)
 
-            event_parser = lambda item, parser=candidate.parser: parser(
-                item,
-                allowed_author_ids,
-            ).event
             surface = evaluate_surface_robustness(raw, event_parser)
             surface_kind_changes += surface.kind_changes
             surface_contract_changes += surface.contract_changes
