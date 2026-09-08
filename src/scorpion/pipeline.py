@@ -1,20 +1,31 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .association import associate_followup_with_evidence
+from .decision_packet import OperatorDecisionPacket, build_decision_packet
 from .domain import BookState, Effect, RawDiscordMessage, SignalEvent
 from .invariants import assert_valid_book
 from .parser import parse_message_with_evidence
 from .reducer import reduce_book
 from .replay import replay, state_fingerprint
+from .resilience import OperationalMode, ResilienceAssessment
+from .sequence_guard import assess_sequence
+from .source_intelligence import SourceBehaviorShift
 from .store import Store
 from .transactional import SQLiteTransitionCommitter, TransitionCommitter
+
+SourceShiftResolver = Callable[[str, str], SourceBehaviorShift | None]
 
 
 def _elapsed_us(started_ns: int) -> int:
     return max(0, (time.perf_counter_ns() - started_ns) // 1_000)
+
+
+def _normal_resilience() -> ResilienceAssessment:
+    return ResilienceAssessment(OperationalMode.NORMAL, (), ())
 
 
 @dataclass(slots=True)
@@ -22,12 +33,17 @@ class Pipeline:
     store: Store
     allowed_author_ids: frozenset[str] | None = None
     committer: TransitionCommitter = field(default_factory=SQLiteTransitionCommitter)
+    resilience_assessment: ResilienceAssessment = field(default_factory=_normal_resilience)
+    source_shift_resolver: SourceShiftResolver | None = None
     state: BookState = field(init=False)
+    recent_events: list[SignalEvent] = field(init=False)
 
     def __post_init__(self) -> None:
-        self.state, historical_effects = replay(self.store.load_signals())
+        historical_signals = self.store.load_signals()
+        self.state, historical_effects = replay(historical_signals)
         assert_valid_book(self.state)
         self.store.append_effects(historical_effects)
+        self.recent_events = historical_signals[-100:]
 
         for raw in self.store.load_pending_raw():
             try:
@@ -36,6 +52,11 @@ class Pipeline:
                 self.store.mark_raw_failed(raw.revision_id, type(exc).__name__)
                 self.store.set_halt(True, f"raw_recovery_failed:{raw.revision_id}")
                 raise RuntimeError("failed to recover pending raw Discord revision") from exc
+
+    def _source_shift(self, raw: RawDiscordMessage) -> SourceBehaviorShift | None:
+        if self.source_shift_resolver is None:
+            return None
+        return self.source_shift_resolver(raw.author_id, raw.channel_id)
 
     def _process(
         self,
@@ -69,6 +90,15 @@ class Pipeline:
 
             reduce_started_ns = time.perf_counter_ns()
             event = associated.event
+            sequence = assess_sequence(event, self.state, recent_events=self.recent_events)
+            packet: OperatorDecisionPacket = build_decision_packet(
+                event,
+                parsed.evidence,
+                associated.evidence,
+                self.resilience_assessment,
+                sequence,
+                source_shift=self._source_shift(raw),
+            )
             proposed_state, proposed_effects = reduce_book(self.state, event)
             assert_valid_book(proposed_state)
             proposed_fingerprint = state_fingerprint(proposed_state)
@@ -87,6 +117,7 @@ class Pipeline:
                 effects=proposed_effects,
                 parser=parsed.evidence,
                 association=associated.evidence,
+                decision_packet=packet,
                 started_ns=started_ns,
                 heartbeat_metadata={
                     "last_message_id": raw.message_id,
@@ -95,16 +126,22 @@ class Pipeline:
                     "effect_count": len(proposed_effects),
                     "parser_latency_us": parsed.evidence.latency_us,
                     "state_fingerprint": proposed_fingerprint,
+                    "decision_disposition": packet.disposition.value,
+                    "operational_mode": packet.system_mode.value,
                 },
                 stage_latencies_us=stage_latencies_us,
             )
             if result.inserted:
                 self.state = proposed_state
+                self.recent_events.append(event)
+                self.recent_events = self.recent_events[-100:]
                 effects = proposed_effects
             else:
                 effects = ()
                 if event.event_id not in self.state.seen_event_ids:
-                    self.state, _ = replay(self.store.load_signals())
+                    historical_signals = self.store.load_signals()
+                    self.state, _ = replay(historical_signals)
+                    self.recent_events = historical_signals[-100:]
                     assert_valid_book(self.state)
             return event, effects
         except Exception as exc:
