@@ -64,6 +64,12 @@ class HistoricalQuoteTape:
                 raise ValueError(f"invalid quote JSONL at line {line_number}") from exc
         return cls(tuple(quotes))
 
+    def _start_index(self, contract_key: str, target_ts_utc: datetime) -> int | None:
+        timestamps = self._timestamps.get(contract_key)
+        if not timestamps:
+            return None
+        return bisect.bisect_left(timestamps, target_ts_utc.astimezone(UTC).timestamp())
+
     def at_or_after(
         self,
         contract_key: str,
@@ -72,15 +78,37 @@ class HistoricalQuoteTape:
         max_lag: timedelta = timedelta(seconds=3),
     ) -> HistoricalQuote | None:
         target = target_ts_utc.astimezone(UTC)
-        timestamps = self._timestamps.get(contract_key)
         quotes = self._quotes.get(contract_key)
-        if not timestamps or not quotes:
-            return None
-        index = bisect.bisect_left(timestamps, target.timestamp())
-        if index >= len(quotes):
+        index = self._start_index(contract_key, target)
+        if quotes is None or index is None or index >= len(quotes):
             return None
         quote = quotes[index]
         lag = quote.ts_utc - target
         if lag < timedelta(0) or lag > max_lag:
             return None
         return quote
+
+    def first_ask_at_or_below(
+        self,
+        contract_key: str,
+        target_ts_utc: datetime,
+        limit_price: Decimal,
+        *,
+        max_wait: timedelta = timedelta(seconds=5),
+    ) -> HistoricalQuote | None:
+        if limit_price <= 0:
+            raise ValueError("limit_price must be positive")
+        target = target_ts_utc.astimezone(UTC)
+        quotes = self._quotes.get(contract_key)
+        index = self._start_index(contract_key, target)
+        if quotes is None or index is None:
+            return None
+        for quote in quotes[index:]:
+            elapsed = quote.ts_utc - target
+            if elapsed < timedelta(0):
+                continue
+            if elapsed > max_wait:
+                break
+            if quote.ask <= limit_price:
+                return quote
+        return None
