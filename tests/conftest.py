@@ -11,7 +11,7 @@ def raw_factory():
         content: str,
         *,
         message_id: str = "1",
-        channel_id: str = "1231301953972207667",
+        channel_id: str = "968352649437126676",
         guild_id: str = "912747256736800838",
         author_id: str = "author",
         hour: int = 14,
