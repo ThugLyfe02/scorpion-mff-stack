@@ -99,10 +99,12 @@ def create_verified_backup(
     if backup.exists():
         backup.unlink()
 
-    with sqlite3.connect(str(source), uri=False) as source_db:
-        with sqlite3.connect(str(backup)) as backup_db:
-            source_db.backup(backup_db)
-            backup_db.commit()
+    with (
+        sqlite3.connect(str(source), uri=False) as source_db,
+        sqlite3.connect(str(backup)) as backup_db,
+    ):
+        source_db.backup(backup_db)
+        backup_db.commit()
 
     verification = verify_backup(source, backup)
     if not verification.verified:
