@@ -12,10 +12,15 @@ from .decision_store import unresolved_packet_count
 from .domain import EventKind, SignalEvent
 from .integrity import IntegrityLedger
 from .ops_queue import load_operator_inbox
+from .policy_bundle import RuntimePolicyBundle
+from .provenance import canonical_json
 from .reconciliation import ExternalPositionObservation, reconcile_positions
+from .recovery import create_verified_backup
 from .replay import replay, state_fingerprint
 from .resilience import assess_resilience
+from .schema_contract import inspect_schema
 from .stage_trace import load_stage_latency_report, storage_snapshot
+from .storage_health import checkpoint_wal, evaluate_storage_health, inspect_storage
 from .store import Store
 
 
@@ -38,6 +43,54 @@ def accuracy_main() -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def storage_main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", default="scorpion.db")
+    parser.add_argument(
+        "--checkpoint",
+        choices=("PASSIVE", "FULL", "RESTART", "TRUNCATE"),
+        default=None,
+    )
+    args = parser.parse_args()
+    snapshot = inspect_storage(args.db)
+    payload: dict[str, object] = {
+        "snapshot": asdict(snapshot),
+        "failures": evaluate_storage_health(snapshot),
+    }
+    if args.checkpoint is not None:
+        payload["checkpoint"] = asdict(checkpoint_wal(args.db, args.checkpoint))
+        payload["snapshot_after"] = asdict(inspect_storage(args.db))
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def schema_main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", default="scorpion.db")
+    args = parser.parse_args()
+    print(json.dumps(asdict(inspect_schema(args.db)), indent=2, sort_keys=True))
+
+
+def backup_main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--db", default="scorpion.db")
+    parser.add_argument("--overwrite", action="store_true")
+    args = parser.parse_args()
+    report = create_verified_backup(args.db, args.output, overwrite=args.overwrite)
+    print(json.dumps(asdict(report), indent=2, sort_keys=True))
+
+
+def policy_main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.parse_args()
+    policy = RuntimePolicyBundle()
+    payload = json.loads(canonical_json(policy))
+    if not isinstance(payload, dict):
+        raise RuntimeError("canonical policy payload must be an object")
+    payload["fingerprint"] = policy.fingerprint
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
 def ops_main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", default="scorpion.db")
@@ -51,8 +104,12 @@ def ops_main() -> None:
     latency = load_stage_latency_report(args.db, limit=args.latency_window)
     integrity = IntegrityLedger(args.db).verify_database()
     inbox = load_operator_inbox(args.db, limit=args.queue_limit)
+    schema = inspect_schema(args.db)
+    policy = RuntimePolicyBundle()
     payload = {
         "operational_mode": resilience.mode.value,
+        "policy_fingerprint": policy.fingerprint,
+        "schema": asdict(schema),
         "resilience_signals": [
             {
                 "code": signal.code,
