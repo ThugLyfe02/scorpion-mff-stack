@@ -14,7 +14,6 @@ from scorpion.sizing_lab import (
 )
 from scorpion.strategy_selector import SelectionStatus, select_candidates
 
-
 GUILD = "912747256736800838"
 CHANNEL = "968352649437126676"
 AUTHOR = "author"
