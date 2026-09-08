@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scorpion-mff"
-version = "0.2.0"
-description = "Deterministic event-sourced control plane for MFF signal ingestion, replay, paper execution, operator review, and precision telemetry."
+version = "0.3.0"
+description = "Deterministic MFF control plane with precision telemetry, calibrated evaluation, semantic validation, and crash-safe acceleration."
 requires-python = ">=3.13"
 dependencies = [
   "discord.py>=2.4,<3",
