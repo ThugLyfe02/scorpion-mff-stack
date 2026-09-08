@@ -83,7 +83,9 @@ class DiscordHistorySynchronizer:
                     if not isinstance(channel, (discord.TextChannel, discord.Thread)):
                         raise RuntimeError(f"channel {channel_id} is not text-readable")
                     if channel.guild is None or str(channel.guild.id) != self.guild_id:
-                        raise RuntimeError(f"channel {channel_id} does not belong to configured guild")
+                        raise RuntimeError(
+                            f"channel {channel_id} does not belong to configured guild"
+                        )
 
                     batch: list[ArchivedDiscordMessage] = []
                     # Traverse from the beginning. `reached_beginning` is only set after the
