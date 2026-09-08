@@ -11,7 +11,6 @@ import sqlite3
 
 from .domain import Effect, EventKind, RawDiscordMessage, SignalEvent
 
-
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=FULL;
