@@ -17,7 +17,7 @@ from .resilience import OperationalMode, ResilienceAssessment
 from .sequence_guard import SequenceAssessment
 from .source_intelligence import SourceBehaviorShift
 
-PACKET_VERSION = "v2"
+PACKET_VERSION = "v3"
 
 
 class DecisionDisposition(StrEnum):
@@ -57,10 +57,19 @@ class OperatorDecisionPacket:
     created_ts_utc: datetime
     strategy_bucket: StrategyBucket = StrategyBucket.UNKNOWN
     eligibility_reason: str = ""
+    policy_fingerprint: str = ""
 
 
-def _packet_id(event_id: str, disposition: DecisionDisposition, reasons: tuple[str, ...]) -> str:
-    payload = f"{PACKET_VERSION}|{event_id}|{disposition.value}|{'|'.join(reasons)}"
+def _packet_id(
+    event_id: str,
+    disposition: DecisionDisposition,
+    reasons: tuple[str, ...],
+    policy_fingerprint: str,
+) -> str:
+    payload = (
+        f"{PACKET_VERSION}|{event_id}|{disposition.value}|{'|'.join(reasons)}|"
+        f"{policy_fingerprint}"
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -78,6 +87,7 @@ def build_decision_packet(
     source_shift: SourceBehaviorShift | None = None,
     eligibility: EligibilityDecision | None = None,
     policy: SelectiveReviewPolicy | None = None,
+    policy_fingerprint: str = "",
     created_ts_utc: datetime | None = None,
 ) -> OperatorDecisionPacket:
     policy = policy or SelectiveReviewPolicy()
@@ -145,7 +155,12 @@ def build_decision_packet(
     reason_codes = tuple(dict.fromkeys(reasons))
     created = (created_ts_utc or datetime.now(UTC)).astimezone(UTC)
     return OperatorDecisionPacket(
-        packet_id=_packet_id(event.event_id, disposition, reason_codes),
+        packet_id=_packet_id(
+            event.event_id,
+            disposition,
+            reason_codes,
+            policy_fingerprint,
+        ),
         packet_version=PACKET_VERSION,
         event_id=event.event_id,
         message_id=event.message_id,
@@ -165,4 +180,5 @@ def build_decision_packet(
         created_ts_utc=created,
         strategy_bucket=eligibility.bucket,
         eligibility_reason=eligibility.reason,
+        policy_fingerprint=policy_fingerprint,
     )
