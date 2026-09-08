@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import collections
 import math
-from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -127,7 +127,7 @@ def percentile(values: Sequence[int | float], percentile_value: float) -> float:
 
 
 def distribution(kinds: Iterable[EventKind]) -> dict[str, float]:
-    counts = Counter(kind.value for kind in kinds)
+    counts = collections.Counter(kind.value for kind in kinds)
     total = sum(counts.values())
     if total == 0:
         return {}
