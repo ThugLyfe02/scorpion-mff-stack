@@ -142,6 +142,51 @@ def append_integrity_record(
     return IntegrityRecord(sequence, record_id, previous_hash, payload_sha256, record_hash)
 
 
+def _table_exists(db: sqlite3.Connection, table: str) -> bool:
+    row = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _extended_expected_payload(
+    db: sqlite3.Connection,
+    *,
+    event_id: str,
+    payload: dict[str, object],
+    base: dict[str, Scalar],
+    effects: Sequence[sqlite3.Row],
+    failures: list[str],
+) -> dict[str, Scalar] | None:
+    if "decision_packet_id" not in payload:
+        return base
+    if not _table_exists(db, "operator_decision_packets"):
+        failures.append(f"missing_decision_packet_table:{event_id}")
+        return None
+    packet = db.execute(
+        """
+        SELECT packet_id,disposition,system_mode
+        FROM operator_decision_packets WHERE event_id=?
+        """,
+        (event_id,),
+    ).fetchone()
+    if packet is None:
+        failures.append(f"missing_decision_packet:{event_id}")
+        return None
+    statuses = {str(effect["status"]) for effect in effects}
+    effect_status = next(iter(statuses)) if len(statuses) == 1 else ""
+    if len(statuses) > 1:
+        failures.append(f"mixed_effect_status:{event_id}")
+    return {
+        **base,
+        "effect_status": effect_status,
+        "decision_packet_id": str(packet["packet_id"]),
+        "decision_disposition": str(packet["disposition"]),
+        "operational_mode": str(packet["system_mode"]),
+    }
+
+
 def verify_database_evidence(path: str | Path) -> DatabaseEvidenceVerification:
     db = sqlite3.connect(str(path))
     db.row_factory = sqlite3.Row
@@ -195,7 +240,10 @@ def verify_database_evidence(path: str | Path) -> DatabaseEvidenceVerification:
                 continue
 
             effects = db.execute(
-                "SELECT kind FROM proposed_effects WHERE source_event_id=? ORDER BY effect_id",
+                """
+                SELECT kind,status FROM proposed_effects
+                WHERE source_event_id=? ORDER BY effect_id
+                """,
                 (event_id,),
             ).fetchall()
             raw_revision_id = str(payload.get("raw_revision_id", ""))
@@ -214,7 +262,7 @@ def verify_database_evidence(path: str | Path) -> DatabaseEvidenceVerification:
             if raw["status"] != "DONE" or raw["message_id"] != signal["message_id"]:
                 failures.append(f"raw_link_mismatch:{event_id}")
 
-            expected_payload: dict[str, Scalar] = {
+            base_payload: dict[str, Scalar] = {
                 "raw_revision_id": raw_revision_id,
                 "message_id": str(signal["message_id"]),
                 "kind": str(signal["kind"]),
@@ -225,6 +273,16 @@ def verify_database_evidence(path: str | Path) -> DatabaseEvidenceVerification:
                 "effect_count": len(effects),
                 "effect_kinds": ",".join(str(effect["kind"]) for effect in effects),
             }
+            expected_payload = _extended_expected_payload(
+                db,
+                event_id=event_id,
+                payload=payload,
+                base=base_payload,
+                effects=effects,
+                failures=failures,
+            )
+            if expected_payload is None:
+                continue
             expected_hash = _payload_hash(canonical_payload(expected_payload))
             if expected_hash != str(row["payload_sha256"]):
                 failures.append(f"source_evidence_mismatch:{event_id}")
