@@ -57,7 +57,7 @@ def run_counterfactual(
         associated = associate_followup_with_evidence(parsed.event, state, referenced_key)
         event = associated.event
         state, produced = reduce_book(state, event, policy)
-        assert_valid_book(state, policy)
+        assert_valid_book(state, max_open_positions=policy.max_open_positions)
         events.append(event)
         effects.extend(produced)
         if event.contract_key is not None:
