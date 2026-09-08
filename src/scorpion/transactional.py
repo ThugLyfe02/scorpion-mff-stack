@@ -169,6 +169,8 @@ class SQLiteTransitionCommitter:
                             "decision_packet_id": decision_packet.packet_id,
                             "decision_disposition": decision_packet.disposition.value,
                             "operational_mode": decision_packet.system_mode.value,
+                            "strategy_bucket": decision_packet.strategy_bucket.value,
+                            "eligibility_reason": decision_packet.eligibility_reason,
                         },
                         created_ts_utc=created,
                     )
