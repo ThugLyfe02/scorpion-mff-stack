@@ -150,14 +150,15 @@ def _table_exists(db: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
-def _packet_strategy_fields(
+def _packet_bound_fields(
     packet_payload_json: str,
     ledger_payload: dict[str, object],
     *,
     event_id: str,
     failures: list[str],
 ) -> dict[str, Scalar] | None:
-    if "strategy_bucket" not in ledger_payload and "eligibility_reason" not in ledger_payload:
+    bound_names = {"strategy_bucket", "eligibility_reason", "policy_fingerprint"}
+    if not bound_names.intersection(ledger_payload):
         return {}
     try:
         packet_payload = json.loads(packet_payload_json)
@@ -167,10 +168,14 @@ def _packet_strategy_fields(
     if not isinstance(packet_payload, dict):
         failures.append(f"decision_packet_payload_not_object:{event_id}")
         return None
-    return {
-        "strategy_bucket": str(packet_payload.get("strategy_bucket", "UNKNOWN")),
-        "eligibility_reason": str(packet_payload.get("eligibility_reason", "")),
-    }
+    result: dict[str, Scalar] = {}
+    if "strategy_bucket" in ledger_payload:
+        result["strategy_bucket"] = str(packet_payload.get("strategy_bucket", "UNKNOWN"))
+    if "eligibility_reason" in ledger_payload:
+        result["eligibility_reason"] = str(packet_payload.get("eligibility_reason", ""))
+    if "policy_fingerprint" in ledger_payload:
+        result["policy_fingerprint"] = str(packet_payload.get("policy_fingerprint", ""))
+    return result
 
 
 def _extended_expected_payload(
@@ -201,13 +206,13 @@ def _extended_expected_payload(
     effect_status = next(iter(statuses)) if len(statuses) == 1 else ""
     if len(statuses) > 1:
         failures.append(f"mixed_effect_status:{event_id}")
-    strategy_fields = _packet_strategy_fields(
+    bound_fields = _packet_bound_fields(
         str(packet["payload_json"]),
         payload,
         event_id=event_id,
         failures=failures,
     )
-    if strategy_fields is None:
+    if bound_fields is None:
         return None
     return {
         **base,
@@ -215,7 +220,7 @@ def _extended_expected_payload(
         "decision_packet_id": str(packet["packet_id"]),
         "decision_disposition": str(packet["disposition"]),
         "operational_mode": str(packet["system_mode"]),
-        **strategy_fields,
+        **bound_fields,
     }
 
 
@@ -340,12 +345,7 @@ def verify_database_evidence(path: str | Path) -> DatabaseEvidenceVerification:
 
 
 class IntegrityLedger:
-    """Append-only SHA-256 hash chain for forensic evidence.
-
-    The chain detects partial/accidental record mutation. For protection against an attacker
-    who can rewrite the entire database, periodically anchor the returned head hash in an
-    independent system; external anchoring is intentionally outside this package.
-    """
+    """Append-only SHA-256 hash chain for forensic evidence."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
