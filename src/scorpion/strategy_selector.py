@@ -97,8 +97,9 @@ def evaluate_candidate(
         SelectionStatus.SELECTED,
         metric.edge_score,
         (
-            "passes sample depth, false-discovery control, lower-bound edge, "
-            "time-fold stability, drawdown, and win-floor gates; research candidate only"
+            "passes sample depth, false-discovery control, lower-bound edge, time-fold "
+            "stability, drawdown, and win-floor gates; research candidate only, not a "
+            "profit guarantee"
         ),
     )
 
