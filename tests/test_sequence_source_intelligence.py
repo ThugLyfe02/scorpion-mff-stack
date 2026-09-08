@@ -20,7 +20,11 @@ def test_orphan_followup_is_critical(raw_factory):
 
 def test_source_timestamp_regression_requires_review(raw_factory):
     older = parse_message(raw_factory("QQQ 719C TODAY @ 1.01"))
-    newer = replace(older, event_id="newer", source_ts_utc=older.source_ts_utc + timedelta(seconds=5))
+    newer = replace(
+        older,
+        event_id="newer",
+        source_ts_utc=older.source_ts_utc + timedelta(seconds=5),
+    )
     assessment = assess_sequence(older, BookState(), recent_events=(newer,))
     assert assessment.requires_review is True
     assert any(finding.code == "source_timestamp_regression" for finding in assessment.findings)
