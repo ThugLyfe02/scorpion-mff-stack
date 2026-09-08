@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -52,10 +53,24 @@ class RawDiscordMessage:
             value = getattr(self, name)
             if value.tzinfo is None or value.utcoffset() is None:
                 raise ValueError(f"{name} must be timezone-aware")
+        if self.edited_ts_utc is not None:
+            if self.edited_ts_utc.tzinfo is None or self.edited_ts_utc.utcoffset() is None:
+                raise ValueError("edited_ts_utc must be timezone-aware")
+            object.__setattr__(self, "edited_ts_utc", self.edited_ts_utc.astimezone(UTC))
         if self.source_ts_utc.tzinfo != UTC:
             object.__setattr__(self, "source_ts_utc", self.source_ts_utc.astimezone(UTC))
         if self.received_ts_utc.tzinfo != UTC:
             object.__setattr__(self, "received_ts_utc", self.received_ts_utc.astimezone(UTC))
+
+    @property
+    def content_sha256(self) -> str:
+        return hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+
+    @property
+    def revision_id(self) -> str:
+        revision = self.edited_ts_utc.isoformat() if self.edited_ts_utc else "create"
+        payload = f"{self.message_id}|{revision}|{self.content_sha256}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +109,8 @@ class PositionState:
     status: PositionStatus = PositionStatus.FLAT
     generation: int = 0
     source_entry_message_id: str | None = None
+    source_channel_id: str | None = None
+    source_author_id: str | None = None
     last_source_ts_utc: datetime | None = None
     quantity: int = 0
     average_price: Decimal = Decimal("0")

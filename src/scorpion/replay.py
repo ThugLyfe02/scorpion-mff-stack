@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -39,7 +41,7 @@ def same_bar_target_resolution(
     bar: Bar,
     entry_occurs_within_bar: bool,
 ) -> AmbiguousFill:
-    """Never silently assumes a favorable OHLC ordering on the entry bar."""
+    """Never silently assume favorable OHLC ordering on the entry bar."""
     if not entry_occurs_within_bar:
         hit = bar.high >= target_price if target_price >= entry_price else bar.low <= target_price
         px = target_price if hit else None
@@ -53,13 +55,46 @@ def same_bar_target_resolution(
 
 
 def replay(events: Sequence[SignalEvent]) -> tuple[BookState, tuple[Effect, ...]]:
-    ordered = sorted(events, key=lambda e: (e.source_ts_utc, e.received_ts_utc, e.event_id))
+    ordered = sorted(
+        events,
+        key=lambda event: (event.source_ts_utc, event.received_ts_utc, event.event_id),
+    )
     state = BookState()
     effects: list[Effect] = []
     for event in ordered:
         state, produced = reduce_book(state, event)
         effects.extend(produced)
     return state, tuple(effects)
+
+
+def state_fingerprint(state: BookState) -> str:
+    """Stable digest used to prove live/replay state equivalence."""
+    payload = asdict(state)
+    payload["seen_event_ids"] = sorted(state.seen_event_ids)
+    payload["first_entry_proposed_on"] = (
+        state.first_entry_proposed_on.isoformat() if state.first_entry_proposed_on else None
+    )
+    positions: dict[str, dict[str, object]] = {}
+    for key in sorted(state.positions):
+        position = state.positions[key]
+        positions[key] = {
+            "contract_key": position.contract_key,
+            "status": position.status.value,
+            "generation": position.generation,
+            "source_entry_message_id": position.source_entry_message_id,
+            "source_channel_id": position.source_channel_id,
+            "source_author_id": position.source_author_id,
+            "last_source_ts_utc": (
+                position.last_source_ts_utc.isoformat() if position.last_source_ts_utc else None
+            ),
+            "quantity": position.quantity,
+            "average_price": str(position.average_price),
+            "added_once": position.added_once,
+            "last_reason": position.last_reason,
+        }
+    payload["positions"] = positions
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def realized_cost_basis_after_reduction(
@@ -71,5 +106,4 @@ def realized_cost_basis_after_reduction(
     if not 0 <= sold_quantity <= starting_quantity:
         raise ValueError("invalid sold quantity")
     remaining = starting_quantity - sold_quantity
-    # Average cost of remaining fungible long contracts is unchanged by a sale.
     return remaining, average_price if remaining else Decimal("0")
