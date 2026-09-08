@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from .accuracy import AssociationEvidence, DecisionEvidence
+from .decision_packet import DecisionDisposition, OperatorDecisionPacket
+from .decision_store import append_decision_packet
 from .domain import Effect, SignalEvent
 from .integrity import append_integrity_record
 from .stage_trace import append_stage_trace
@@ -35,10 +37,17 @@ class TransitionCommitter(Protocol):
         effects: Sequence[Effect],
         parser: DecisionEvidence,
         association: AssociationEvidence,
+        decision_packet: OperatorDecisionPacket,
         started_ns: int,
         heartbeat_metadata: Mapping[str, object],
         stage_latencies_us: Mapping[str, int],
     ) -> TransitionCommitResult: ...
+
+
+def _effect_status(packet: OperatorDecisionPacket) -> str:
+    if packet.disposition is DecisionDisposition.BLOCKED_SYSTEM:
+        return "BLOCKED_SYSTEM"
+    return "PENDING_REVIEW"
 
 
 class SQLiteTransitionCommitter:
@@ -46,7 +55,8 @@ class SQLiteTransitionCommitter:
 
     Raw receipt remains a separate FULL-sync transaction so a crash can never erase
     evidence that Discord delivered the message. Everything after parsing is committed
-    together: signal, effects, audit, integrity, stage trace, raw completion, and heartbeat.
+    together: signal, effects, decision packet, audit, integrity, stage trace, raw completion,
+    and heartbeat.
     """
 
     def commit(
@@ -58,6 +68,7 @@ class SQLiteTransitionCommitter:
         effects: Sequence[Effect],
         parser: DecisionEvidence,
         association: AssociationEvidence,
+        decision_packet: OperatorDecisionPacket,
         started_ns: int,
         heartbeat_metadata: Mapping[str, object],
         stage_latencies_us: Mapping[str, int],
@@ -87,14 +98,15 @@ class SQLiteTransitionCommitter:
                 )
                 inserted = cursor.rowcount == 1
                 effect_count = 0
+                effect_status = _effect_status(decision_packet)
                 if inserted:
                     for effect in effects:
                         effect_cursor = db.execute(
                             """
                             INSERT OR IGNORE INTO proposed_effects
                             (source_event_id,kind,contract_key,generation,reason,quantity_hint,
-                             metadata_json,created_ts_utc)
-                            VALUES (?,?,?,?,?,?,?,?)
+                             metadata_json,created_ts_utc,status)
+                            VALUES (?,?,?,?,?,?,?,?,?)
                             """,
                             (
                                 effect.source_event_id,
@@ -105,6 +117,7 @@ class SQLiteTransitionCommitter:
                                 effect.quantity_hint,
                                 json.dumps(effect.metadata, sort_keys=True),
                                 created,
+                                effect_status,
                             ),
                         )
                         effect_count += max(effect_cursor.rowcount, 0)
@@ -135,6 +148,7 @@ class SQLiteTransitionCommitter:
                     ),
                 )
                 if inserted:
+                    append_decision_packet(db, decision_packet)
                     effect_kinds = ",".join(effect.kind.value for effect in effects)
                     append_integrity_record(
                         db,
@@ -149,6 +163,10 @@ class SQLiteTransitionCommitter:
                             "association_method": association.method,
                             "effect_count": effect_count,
                             "effect_kinds": effect_kinds,
+                            "effect_status": effect_status,
+                            "decision_packet_id": decision_packet.packet_id,
+                            "decision_disposition": decision_packet.disposition.value,
+                            "operational_mode": decision_packet.system_mode.value,
                         },
                         created_ts_utc=created,
                     )
