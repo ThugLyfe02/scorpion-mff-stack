@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +14,19 @@ STAGE_COLUMNS = (
     "reduce_validate_us",
     "db_precommit_us",
 )
+
+_STAGE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS transition_stage_latency (
+    event_id TEXT PRIMARY KEY,
+    raw_revision_id TEXT NOT NULL,
+    raw_persist_us INTEGER NOT NULL,
+    parse_us INTEGER NOT NULL,
+    association_us INTEGER NOT NULL,
+    reduce_validate_us INTEGER NOT NULL,
+    db_precommit_us INTEGER NOT NULL,
+    created_ts_utc TEXT NOT NULL
+)
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +54,40 @@ class SQLiteStorageSnapshot:
     freelist_pages: int
     page_size: int
     journal_mode: str
+
+
+def ensure_stage_trace_schema(db: sqlite3.Connection) -> None:
+    db.execute(_STAGE_SCHEMA)
+
+
+def append_stage_trace(
+    db: sqlite3.Connection,
+    *,
+    event_id: str,
+    raw_revision_id: str,
+    stage_latencies_us: Mapping[str, int],
+    db_precommit_us: int,
+    created_ts_utc: str,
+) -> None:
+    ensure_stage_trace_schema(db)
+    db.execute(
+        """
+        INSERT OR IGNORE INTO transition_stage_latency
+        (event_id,raw_revision_id,raw_persist_us,parse_us,association_us,
+         reduce_validate_us,db_precommit_us,created_ts_utc)
+        VALUES (?,?,?,?,?,?,?,?)
+        """,
+        (
+            event_id,
+            raw_revision_id,
+            int(stage_latencies_us.get("raw_persist_us", 0)),
+            int(stage_latencies_us.get("parse_us", 0)),
+            int(stage_latencies_us.get("association_us", 0)),
+            int(stage_latencies_us.get("reduce_validate_us", 0)),
+            max(0, db_precommit_us),
+            created_ts_utc,
+        ),
+    )
 
 
 def _stats(values: list[int]) -> StageStats:
