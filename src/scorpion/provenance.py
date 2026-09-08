@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 MANIFEST_VERSION = "v1"
 
@@ -77,7 +77,7 @@ def _normalize(value: object) -> object:
     if isinstance(value, Path):
         return str(value)
     if is_dataclass(value) and not isinstance(value, type):
-        return _normalize(asdict(Any(value)))
+        return _normalize(asdict(cast(Any, value)))
     if isinstance(value, Mapping):
         return {
             str(key): _normalize(item)
@@ -85,7 +85,7 @@ def _normalize(value: object) -> object:
         }
     if isinstance(value, (set, frozenset)):
         normalized = [_normalize(item) for item in value]
-        return sorted(normalized, key=lambda item: canonical_json(item))
+        return sorted(normalized, key=canonical_json)
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [_normalize(item) for item in value]
     raise TypeError(f"unsupported canonical value: {type(value).__name__}")
