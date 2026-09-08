@@ -8,6 +8,8 @@ from decimal import Decimal
 from pathlib import Path
 
 from .accuracy import score_decisions
+from .causal_trace import trace_event
+from .certification import certify_runtime
 from .decision_store import unresolved_packet_count
 from .domain import EventKind, SignalEvent
 from .integrity import IntegrityLedger
@@ -22,6 +24,7 @@ from .schema_contract import inspect_schema
 from .stage_trace import load_stage_latency_report, storage_snapshot
 from .storage_health import checkpoint_wal, evaluate_storage_health, inspect_storage
 from .store import Store
+from .temporal_guard import load_temporal_stream_report
 
 
 def health_main() -> None:
@@ -91,6 +94,44 @@ def policy_main() -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def temporal_main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", default="scorpion.db")
+    parser.add_argument("--limit", type=int, default=5000)
+    args = parser.parse_args()
+    print(
+        json.dumps(
+            asdict(load_temporal_stream_report(args.db, limit=args.limit)),
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def trace_main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("event_id")
+    parser.add_argument("--db", default="scorpion.db")
+    args = parser.parse_args()
+    print(json.dumps(asdict(trace_event(args.db, args.event_id)), indent=2, sort_keys=True))
+
+
+def certify_main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", default="scorpion.db")
+    parser.add_argument("--backup", type=Path)
+    parser.add_argument("--overwrite-backup", action="store_true")
+    args = parser.parse_args()
+    report = certify_runtime(
+        args.db,
+        backup_path=args.backup,
+        overwrite_backup=args.overwrite_backup,
+    )
+    print(json.dumps(asdict(report), indent=2, sort_keys=True))
+    if not report.passed:
+        raise SystemExit(2)
+
+
 def ops_main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", default="scorpion.db")
@@ -105,11 +146,13 @@ def ops_main() -> None:
     integrity = IntegrityLedger(args.db).verify_database()
     inbox = load_operator_inbox(args.db, limit=args.queue_limit)
     schema = inspect_schema(args.db)
+    temporal = load_temporal_stream_report(args.db)
     policy = RuntimePolicyBundle()
     payload = {
         "operational_mode": resilience.mode.value,
         "policy_fingerprint": policy.fingerprint,
         "schema": asdict(schema),
+        "temporal_integrity": asdict(temporal),
         "resilience_signals": [
             {
                 "code": signal.code,
