@@ -42,6 +42,11 @@ def _priority(disposition: str, event_kind: str, age_seconds: float) -> QueuePri
     else:
         value = QueuePriority.P3
 
+    # Research-only strategy packets are intentionally non-urgent. They remain visible for
+    # research/audit, but must never age into the active execution-review queue.
+    if disposition == "BLOCKED_STRATEGY":
+        return QueuePriority.P3
+
     if event_kind in {"EXIT", "TRIM", "STOP"} and value > QueuePriority.P0:
         value = QueuePriority(value - 1)
     if age_seconds >= 30.0 and value > QueuePriority.P0:
@@ -85,7 +90,13 @@ def load_operator_inbox(
         created = datetime.fromisoformat(str(row["created_ts_utc"])).astimezone(UTC)
         age = max(0.0, (now - created).total_seconds())
         event_kind = str(payload.get("event_kind", "UNKNOWN"))
+        disposition = str(row["disposition"])
         actionable = event_kind in {"ENTRY", "ADD", "TRIM", "EXIT", "STOP"}
+        stale = (
+            actionable
+            and disposition != "BLOCKED_STRATEGY"
+            and age >= stale_after_seconds
+        )
         items.append(
             OperatorQueueItem(
                 packet_id=str(row["packet_id"]),
@@ -96,12 +107,12 @@ def load_operator_inbox(
                     if payload.get("contract_key") is not None
                     else None
                 ),
-                disposition=str(row["disposition"]),
+                disposition=disposition,
                 system_mode=str(row["system_mode"]),
                 evidence_strength=float(row["evidence_strength"]),
                 age_seconds=age,
-                stale=actionable and age >= stale_after_seconds,
-                priority=_priority(str(row["disposition"]), event_kind, age),
+                stale=stale,
+                priority=_priority(disposition, event_kind, age),
                 reason_codes=tuple(str(value) for value in payload.get("reason_codes", [])),
             )
         )
