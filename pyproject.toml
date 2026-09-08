@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scorpion-mff"
-version = "0.4.0"
-description = "Deterministic MFF control plane with calibrated semantics, adversarial replay, evidence integrity, and crash-safe acceleration."
+version = "0.5.0"
+description = "Deterministic MFF control plane with resilient Discord intelligence, exact-execution forensics, and evidence-gated risk research."
 requires-python = ">=3.13"
 dependencies = [
   "discord.py>=2.4,<3",
@@ -26,6 +26,8 @@ scorpion-health = "scorpion.cli:health_main"
 scorpion-accuracy = "scorpion.cli:accuracy_main"
 scorpion-ops = "scorpion.cli:ops_main"
 scorpion-reconcile = "scorpion.cli:reconcile_main"
+scorpion-history-sync = "scorpion.history_sync:history_sync_main"
+scorpion-forensics = "scorpion.forensics_cli:forensics_main"
 scorpion-ingest = "scorpion.runtime:ingest_main"
 
 [tool.hatch.build.targets.wheel]
