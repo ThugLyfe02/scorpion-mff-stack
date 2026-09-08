@@ -50,7 +50,20 @@ class ExecutionUncertaintyEnvelope:
     failures: tuple[str, ...]
 
 
+def compact_execution_scenarios() -> tuple[ExecutionScenarioSpec, ...]:
+    """High-information diagonal stress grid for routine forensic runs."""
+    return (
+        ExecutionScenarioSpec(50, 500, 1000),
+        ExecutionScenarioSpec(100, 500, 3000),
+        ExecutionScenarioSpec(250, 1000, 3000),
+        ExecutionScenarioSpec(500, 1000, 5000),
+        ExecutionScenarioSpec(1000, 3000, 5000),
+        ExecutionScenarioSpec(2000, 3000, 5000),
+    )
+
+
 def default_execution_scenarios() -> tuple[ExecutionScenarioSpec, ...]:
+    """Exhaustive research grid; intentionally more expensive than the compact set."""
     return tuple(
         ExecutionScenarioSpec(latency, quote_lag, limit_wait, depth_supported_only=True)
         for latency in (50, 250, 500, 1000, 2000)
