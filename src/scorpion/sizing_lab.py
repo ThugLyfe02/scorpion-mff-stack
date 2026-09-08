@@ -223,7 +223,7 @@ def score_segment(
         positive_fold_ratio=folds,
         bootstrap_mean_lower_90=bootstrap_lower,
         bootstrap_edge_p_value=edge_p,
-        fdr_q_value=1.0,
+        fdr_q_value=edge_p,
         shrunk_mean_return=shrunk_mean,
         conservative_edge=conservative_edge,
         readiness=readiness,
