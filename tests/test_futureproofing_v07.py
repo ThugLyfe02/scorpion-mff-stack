@@ -8,7 +8,6 @@ from scorpion.causal_trace import trace_event
 from scorpion.certification import certify_runtime
 from scorpion.delivery import DeliveryLedger, DeliveryState
 from scorpion.domain import Effect, EffectKind, RawDiscordMessage
-from scorpion.execution_forensics import ExecutionProfile
 from scorpion.fastpath import FastPathStatus, PreparedExecutionIntent
 from scorpion.governance import PromotionDecision, PromotionStatus
 from scorpion.history_archive import ArchivedDiscordMessage, HistoryArchive
