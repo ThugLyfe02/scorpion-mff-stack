@@ -10,6 +10,7 @@ class SelectionStatus(StrEnum):
     SELECTED = "SELECTED"
     REJECTED_SAMPLE = "REJECTED_SAMPLE"
     REJECTED_EDGE = "REJECTED_EDGE"
+    REJECTED_MULTIPLE_TESTING = "REJECTED_MULTIPLE_TESTING"
     REJECTED_STABILITY = "REJECTED_STABILITY"
     REJECTED_DRAWDOWN = "REJECTED_DRAWDOWN"
     REJECTED_WIN_FLOOR = "REJECTED_WIN_FLOOR"
@@ -18,6 +19,7 @@ class SelectionStatus(StrEnum):
 @dataclass(frozen=True, slots=True)
 class StrategySelectionPolicy:
     minimum_samples: int = 30
+    maximum_fdr_q_value: float = 0.10
     minimum_win_rate_lower_90: float = 0.45
     minimum_positive_fold_ratio: float = 0.75
     maximum_observed_drawdown: float = 0.50
@@ -44,6 +46,20 @@ def evaluate_candidate(
             SelectionStatus.REJECTED_SAMPLE,
             0.0,
             f"samples={metric.samples} < {policy.minimum_samples}",
+        )
+    if metric.readiness is SizingReadiness.MULTIPLE_TESTING_NOT_SIGNIFICANT:
+        return StrategyCandidate(
+            metric.segment,
+            SelectionStatus.REJECTED_MULTIPLE_TESTING,
+            0.0,
+            f"fdr_q_value={metric.fdr_q_value:.4f}",
+        )
+    if metric.fdr_q_value > policy.maximum_fdr_q_value:
+        return StrategyCandidate(
+            metric.segment,
+            SelectionStatus.REJECTED_MULTIPLE_TESTING,
+            0.0,
+            f"fdr_q_value={metric.fdr_q_value:.4f}",
         )
     if (
         metric.readiness is not SizingReadiness.READY_FOR_RESEARCH
@@ -81,8 +97,8 @@ def evaluate_candidate(
         SelectionStatus.SELECTED,
         metric.edge_score,
         (
-            "passes conservative sample, lower-bound edge, time-fold stability, "
-            "drawdown, and win-floor gates; research candidate, not a profit guarantee"
+            "passes sample depth, false-discovery control, lower-bound edge, "
+            "time-fold stability, drawdown, and win-floor gates; research candidate only"
         ),
     )
 
