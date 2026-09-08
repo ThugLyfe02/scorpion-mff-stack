@@ -17,7 +17,7 @@ class FailingCommitter:
 def test_atomic_pipeline_commits_normalized_bundle(tmp_path, raw_factory):
     store = Store(tmp_path / "atomic.db")
     pipeline = Pipeline(store, allowed_author_ids=frozenset({"author"}))
-    event, effects = asyncio.run(pipeline.handle(raw_factory("QQQ 719C TODAY @ 1.01")))
+    event, effects = asyncio.run(pipeline.handle(raw_factory("AAPL 200C TODAY @ 1.01")))
     assert event.contract_key in pipeline.state.positions
     assert len(effects) == 1
     assert store.load_pending_raw() == []
@@ -79,7 +79,7 @@ def test_failed_normalized_commit_does_not_advance_memory_state(tmp_path, raw_fa
         committer=FailingCommitter(),  # type: ignore[arg-type]
     )
     with pytest.raises(RuntimeError, match="commit failed"):
-        asyncio.run(pipeline.handle(raw_factory("QQQ 719C TODAY @ 1.01")))
+        asyncio.run(pipeline.handle(raw_factory("AAPL 200C TODAY @ 1.01")))
     assert pipeline.state.positions == {}
     assert len(store.load_pending_raw()) == 1
     assert store.load_signals() == []
