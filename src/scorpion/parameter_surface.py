@@ -250,8 +250,8 @@ def evaluate_parameter_surface(
             f"{policy.minimum_top_half_fold_ratio:.6f}"
         )
     grouped: dict[str, list[float]] = defaultdict(list)
-    for item in neighbors:
-        grouped[item.dominant_axis].append(item.relative_lipschitz)
+    for neighbor in neighbors:
+        grouped[neighbor.dominant_axis].append(neighbor.relative_lipschitz)
     axis_reports = tuple(
         AxisSensitivity(
             axis=axis,
