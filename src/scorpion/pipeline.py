@@ -16,6 +16,7 @@ from .replay import replay, state_fingerprint
 from .resilience import OperationalMode, ResilienceAssessment
 from .sequence_guard import assess_sequence
 from .source_intelligence import SourceBehaviorShift
+from .state_checkpoint import restore_state
 from .store import Store
 from .transactional import SQLiteTransitionCommitter, TransitionCommitter
 
@@ -43,16 +44,27 @@ class Pipeline:
 
     def __post_init__(self) -> None:
         historical_signals = self.store.load_signals()
-        self.state, historical_effects = replay(
+        restored = restore_state(
+            self.store.path,
             historical_signals,
-            self.runtime_policy.base,
+            runtime_policy=self.runtime_policy,
         )
+        self.state = restored.state
         assert_valid_book(
             self.state,
             max_open_positions=self.runtime_policy.base.max_open_positions,
         )
-        self.store.append_effects(historical_effects)
+        self.store.append_effects(restored.effects_to_rematerialize)
         self.recent_events = historical_signals[-100:]
+        self.store.heartbeat(
+            "replay-recovery",
+            used_checkpoint=restored.used_checkpoint,
+            checkpoint_id=restored.checkpoint_id,
+            tail_events=restored.tail_events,
+            reason=restored.reason,
+            state_fingerprint=state_fingerprint(self.state),
+            policy_fingerprint=self.runtime_policy.fingerprint,
+        )
 
         for raw in self.store.load_pending_raw():
             try:
@@ -161,10 +173,12 @@ class Pipeline:
                 effects = ()
                 if event.event_id not in self.state.seen_event_ids:
                     historical_signals = self.store.load_signals()
-                    self.state, _ = replay(
+                    restored = restore_state(
+                        self.store.path,
                         historical_signals,
-                        self.runtime_policy.base,
+                        runtime_policy=self.runtime_policy,
                     )
+                    self.state = restored.state
                     self.recent_events = historical_signals[-100:]
                     assert_valid_book(
                         self.state,
