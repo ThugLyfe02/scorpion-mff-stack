@@ -70,19 +70,21 @@ async def run_discord() -> None:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                # The raw revision is already durable. Halt progression conservatively because a
-                # failed state transition can make subsequent follow-up association unsafe.
+                # The raw revision is already durable. Later queued revisions must not advance
+                # normalized state ahead of this unresolved transition. Stop this consumer and
+                # leave the queue plus raw_processing evidence for deterministic recovery.
                 store.set_halt(True, f"live_transition_failed:{raw.revision_id}")
                 pipeline.resilience_assessment = controller.refresh()
                 store.heartbeat(
                     "discord-ingress-queue",
-                    status="error",
+                    status="halted",
                     depth=ingress.qsize(),
                     capacity=ingress.maxsize,
                     utilization=ingress.qsize() / ingress.maxsize,
                     last_revision_id=raw.revision_id,
                     error=type(exc).__name__,
                 )
+                return
             finally:
                 ingress.task_done()
 

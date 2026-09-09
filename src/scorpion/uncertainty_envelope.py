@@ -123,7 +123,9 @@ def run_execution_uncertainty_envelope(
                     mean_return=statistics.fmean(values) if values else 0.0,
                     median_return=statistics.median(values) if values else 0.0,
                     conservative_edge=0.0,
-                    win_rate=(sum(value > 0 for value in values) / len(values) if values else 0.0),
+                    win_rate=(
+                        sum(value > 0 for value in values) / len(values) if values else 0.0
+                    ),
                     positive_fold_ratio=0.0,
                     max_drawdown=0.0,
                     passed=False,
@@ -150,25 +152,26 @@ def run_execution_uncertainty_envelope(
         )
 
     populated = [item for item in results if item.analyzed_trades >= minimum_scenario_samples]
-    passing = [item for item in populated if item.passed]
-    required = max(1, int(len(populated) * minimum_passing_fraction + 0.999999))
+    passing = [item for item in results if item.passed]
+    insufficient = [item for item in results if item.analyzed_trades < minimum_scenario_samples]
+    required = max(1, int(len(results) * minimum_passing_fraction + 0.999999))
     failures: list[str] = []
     if not populated:
         failures.append("no_execution_scenario_has_sufficient_samples")
-    elif len(passing) < required:
+    if insufficient:
+        failures.append(f"insufficient_execution_scenarios:{len(insufficient)}")
+    if len(passing) < required:
         failures.append(f"passing_scenarios:{len(passing)}<{required}")
-    if populated and min(item.conservative_edge for item in populated) <= 0:
+    if results and min(item.conservative_edge for item in results) <= 0:
         failures.append("worst_case_conservative_edge_non_positive")
 
     return ExecutionUncertaintyEnvelope(
         scenarios=tuple(results),
         populated_scenarios=len(populated),
         passing_scenarios=len(passing),
-        worst_conservative_edge=(
-            min(item.conservative_edge for item in populated) if populated else 0.0
-        ),
-        worst_mean_return=min((item.mean_return for item in populated), default=0.0),
-        worst_win_rate=min((item.win_rate for item in populated), default=0.0),
+        worst_conservative_edge=min((item.conservative_edge for item in results), default=0.0),
+        worst_mean_return=min((item.mean_return for item in results), default=0.0),
+        worst_win_rate=min((item.win_rate for item in results), default=0.0),
         robust=not failures,
         failures=tuple(failures),
     )

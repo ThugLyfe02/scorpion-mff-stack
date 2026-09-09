@@ -37,8 +37,12 @@ def certify_runtime(
     backup_path: str | Path | None = None,
     overwrite_backup: bool = False,
 ) -> RuntimeCertificationReport:
+    source = Path(path)
+    if not source.is_file():
+        raise FileNotFoundError(source)
+
     policy = RuntimePolicyBundle()
-    signals = load_signals_in_processing_order(path)
+    signals = load_signals_in_processing_order(source)
     state, _ = replay(signals, policy.base, order=ReplayOrder.INPUT)
     fingerprint = state_fingerprint(state)
     duplicate_state, _ = replay(
@@ -46,14 +50,20 @@ def certify_runtime(
         policy.base,
         order=ReplayOrder.INPUT,
     )
-    restored = restore_state(path, signals, runtime_policy=policy)
+    restored = restore_state(source, signals, runtime_policy=policy)
     restored_fingerprint = state_fingerprint(restored.state)
-    schema = inspect_schema(path)
-    integrity = IntegrityLedger(path).verify_database()
-    temporal = load_temporal_stream_report(path)
-    processing_order = inspect_processing_order(path)
-    feature_store = verify_feature_store(path)
-    quarantined = quarantined_count(path)
+    schema = inspect_schema(source)
+    integrity = IntegrityLedger(source).verify_database()
+    integrity_failures = list(integrity.failures)
+    if integrity.legacy_uncovered_signals:
+        integrity_failures.append(
+            f"signals_outside_integrity_ledger:{integrity.legacy_uncovered_signals}"
+        )
+    integrity_strict = integrity.ok and integrity.legacy_uncovered_signals == 0
+    temporal = load_temporal_stream_report(source)
+    processing_order = inspect_processing_order(source)
+    feature_store = verify_feature_store(source)
+    quarantined = quarantined_count(source)
     checks: list[CertificationCheck] = [
         CertificationCheck(
             "schema_contract",
@@ -62,8 +72,12 @@ def certify_runtime(
         ),
         CertificationCheck(
             "database_evidence_integrity",
-            integrity.ok,
-            "verified" if integrity.ok else ",".join(integrity.failures),
+            integrity_strict,
+            (
+                f"verified:{integrity.checked}"
+                if integrity_strict
+                else ",".join(integrity_failures) or "database_evidence_failed"
+            ),
         ),
         CertificationCheck(
             "durable_processing_order",
@@ -118,7 +132,7 @@ def certify_runtime(
     backup: BackupVerification | None = None
     if backup_path is not None:
         backup = create_verified_backup(
-            path,
+            source,
             backup_path,
             overwrite=overwrite_backup,
             runtime_policy=policy,

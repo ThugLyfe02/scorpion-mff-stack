@@ -62,17 +62,51 @@ def trace_event(path: str | Path, event_id: str) -> CausalTrace:
         _decode_payload(signal, "payload_json")
         message_id = str(signal["message_id"])
 
-        raw_row = db.execute(
-            """
-            SELECT r.*,p.status AS processing_status,p.error AS processing_error
-            FROM raw_discord_events r
-            LEFT JOIN raw_processing p ON p.raw_event_id=r.raw_event_id
-            WHERE r.message_id=?
-            ORDER BY COALESCE(r.edited_ts_utc,r.source_ts_utc) DESC
-            LIMIT 1
-            """,
-            (message_id,),
-        ).fetchone()
+        integrity: dict[str, Any] | None = None
+        if _table_exists(db, "integrity_ledger"):
+            integrity = _row_dict(
+                db.execute(
+                    "SELECT * FROM integrity_ledger WHERE record_id=?",
+                    (event_id,),
+                ).fetchone()
+            )
+            if integrity is not None:
+                _decode_payload(integrity, "payload_json")
+        if integrity is None:
+            missing.append("integrity_record")
+
+        raw_revision_id = ""
+        if integrity is not None:
+            payload = integrity.get("payload_json")
+            if isinstance(payload, dict):
+                raw_revision_id = str(payload.get("raw_revision_id", ""))
+
+        if raw_revision_id:
+            raw_row = db.execute(
+                """
+                SELECT r.*,p.status AS processing_status,p.error AS processing_error
+                FROM raw_discord_events r
+                LEFT JOIN raw_processing p ON p.raw_event_id=r.raw_event_id
+                WHERE r.raw_event_id=?
+                LIMIT 1
+                """,
+                (raw_revision_id,),
+            ).fetchone()
+        else:
+            # Legacy fallback is diagnostic only. Without an integrity-bound revision ID, the
+            # trace must not claim completeness because a later Discord edit may be selected.
+            missing.append("raw_revision_binding")
+            raw_row = db.execute(
+                """
+                SELECT r.*,p.status AS processing_status,p.error AS processing_error
+                FROM raw_discord_events r
+                LEFT JOIN raw_processing p ON p.raw_event_id=r.raw_event_id
+                WHERE r.message_id=?
+                ORDER BY COALESCE(r.edited_ts_utc,r.source_ts_utc) DESC
+                LIMIT 1
+                """,
+                (message_id,),
+            ).fetchone()
         raw = _row_dict(raw_row)
         if raw is None:
             missing.append("raw_discord_event")
@@ -120,19 +154,6 @@ def trace_event(path: str | Path, event_id: str) -> CausalTrace:
             )
         if stage is None:
             missing.append("stage_latency")
-
-        integrity: dict[str, Any] | None = None
-        if _table_exists(db, "integrity_ledger"):
-            integrity = _row_dict(
-                db.execute(
-                    "SELECT * FROM integrity_ledger WHERE record_id=?",
-                    (event_id,),
-                ).fetchone()
-            )
-            if integrity is not None:
-                _decode_payload(integrity, "payload_json")
-        if integrity is None:
-            missing.append("integrity_record")
 
         approvals: tuple[dict[str, Any], ...] = ()
         if effects:

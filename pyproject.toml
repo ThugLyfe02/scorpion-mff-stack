@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scorpion-mff"
-version = "0.16.0"
-description = "Deterministic MFF control plane with nanosecond options microstructure replay, causal execution evidence, adaptive shadow ML, label-quality modeling, stress-cluster quant risk, immutable self-evolution challengers, durable processing order, and verified recovery."
+version = "0.17.0"
+description = "Deterministic MFF control plane with nanosecond options microstructure replay, causal execution evidence, adaptive shadow ML, label-quality modeling, stress-cluster quant risk, conditional economic-safety gates, immutable self-evolution challengers, durable processing order, and verified recovery."
 requires-python = ">=3.13"
 dependencies = [
   "discord.py>=2.4,<3",

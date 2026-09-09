@@ -6,7 +6,9 @@ from enum import StrEnum
 from .adaptive_ensemble import AdaptiveEnsembleSnapshot
 from .bayesian_changepoint import BayesianChangePointReport
 from .canary import CanaryReport, CanaryStatus
+from .conditional_policy_safety import ConditionalPolicySafetyReport
 from .conformal import ConformalEvaluation
+from .cost_adjusted_policy_value import CostAdjustedPolicyValueReport
 from .ensemble_diversity import EnsembleDiversityReport
 from .feature_family_selection import FeatureFamilySelectionReport
 from .feature_stability import FeatureStabilityReport
@@ -76,6 +78,9 @@ class PromotionEvidence:
     label_noise: LabelNoiseReport | None = None
     uncertainty_health: UncertaintyHealthReport | None = None
     safe_policy_improvement: SafePolicyImprovementReport | None = None
+    conditional_policy_safety: ConditionalPolicySafetyReport | None = None
+    cost_adjusted_policy_value: CostAdjustedPolicyValueReport | None = None
+    require_economic_safety_gates: bool = False
     return_distribution: DistributionDominanceReport | None = None
     bayesian_changepoint: BayesianChangePointReport | None = None
 
@@ -253,6 +258,29 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
     ):
         failures.append("safe_policy_improvement_not_qualified")
         failures.extend(f"policy_improvement:{item}" for item in evidence.safe_policy_improvement.failures)
+    if evidence.require_economic_safety_gates:
+        if evidence.conditional_policy_safety is None:
+            failures.append("conditional_policy_safety_required_but_missing")
+        if evidence.cost_adjusted_policy_value is None:
+            failures.append("cost_adjusted_policy_value_required_but_missing")
+    if (
+        evidence.conditional_policy_safety is not None
+        and not evidence.conditional_policy_safety.qualified
+    ):
+        failures.append("conditional_policy_safety_not_qualified")
+        failures.extend(
+            f"conditional_safety:{item}"
+            for item in evidence.conditional_policy_safety.failures
+        )
+    if (
+        evidence.cost_adjusted_policy_value is not None
+        and not evidence.cost_adjusted_policy_value.qualified
+    ):
+        failures.append("cost_adjusted_policy_value_not_qualified")
+        failures.extend(
+            f"cost_adjusted_value:{item}"
+            for item in evidence.cost_adjusted_policy_value.failures
+        )
     if evidence.return_distribution is not None and not evidence.return_distribution.qualified:
         failures.append("return_distribution_dominance_not_qualified")
         failures.extend(f"return_distribution:{item}" for item in evidence.return_distribution.failures)

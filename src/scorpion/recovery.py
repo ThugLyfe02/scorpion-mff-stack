@@ -51,7 +51,7 @@ def _snapshot(
         signal_count=len(signals),
         state_fingerprint=state_fingerprint(state),
         integrity_head=ledger.head_hash(),
-        database_evidence_ok=evidence.ok,
+        database_evidence_ok=evidence.ok and evidence.legacy_uncovered_signals == 0,
         policy_fingerprint=runtime_policy.fingerprint,
         process_order_fingerprint=processing_order.process_fingerprint,
         processing_order_complete=processing_order.complete,
@@ -72,10 +72,17 @@ def verify_backup(
     *,
     runtime_policy: RuntimePolicyBundle | None = None,
 ) -> BackupVerification:
+    source_path_obj = Path(source_path)
+    backup_path_obj = Path(backup_path)
+    if not source_path_obj.is_file():
+        raise FileNotFoundError(source_path_obj)
+    if not backup_path_obj.is_file():
+        raise FileNotFoundError(backup_path_obj)
+
     policy = runtime_policy or RuntimePolicyBundle()
-    source = _snapshot(source_path, runtime_policy=policy)
-    backup = _snapshot(backup_path, runtime_policy=policy)
-    sqlite_integrity, foreign_key_violations = _database_checks(backup_path)
+    source = _snapshot(source_path_obj, runtime_policy=policy)
+    backup = _snapshot(backup_path_obj, runtime_policy=policy)
+    sqlite_integrity, foreign_key_violations = _database_checks(backup_path_obj)
     failures: list[str] = []
     if sqlite_integrity.lower() != "ok":
         failures.append(f"sqlite_integrity:{sqlite_integrity}")
@@ -102,7 +109,7 @@ def verify_backup(
     return BackupVerification(
         source=source,
         backup=backup,
-        backup_file=fingerprint_file(backup_path),
+        backup_file=fingerprint_file(backup_path_obj),
         sqlite_integrity=sqlite_integrity,
         foreign_key_violations=foreign_key_violations,
         verified=not failures,
@@ -119,7 +126,7 @@ def create_verified_backup(
 ) -> BackupVerification:
     source = Path(source_path)
     backup = Path(backup_path)
-    if not source.exists():
+    if not source.is_file():
         raise FileNotFoundError(source)
     if backup.exists() and not overwrite:
         raise FileExistsError(backup)

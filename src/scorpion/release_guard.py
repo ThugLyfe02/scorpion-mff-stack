@@ -66,14 +66,16 @@ def _release_id(
     artifact_hash: str,
     policy_fingerprint: str,
     research_manifest_hash: str,
+    previous_release_id: str,
 ) -> str:
     material = "|".join(
         (
-            "release-v1",
+            "release-v2",
             component,
             artifact_hash,
             policy_fingerprint,
             research_manifest_hash,
+            previous_release_id,
         )
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -118,6 +120,7 @@ class ReleaseRegistry:
             artifact_hash=artifact_hash,
             policy_fingerprint=policy_fingerprint,
             research_manifest_hash=research_manifest_hash,
+            previous_release_id=previous_release_id,
         )
         with self._connect() as db:
             db.execute(

@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from .domain import BookState, Effect, PositionState, PositionStatus, SignalEvent
+from .integrity import IntegrityLedger
 from .invariants import assert_valid_book
 from .policy_bundle import RuntimePolicyBundle
 from .processing_order import load_signals_in_processing_order
@@ -185,6 +186,14 @@ def load_latest_verified_checkpoint(
     runtime_policy: RuntimePolicyBundle | None = None,
 ) -> StateCheckpoint | None:
     policy = runtime_policy or RuntimePolicyBundle()
+
+    # A stored boundary hash proves only that the checkpoint and ledger row agree with each
+    # other. Re-verify the ledger against the current normalized source rows before trusting the
+    # serialized prefix; otherwise post-checkpoint signal tampering could restore stale state.
+    evidence = IntegrityLedger(path).verify_database()
+    if not evidence.ok or evidence.legacy_uncovered_signals:
+        return None
+
     with sqlite3.connect(str(path)) as db:
         exists = db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_checkpoints'"
