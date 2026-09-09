@@ -188,7 +188,10 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
     if evidence.required_feature_family_id is not None:
         if evidence.feature_family_selection is None:
             failures.append("feature_family_selection_missing_for_required_family")
-        elif evidence.required_feature_family_id not in evidence.feature_family_selection.selected_families:
+        elif (
+            evidence.required_feature_family_id
+            not in evidence.feature_family_selection.selected_families
+        ):
             failures.append(
                 "required_feature_family_not_selected:"
                 f"{evidence.required_feature_family_id}"
