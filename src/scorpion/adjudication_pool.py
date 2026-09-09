@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .label_consensus import Annotation, LabelConsensusPolicy, LabelConsensusReport, evaluate_label_consensus
+from .label_consensus import (
+    Annotation,
+    LabelConsensusPolicy,
+    LabelConsensusReport,
+    evaluate_label_consensus,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS adjudication_annotations (
