@@ -5,6 +5,7 @@ from enum import StrEnum
 
 from .canary import CanaryReport, CanaryStatus
 from .conformal import ConformalEvaluation
+from .mondrian_conformal import MondrianEvaluation
 from .selective import SelectivePolicy
 from .tournament import CandidateScore
 from .uncertainty_envelope import ExecutionUncertaintyEnvelope
@@ -32,6 +33,7 @@ class PromotionEvidence:
     anytime_accuracy_lower_bound: float | None = None
     required_anytime_accuracy_lower_bound: float = 0.95
     conformal: ConformalEvaluation | None = None
+    mondrian_conformal: MondrianEvaluation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +99,11 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
     if evidence.conformal is not None and not evidence.conformal.qualified:
         failures.append("conformal_prediction_set_not_qualified")
         failures.extend(f"conformal:{item}" for item in evidence.conformal.failures)
+    if evidence.mondrian_conformal is not None and not evidence.mondrian_conformal.qualified:
+        failures.append("class_conditional_conformal_not_qualified")
+        failures.extend(
+            f"mondrian_conformal:{item}" for item in evidence.mondrian_conformal.failures
+        )
 
     if failures:
         return PromotionDecision(
