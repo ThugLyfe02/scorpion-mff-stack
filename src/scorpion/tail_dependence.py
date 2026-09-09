@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
@@ -76,10 +77,14 @@ def _daily_group_returns(
     return dict(output)
 
 
-def _quantile(values: list[float], fraction: float) -> float:
-    ordered = sorted(values)
-    index = min(len(ordered) - 1, max(0, int(fraction * (len(ordered) - 1))))
-    return ordered[index]
+def _exact_tail_days(
+    values_by_day: dict[date, float],
+    common: list[date],
+    fraction: float,
+) -> set[date]:
+    count = max(1, math.ceil(len(common) * fraction))
+    ranked = sorted(common, key=lambda day: (values_by_day[day], day))
+    return set(ranked[:count])
 
 
 def _pair(
@@ -91,12 +96,8 @@ def _pair(
     common = sorted(set(series[left]) & set(series[right]))
     if len(common) < policy.minimum_overlap_days:
         return TailDependencePair(left, right, len(common), 0, 0, 0, 0.0, 0.0, 0.0, False)
-    left_values = [series[left][day] for day in common]
-    right_values = [series[right][day] for day in common]
-    left_threshold = _quantile(left_values, policy.tail_fraction)
-    right_threshold = _quantile(right_values, policy.tail_fraction)
-    left_tail = {day for day in common if series[left][day] <= left_threshold}
-    right_tail = {day for day in common if series[right][day] <= right_threshold}
+    left_tail = _exact_tail_days(series[left], common, policy.tail_fraction)
+    right_tail = _exact_tail_days(series[right], common, policy.tail_fraction)
     joint = left_tail & right_tail
     right_given_left = len(joint) / len(left_tail) if left_tail else 0.0
     left_given_right = len(joint) / len(right_tail) if right_tail else 0.0
@@ -161,7 +162,12 @@ def evaluate_tail_dependence(
     *,
     policy: TailDependencePolicy | None = None,
 ) -> TailDependenceReport:
-    """Cluster nominally different underlyings that share the same lower-tail failure days."""
+    """Cluster nominally different underlyings that share the same lower-tail failure days.
+
+    Tail membership is rank-based rather than threshold-based. That keeps the tail mass fixed
+    when returns are discrete or heavily tied, preventing a common empirical-quantile artifact
+    where every tied ordinary day gets misclassified as a tail event.
+    """
     policy = policy or TailDependencePolicy()
     series = _daily_group_returns(trades)
     groups = tuple(sorted(series))
