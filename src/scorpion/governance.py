@@ -6,6 +6,7 @@ from enum import StrEnum
 from .canary import CanaryReport, CanaryStatus
 from .conformal import ConformalEvaluation
 from .mondrian_conformal import MondrianEvaluation
+from .oof_stacking import CrossFittedStackingReport
 from .selective import SelectivePolicy
 from .sequential_evidence import ExecutionEvidenceMonitorSnapshot, SequentialEvidenceStatus
 from .temporal_crossfit import TemporalCrossFitReport
@@ -38,6 +39,7 @@ class PromotionEvidence:
     mondrian_conformal: MondrianEvaluation | None = None
     sequential_evidence: ExecutionEvidenceMonitorSnapshot | None = None
     temporal_crossfit: TemporalCrossFitReport | None = None
+    stacking: CrossFittedStackingReport | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +120,9 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         failures.extend(
             f"temporal_crossfit:{item}" for item in evidence.temporal_crossfit.failures
         )
+    if evidence.stacking is not None and not evidence.stacking.qualified:
+        failures.append("chronological_oof_stacking_not_qualified")
+        failures.extend(f"stacking:{item}" for item in evidence.stacking.failures)
 
     if failures:
         return PromotionDecision(
