@@ -12,6 +12,7 @@ from .evolution_ledger import (
 )
 from .feature_stability import FeatureStabilityReport
 from .regime_mixture import RegimeMixtureReport
+from .residual_hotspots import ResidualHotspotReport
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +60,7 @@ class EvolutionObservation:
     regime_mixture: RegimeMixtureReport
     fill_model_trusted: bool
     drift_active: bool
+    residual_hotspots: ResidualHotspotReport | None = None
 
     def __post_init__(self) -> None:
         if self.observed_ts_utc.tzinfo is None or self.observed_ts_utc.utcoffset() is None:
@@ -94,6 +96,14 @@ def _weight_l1(
     return sum(abs(left.get(model_id, 0.0) - right.get(model_id, 0.0)) for model_id in model_ids)
 
 
+def _target_slices(observation: EvolutionObservation) -> tuple[str, ...]:
+    if observation.residual_hotspots is None:
+        return ()
+    return tuple(
+        sorted({item.slice_key for item in observation.residual_hotspots.robust_hotspots})
+    )
+
+
 def evaluate_evolution_need(
     baseline: EvolutionBaseline | None,
     observation: EvolutionObservation,
@@ -102,22 +112,36 @@ def evaluate_evolution_need(
 ) -> EvolutionDecision:
     """Decide whether evidence changed enough to generate a new research challenger."""
     policy = policy or EvolutionControlPolicy()
+    target_slices = _target_slices(observation)
     if baseline is None:
-        enough = observation.dataset_samples >= policy.minimum_new_samples
+        enough_data = observation.dataset_samples >= policy.minimum_new_samples
+        hotspot_triggered = bool(target_slices)
+        should_generate = enough_data or hotspot_triggered
+        if hotspot_triggered:
+            primary = EvolutionTrigger.RESIDUAL_HOTSPOT
+            triggers = (EvolutionTrigger.RESIDUAL_HOTSPOT,)
+            reasons = (
+                "initial_targeted_residual_hotspot:"
+                + ",".join(target_slices[:5]),
+            )
+        elif enough_data:
+            primary = EvolutionTrigger.NEW_DATA
+            triggers = (EvolutionTrigger.NEW_DATA,)
+            reasons = ("initial_evolution_candidate_ready",)
+        else:
+            primary = None
+            triggers = ()
+            reasons = ("insufficient_initial_data_for_evolution",)
         return EvolutionDecision(
-            should_generate=enough,
-            primary_trigger=EvolutionTrigger.NEW_DATA if enough else None,
-            triggers=(EvolutionTrigger.NEW_DATA,) if enough else (),
+            should_generate=should_generate,
+            primary_trigger=primary,
+            triggers=triggers,
             new_samples=observation.dataset_samples,
             weight_l1_change=0.0,
             feature_changes=len(observation.feature_stability.qualified_features),
             regime_changes=len(observation.regime_mixture.regimes),
             cooldown_active=False,
-            reasons=(
-                "initial_evolution_candidate_ready"
-                if enough
-                else "insufficient_initial_data_for_evolution",
-            ),
+            reasons=reasons,
         )
 
     new_samples = max(0, observation.dataset_samples - baseline.dataset_samples)
@@ -137,6 +161,9 @@ def evaluate_evolution_need(
     if baseline.fill_model_trusted and not observation.fill_model_trusted:
         triggers.append(EvolutionTrigger.CALIBRATION_DECAY)
         reasons.append("fill_model_trust_degraded")
+    if target_slices:
+        triggers.append(EvolutionTrigger.RESIDUAL_HOTSPOT)
+        reasons.append("robust_residual_hotspots:" + ",".join(target_slices[:5]))
     if (
         feature_changes >= policy.minimum_feature_changes
         or regime_changes >= policy.minimum_regime_changes
@@ -155,6 +182,7 @@ def evaluate_evolution_need(
     critical = {
         EvolutionTrigger.DRIFT,
         EvolutionTrigger.CALIBRATION_DECAY,
+        EvolutionTrigger.RESIDUAL_HOTSPOT,
     }
     critical_triggered = any(trigger in critical for trigger in triggers)
     should_generate = bool(triggers) and (critical_triggered or not cooldown_active)
@@ -164,6 +192,7 @@ def evaluate_evolution_need(
     priority = (
         EvolutionTrigger.DRIFT,
         EvolutionTrigger.CALIBRATION_DECAY,
+        EvolutionTrigger.RESIDUAL_HOTSPOT,
         EvolutionTrigger.REGIME_CHANGE,
         EvolutionTrigger.MODEL_DEGRADATION,
         EvolutionTrigger.NEW_DATA,
@@ -207,6 +236,7 @@ def maybe_generate_evolution_candidate(
         feature_stability=observation.feature_stability,
         adaptive_ensemble=observation.adaptive_ensemble,
         regime_mixture=observation.regime_mixture,
+        target_slices=_target_slices(observation),
     )
     persist_evolution_candidate(path, candidate)
     return decision, candidate
