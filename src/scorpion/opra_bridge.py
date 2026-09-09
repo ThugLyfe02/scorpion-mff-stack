@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+from .instrument_identity import InstrumentIdentityRegistry
 from .microstructure import AggressorSide, MarketEventKind, OptionMarketEvent, ns_from_datetime
 
 _OCC_RE = re.compile(
@@ -73,17 +74,33 @@ def _aggressor(value: str | None) -> AggressorSide:
     return AggressorSide.UNKNOWN
 
 
+def _canonical_contract_key(
+    symbol: str,
+    ts_event_ns: int,
+    identity_registry: InstrumentIdentityRegistry | None,
+) -> str:
+    if identity_registry is None:
+        return contract_key_from_occ_symbol(symbol)
+    identity = identity_registry.resolve(symbol, ts_event_ns)
+    if identity is None:
+        raise ValueError(
+            f"vendor symbol {symbol!r} did not resolve to exactly one canonical contract"
+        )
+    return identity.contract_key
+
+
 def normalize_databento_opra_row(
     row: Mapping[str, str],
     *,
     price_encoding: str = "fixed9",
     consolidated_publisher_id: int = 30,
     include_regional_quotes: bool = False,
+    identity_registry: InstrumentIdentityRegistry | None = None,
 ) -> tuple[OptionMarketEvent, ...]:
     symbol = row.get("symbol") or row.get("raw_symbol") or ""
-    contract_key = contract_key_from_occ_symbol(symbol)
     ts_recv_ns = _timestamp_ns(row.get("ts_recv", ""))
     ts_event_ns = _timestamp_ns(row.get("ts_event", ""))
+    contract_key = _canonical_contract_key(symbol, ts_event_ns, identity_registry)
     publisher_id = int(row.get("publisher_id") or 0)
     sequence = int(row.get("sequence") or 0)
     action = (row.get("action") or "").strip().upper()
@@ -165,6 +182,7 @@ def normalize_opra_csv(
     price_encoding: str = "fixed9",
     consolidated_publisher_id: int = 30,
     include_regional_quotes: bool = False,
+    identity_registry: InstrumentIdentityRegistry | None = None,
 ) -> tuple[int, int]:
     rows = 0
     events_written = 0
@@ -179,6 +197,7 @@ def normalize_opra_csv(
                     price_encoding=price_encoding,
                     consolidated_publisher_id=consolidated_publisher_id,
                     include_regional_quotes=include_regional_quotes,
+                    identity_registry=identity_registry,
                 )
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError(f"invalid OPRA CSV row {row_number}") from exc
@@ -197,12 +216,23 @@ def opra_normalize_main() -> None:
     parser.add_argument("--price-encoding", choices=("fixed9", "decimal"), default="fixed9")
     parser.add_argument("--consolidated-publisher-id", type=int, default=30)
     parser.add_argument("--include-regional-quotes", action="store_true")
+    parser.add_argument(
+        "--instrument-identities",
+        type=Path,
+        help="Point-in-time vendor-symbol to canonical-contract JSONL. Fail closed if unresolved.",
+    )
     args = parser.parse_args()
+    identity_registry = (
+        InstrumentIdentityRegistry.from_jsonl(args.instrument_identities)
+        if args.instrument_identities is not None
+        else None
+    )
     rows, events = normalize_opra_csv(
         args.input,
         args.output,
         price_encoding=args.price_encoding,
         consolidated_publisher_id=args.consolidated_publisher_id,
         include_regional_quotes=args.include_regional_quotes,
+        identity_registry=identity_registry,
     )
     print(json.dumps({"rows_read": rows, "events_written": events}, indent=2, sort_keys=True))
