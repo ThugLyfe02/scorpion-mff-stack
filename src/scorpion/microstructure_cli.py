@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .backtest_overfit import OverfitPolicy, build_daily_return_panel, evaluate_backtest_overfit
+from .backtest_overfit import (
+    OverfitPolicy,
+    build_daily_return_panel,
+    evaluate_backtest_overfit,
+)
 from .config import ALLOWED_CHANNEL_IDS
 from .contract_terms import ContractTermsRegistry
 from .dataset_fingerprint import fingerprint_history_archive
@@ -42,6 +46,7 @@ from .sizing_lab import (
     segment_completed_trades,
 )
 from .strategy_selector import SelectionStatus, select_candidates
+from .tick_validation import validate_buy_limit_ticks
 from .walk_forward import WalkForwardPolicy, evaluate_walk_forward
 
 
@@ -85,7 +90,7 @@ def microstructure_forensics_main() -> None:
     parser.add_argument(
         "--contract-terms",
         type=Path,
-        help="Point-in-time contract terms JSONL with verified multiplier/deliverable metadata.",
+        help="Point-in-time contract terms JSONL with multiplier/tick metadata.",
     )
     parser.add_argument(
         "--allow-unverified-contract-terms",
@@ -183,8 +188,18 @@ def microstructure_forensics_main() -> None:
         contract_registry.coverage(contract_requests) if contract_registry is not None else None
     )
     contract_terms_ok = (
-        contract_coverage.standard_only
+        contract_coverage.execution_ready
         if contract_coverage is not None
+        else args.allow_unverified_contract_terms
+    )
+    tick_alignment = (
+        validate_buy_limit_ticks(report.legs, contract_registry)
+        if contract_registry is not None
+        else None
+    )
+    tick_alignment_ok = (
+        tick_alignment.all_aligned
+        if tick_alignment is not None
         else args.allow_unverified_contract_terms
     )
 
@@ -290,6 +305,7 @@ def microstructure_forensics_main() -> None:
         and certified_coverage_ok
         and provenance_ok
         and contract_terms_ok
+        and tick_alignment_ok
         and fill_model_trust_ok
         and regime_stability_ok
         and selection_overfit_ok
@@ -320,6 +336,8 @@ def microstructure_forensics_main() -> None:
         "code_provenance_ok": provenance_ok,
         "contract_terms": asdict(contract_coverage) if contract_coverage is not None else None,
         "contract_terms_ok": contract_terms_ok,
+        "tick_alignment": asdict(tick_alignment) if tick_alignment is not None else None,
+        "tick_alignment_ok": tick_alignment_ok,
         "fill_calibration": asdict(fill_calibration) if fill_calibration is not None else None,
         "fill_model_trust": asdict(fill_trust) if fill_trust is not None else None,
         "fill_model_trust_ok": fill_model_trust_ok,
@@ -360,8 +378,13 @@ def microstructure_forensics_main() -> None:
         )
     if not contract_terms_ok:
         warnings.append(
-            "Point-in-time option contract terms are missing, ambiguous, adjusted, or use a "
-            "nonstandard multiplier; authoritative sizing is withheld rather than assuming x100."
+            "Point-in-time contract terms are missing/ambiguous, adjusted, nonstandard, or "
+            "missing minimum price increments; authoritative sizing is withheld."
+        )
+    if not tick_alignment_ok:
+        warnings.append(
+            "One or more modeled BUY limits are not aligned to the point-in-time option tick; "
+            "authoritative sizing is withheld instead of assuming an impossible venue price."
         )
     if not fill_model_trust_ok:
         warnings.append(
@@ -399,9 +422,9 @@ def microstructure_forensics_main() -> None:
             )
         if not payload["sizing_envelopes"]:
             warnings.append(
-                "No segment survived contract truth, calibrated execution evidence, regime "
-                "stability, selection-overfit control, statistical selection, and purged "
-                "out-of-sample gates."
+                "No segment survived contract/tick truth, calibrated execution evidence, "
+                "regime stability, selection-overfit control, statistical selection, and "
+                "purged out-of-sample gates."
             )
 
     if args.full:
