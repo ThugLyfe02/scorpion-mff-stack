@@ -12,7 +12,7 @@ from .invariants import assert_valid_book
 from .parser import parse_message_with_evidence
 from .policy_bundle import RuntimePolicyBundle
 from .reducer import reduce_book
-from .replay import replay, state_fingerprint
+from .replay import state_fingerprint
 from .resilience import OperationalMode, ResilienceAssessment
 from .sequence_guard import assess_sequence
 from .source_intelligence import SourceBehaviorShift
@@ -199,3 +199,10 @@ class Pipeline:
 
     async def handle(self, raw: RawDiscordMessage) -> tuple[SignalEvent, tuple[Effect, ...]]:
         return self._process(raw, persist_raw=True)
+
+    async def handle_persisted(
+        self,
+        raw: RawDiscordMessage,
+    ) -> tuple[SignalEvent, tuple[Effect, ...]]:
+        """Process a raw revision that has already crossed the durable receipt boundary."""
+        return self._process(raw, persist_raw=False)
