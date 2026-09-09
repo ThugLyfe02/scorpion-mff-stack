@@ -27,6 +27,7 @@ from .microstructure_forensics import (
 from .parser import PARSER_VERSION
 from .policy_bundle import RuntimePolicyBundle
 from .provenance import build_research_manifest, fingerprint_file
+from .regime_stability import RegimeStabilityPolicy, evaluate_regime_stability
 from .sizing_lab import (
     SizingConstraints,
     build_sizing_envelope,
@@ -134,6 +135,7 @@ def microstructure_forensics_main() -> None:
     sizing_constraints = SizingConstraints()
     walk_forward_policy = WalkForwardPolicy()
     fill_trust_policy = FillTrustPolicy()
+    regime_policy = RegimeStabilityPolicy()
     report = run_archive_microstructure_forensics(
         archive,
         tape,
@@ -193,6 +195,13 @@ def microstructure_forensics_main() -> None:
     certified_completed = tuple(
         trade for trade in report.completed_trades if trade.depth_evidence_complete
     )
+    regime_stability = evaluate_regime_stability(
+        certified_completed,
+        report.legs,
+        policy=regime_policy,
+    )
+    regime_stability_ok = regime_stability.passed
+
     segments = segment_completed_trades(certified_completed)
     rankings = rank_segments(segments, constraints=sizing_constraints)
     ranking_by_segment = {metric.segment: metric for metric in rankings}
@@ -229,6 +238,7 @@ def microstructure_forensics_main() -> None:
             "sizing_constraints": sizing_constraints,
             "walk_forward": walk_forward_policy,
             "fill_trust": fill_trust_policy,
+            "regime_stability": regime_policy,
         },
         datasets=datasets,
         parameters={
@@ -245,6 +255,7 @@ def microstructure_forensics_main() -> None:
         and provenance_ok
         and contract_terms_ok
         and fill_model_trust_ok
+        and regime_stability_ok
     )
     status_counts = {
         status.value: sum(leg.status is status for leg in report.legs)
@@ -275,6 +286,8 @@ def microstructure_forensics_main() -> None:
         "fill_model_trust": asdict(fill_trust) if fill_trust is not None else None,
         "fill_model_trust_ok": fill_model_trust_ok,
         "execution_attribution": asdict(attribution),
+        "regime_stability": asdict(regime_stability),
+        "regime_stability_ok": regime_stability_ok,
         "completed_certified_trades": len(certified_completed),
         "leg_status_counts": status_counts,
         "segment_rankings": [asdict(item) for item in rankings],
@@ -310,6 +323,11 @@ def microstructure_forensics_main() -> None:
             "The execution fill model is not empirically trusted by shadow/paper calibration; "
             "authoritative sizing is withheld."
         )
+    if not regime_stability_ok:
+        warnings.append(
+            "Certified trade performance is not proven stable across spread, quote-age, latency, "
+            "and session regimes; authoritative sizing is withheld."
+        )
 
     if sizing_gate_ok:
         payload["sizing_envelopes"] = [
@@ -331,8 +349,8 @@ def microstructure_forensics_main() -> None:
             )
         if not payload["sizing_envelopes"]:
             warnings.append(
-                "No segment survived contract truth, calibrated execution evidence, statistical "
-                "selection, and purged out-of-sample gates."
+                "No segment survived contract truth, calibrated execution evidence, regime "
+                "stability, statistical selection, and purged out-of-sample gates."
             )
 
     if args.full:
