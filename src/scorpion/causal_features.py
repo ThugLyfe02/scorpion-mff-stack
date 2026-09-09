@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .processing_order import ensure_processing_order_schema
+
 _ACTIONABLE = frozenset({"ENTRY", "ADD", "TRIM", "EXIT", "STOP"})
 _FEATURE_SET_VERSION = "causal-features-v1"
 
@@ -55,6 +57,14 @@ class FeatureStoreVerification:
     valid: bool
 
 
+@dataclass(frozen=True, slots=True)
+class FeatureBackfillReport:
+    considered: int
+    created: int
+    existing: int
+    feature_set_version: str
+
+
 def _canonical_json(payload: dict[str, float | int | str]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -70,6 +80,11 @@ def _rate(numerator: int, denominator: int) -> float:
 def _payload(row: sqlite3.Row) -> dict[str, object]:
     value = json.loads(str(row["payload_json"]))
     return value if isinstance(value, dict) else {}
+
+
+def _ensure(db: sqlite3.Connection) -> None:
+    ensure_processing_order_schema(db)
+    db.executescript(_SCHEMA)
 
 
 def _current_context(db: sqlite3.Connection, event_id: str) -> tuple[int, dict[str, object]]:
@@ -93,17 +108,18 @@ def build_point_in_time_features(
     *,
     window: int = 100,
 ) -> CausalFeatureSnapshot:
-    """Build features using only normalized events committed before ``event_id``.
+    """Build features using only evidence available before ``event_id`` was committed.
 
-    The durable process sequence is the information boundary. Source timestamps are retained as
-    data but never used to pull future normalized decisions backward into the feature set.
+    ``process_seq`` is the point-in-time boundary. Current raw-context fields such as channel,
+    author, ticker and source/receive lag are allowed because they are knowable at decision time.
+    The current normalized action label and later human adjudications are deliberately excluded.
     """
     if window <= 0:
         raise ValueError("window must be positive")
     db = sqlite3.connect(str(path))
     db.row_factory = sqlite3.Row
     try:
-        db.executescript(_SCHEMA)
+        _ensure(db)
         process_seq, current = _current_context(db, event_id)
         prior = db.execute(
             """
@@ -169,7 +185,6 @@ def build_point_in_time_features(
         "channel_id": channel_id,
         "author_id": author_id,
         "ticker": ticker,
-        "event_kind": str(current.get("kind") or ""),
     }
     created = datetime.now(UTC)
     return CausalFeatureSnapshot(
@@ -187,7 +202,7 @@ def persist_feature_snapshot(path: str | Path, snapshot: CausalFeatureSnapshot) 
     if hashlib.sha256(encoded.encode("utf-8")).hexdigest() != snapshot.feature_sha256:
         raise ValueError("feature snapshot hash does not match payload")
     with sqlite3.connect(str(path)) as db:
-        db.executescript(_SCHEMA)
+        _ensure(db)
         target = db.execute(
             "SELECT process_seq FROM event_processing_order WHERE event_id=?",
             (snapshot.event_id,),
@@ -222,6 +237,46 @@ def build_and_persist_features(
     return snapshot
 
 
+def backfill_feature_snapshots(
+    path: str | Path,
+    *,
+    window: int = 100,
+    limit: int | None = None,
+) -> FeatureBackfillReport:
+    if limit is not None and limit <= 0:
+        raise ValueError("limit must be positive")
+    with sqlite3.connect(str(path)) as db:
+        db.row_factory = sqlite3.Row
+        _ensure(db)
+        rows = db.execute(
+            """
+            SELECT o.event_id,
+                   CASE WHEN f.event_id IS NULL THEN 0 ELSE 1 END AS already_exists
+            FROM event_processing_order o
+            LEFT JOIN causal_feature_snapshots f
+              ON f.event_id=o.event_id AND f.feature_set_version=?
+            ORDER BY o.process_seq
+            """,
+            (_FEATURE_SET_VERSION,),
+        ).fetchall()
+    if limit is not None:
+        rows = rows[:limit]
+    created = 0
+    existing = 0
+    for row in rows:
+        if int(row["already_exists"]):
+            existing += 1
+            continue
+        build_and_persist_features(path, str(row["event_id"]), window=window)
+        created += 1
+    return FeatureBackfillReport(
+        considered=len(rows),
+        created=created,
+        existing=existing,
+        feature_set_version=_FEATURE_SET_VERSION,
+    )
+
+
 def load_training_rows(
     path: str | Path,
     *,
@@ -231,7 +286,7 @@ def load_training_rows(
     db = sqlite3.connect(str(path))
     db.row_factory = sqlite3.Row
     try:
-        db.executescript(_SCHEMA)
+        _ensure(db)
         rows = db.execute(
             """
             SELECT f.event_id,f.process_seq,f.feature_json,a.expected_kind,
@@ -265,7 +320,7 @@ def verify_feature_store(path: str | Path) -> FeatureStoreVerification:
     db = sqlite3.connect(str(path))
     db.row_factory = sqlite3.Row
     try:
-        db.executescript(_SCHEMA)
+        _ensure(db)
         rows = db.execute(
             """
             SELECT f.*,o.process_seq AS target_process_seq
