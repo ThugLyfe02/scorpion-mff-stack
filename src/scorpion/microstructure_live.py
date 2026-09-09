@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
+from pathlib import Path
 
+from .fill_calibration import FillPredictionRecord, record_fill_prediction
 from .microstructure import (
     MicroFillEnvelope,
     OptionMarketEvent,
@@ -119,6 +121,26 @@ class LiveShadowRecorder:
             first_event_ns=in_window[0].ts_event_ns if in_window else None,
             last_event_ns=in_window[-1].ts_event_ns if in_window else None,
         )
+
+    def evaluate_and_record(
+        self,
+        intent: ShadowExecutionIntent,
+        *,
+        event_id: str,
+        calibration_db: str | Path,
+    ) -> tuple[ShadowExecutionResult, FillPredictionRecord]:
+        """Evaluate a shadow intent and freeze its predicted fill interval for later calibration."""
+        result = self.evaluate(intent)
+        prediction = record_fill_prediction(
+            calibration_db,
+            intent_id=intent.intent_id,
+            event_id=event_id,
+            contract_key=intent.contract_key,
+            fill=result.fill,
+            order_arrival_ts_utc=intent.order_arrival_ts_utc,
+            observation_deadline_ts_utc=intent.deadline_ts_utc,
+        )
+        return result, prediction
 
 
 EventSink = Callable[[OptionMarketEvent], Awaitable[None] | None]
