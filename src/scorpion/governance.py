@@ -25,6 +25,7 @@ from .safe_policy_improvement import SafePolicyImprovementReport
 from .selective import SelectivePolicy
 from .sequential_evidence import ExecutionEvidenceMonitorSnapshot, SequentialEvidenceStatus
 from .shift_weighted_conformal import ShiftWeightedConformalEvaluation
+from .targeted_regression_firewall import TargetedRegressionFirewallReport
 from .temporal_crossfit import TemporalCrossFitReport
 from .tournament import CandidateScore
 from .uncertainty_decomposition import UncertaintyHealthReport
@@ -61,6 +62,7 @@ class PromotionEvidence:
     incremental_oof: IncrementalOOFReport | None = None
     feature_family_selection: FeatureFamilySelectionReport | None = None
     required_feature_family_id: str | None = None
+    targeted_regression_firewall: TargetedRegressionFirewallReport | None = None
     nested_selection: NestedSelectionReport | None = None
     hyperparameter_plateau: HyperparameterPlateauReport | None = None
     parameter_surface: ParameterSurfaceReport | None = None
@@ -139,15 +141,12 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
             failures.extend(f"canary:{item}" for item in evidence.canary.failures)
     if evidence.execution_uncertainty is not None and not evidence.execution_uncertainty.robust:
         failures.append("execution_uncertainty_not_robust")
-        failures.extend(
-            f"uncertainty:{item}" for item in evidence.execution_uncertainty.failures
-        )
+        failures.extend(f"uncertainty:{item}" for item in evidence.execution_uncertainty.failures)
     if evidence.runtime_certified is False:
         failures.append("runtime_certification_failed")
     if (
         evidence.anytime_accuracy_lower_bound is not None
-        and evidence.anytime_accuracy_lower_bound
-        < evidence.required_anytime_accuracy_lower_bound
+        and evidence.anytime_accuracy_lower_bound < evidence.required_anytime_accuracy_lower_bound
     ):
         failures.append("anytime_accuracy_confidence_sequence_below_requirement")
     if evidence.conformal is not None and not evidence.conformal.qualified:
@@ -155,18 +154,13 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         failures.extend(f"conformal:{item}" for item in evidence.conformal.failures)
     if evidence.mondrian_conformal is not None and not evidence.mondrian_conformal.qualified:
         failures.append("class_conditional_conformal_not_qualified")
-        failures.extend(
-            f"mondrian_conformal:{item}" for item in evidence.mondrian_conformal.failures
-        )
+        failures.extend(f"mondrian_conformal:{item}" for item in evidence.mondrian_conformal.failures)
     if (
         evidence.shift_weighted_conformal is not None
         and not evidence.shift_weighted_conformal.qualified
     ):
         failures.append("shift_weighted_conformal_not_qualified")
-        failures.extend(
-            f"shift_conformal:{item}"
-            for item in evidence.shift_weighted_conformal.failures
-        )
+        failures.extend(f"shift_conformal:{item}" for item in evidence.shift_weighted_conformal.failures)
     if (
         evidence.sequential_evidence is not None
         and evidence.sequential_evidence.status is SequentialEvidenceStatus.ALARM
@@ -174,17 +168,13 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         failures.append("anytime_valid_sequential_degradation_alarm")
     if evidence.temporal_crossfit is not None and not evidence.temporal_crossfit.passed:
         failures.append("temporal_crossfit_not_qualified")
-        failures.extend(
-            f"temporal_crossfit:{item}" for item in evidence.temporal_crossfit.failures
-        )
+        failures.extend(f"temporal_crossfit:{item}" for item in evidence.temporal_crossfit.failures)
     if evidence.stacking is not None and not evidence.stacking.qualified:
         failures.append("chronological_oof_stacking_not_qualified")
         failures.extend(f"stacking:{item}" for item in evidence.stacking.failures)
     if evidence.incremental_oof is not None and not evidence.incremental_oof.qualified:
         failures.append("incremental_oof_value_not_qualified")
-        failures.extend(
-            f"incremental_oof:{item}" for item in evidence.incremental_oof.failures
-        )
+        failures.extend(f"incremental_oof:{item}" for item in evidence.incremental_oof.failures)
     if evidence.required_feature_family_id is not None:
         if evidence.feature_family_selection is None:
             failures.append("feature_family_selection_missing_for_required_family")
@@ -196,11 +186,18 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
                 "required_feature_family_not_selected:"
                 f"{evidence.required_feature_family_id}"
             )
+    if (
+        evidence.targeted_regression_firewall is not None
+        and not evidence.targeted_regression_firewall.qualified
+    ):
+        failures.append("targeted_evolution_regression_firewall_not_qualified")
+        failures.extend(
+            f"targeted_firewall:{item}"
+            for item in evidence.targeted_regression_firewall.failures
+        )
     if evidence.nested_selection is not None and not evidence.nested_selection.qualified:
         failures.append("nested_temporal_selection_not_qualified")
-        failures.extend(
-            f"nested_selection:{item}" for item in evidence.nested_selection.failures
-        )
+        failures.extend(f"nested_selection:{item}" for item in evidence.nested_selection.failures)
     if (
         evidence.hyperparameter_plateau is not None
         and not evidence.hyperparameter_plateau.qualified
@@ -212,15 +209,11 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         )
     if evidence.parameter_surface is not None and not evidence.parameter_surface.qualified:
         failures.append("parameter_surface_not_qualified")
-        failures.extend(
-            f"parameter_surface:{item}" for item in evidence.parameter_surface.failures
-        )
+        failures.extend(f"parameter_surface:{item}" for item in evidence.parameter_surface.failures)
     if evidence.pareto_selection is not None:
         if not evidence.pareto_selection.qualified:
             failures.append("pareto_selection_not_qualified")
-            failures.extend(
-                f"pareto_selection:{item}" for item in evidence.pareto_selection.failures
-            )
+            failures.extend(f"pareto_selection:{item}" for item in evidence.pareto_selection.failures)
         elif evidence.candidate.name not in evidence.pareto_selection.frontier:
             failures.append(
                 "candidate_not_on_safe_pareto_frontier:"
@@ -228,21 +221,15 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
             )
     if evidence.ensemble_diversity is not None and not evidence.ensemble_diversity.qualified:
         failures.append("ensemble_diversity_not_qualified")
-        failures.extend(
-            f"ensemble_diversity:{item}" for item in evidence.ensemble_diversity.failures
-        )
+        failures.extend(f"ensemble_diversity:{item}" for item in evidence.ensemble_diversity.failures)
     if evidence.adaptive_ensemble is not None and not evidence.adaptive_ensemble.trusted:
         failures.append("adaptive_ensemble_not_trusted")
-        failures.extend(
-            f"adaptive_ensemble:{item}" for item in evidence.adaptive_ensemble.failures
-        )
+        failures.extend(f"adaptive_ensemble:{item}" for item in evidence.adaptive_ensemble.failures)
         if evidence.adaptive_ensemble.drift_active:
             failures.append("adaptive_ensemble_frozen_by_drift")
     if evidence.feature_stability is not None and not evidence.feature_stability.qualified:
         failures.append("temporal_feature_stability_not_qualified")
-        failures.extend(
-            f"feature_stability:{item}" for item in evidence.feature_stability.failures
-        )
+        failures.extend(f"feature_stability:{item}" for item in evidence.feature_stability.failures)
     if evidence.regime_mixture is not None and not evidence.regime_mixture.qualified:
         failures.append("regime_conditioned_mixture_not_qualified")
         failures.extend(f"regime_mixture:{item}" for item in evidence.regime_mixture.failures)
@@ -259,23 +246,16 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         failures.extend(f"label_noise:{item}" for item in evidence.label_noise.failures)
     if evidence.uncertainty_health is not None and not evidence.uncertainty_health.qualified:
         failures.append("ensemble_uncertainty_health_not_qualified")
-        failures.extend(
-            f"uncertainty_health:{item}" for item in evidence.uncertainty_health.failures
-        )
+        failures.extend(f"uncertainty_health:{item}" for item in evidence.uncertainty_health.failures)
     if (
         evidence.safe_policy_improvement is not None
         and not evidence.safe_policy_improvement.qualified
     ):
         failures.append("safe_policy_improvement_not_qualified")
-        failures.extend(
-            f"policy_improvement:{item}"
-            for item in evidence.safe_policy_improvement.failures
-        )
+        failures.extend(f"policy_improvement:{item}" for item in evidence.safe_policy_improvement.failures)
     if evidence.return_distribution is not None and not evidence.return_distribution.qualified:
         failures.append("return_distribution_dominance_not_qualified")
-        failures.extend(
-            f"return_distribution:{item}" for item in evidence.return_distribution.failures
-        )
+        failures.extend(f"return_distribution:{item}" for item in evidence.return_distribution.failures)
 
     if failures:
         return PromotionDecision(
