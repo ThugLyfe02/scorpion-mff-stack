@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from scorpion.domain import EventKind
 from scorpion.eligibility import StrategyBucket
 from scorpion.execution_forensics import CompletedTrade
 from scorpion.history_archive import ArchivedDiscordMessage
@@ -41,7 +42,7 @@ def _entry_leg(
     return MicroForensicLeg(
         event_id=event_id,
         message_id=event_id,
-        event_kind="ENTRY",  # type: ignore[arg-type]
+        event_kind=EventKind.ENTRY,
         contract_key=CONTRACT,
         bucket=StrategyBucket.CORE_SINGLE_NAME,
         status=MicroForensicStatus.CERTIFIED_FILL,
