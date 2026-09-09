@@ -5,7 +5,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from .domain import EventKind
-from .microstructure import OptionMicrostructureTape, ns_from_datetime, timedelta_to_ns
+from .microstructure import OptionMicrostructureTape, ns_from_datetime
 from .microstructure_forensics import MicroForensicLeg, MicrostructureForensicsReport
 
 _BPS = Decimal("10000")
