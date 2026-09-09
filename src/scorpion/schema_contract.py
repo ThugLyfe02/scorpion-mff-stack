@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_CONTRACT_VERSION = "2026.09.v5"
+SCHEMA_CONTRACT_VERSION = "2026.09.v6"
 
 _REQUIRED: dict[str, frozenset[str]] = {
     "raw_discord_events": frozenset(
@@ -124,6 +124,16 @@ _OPTIONAL_ADVANCED: dict[str, frozenset[str]] = {
             "feature_set_version",
             "candidate_sha256",
             "status",
+            "created_ts_utc",
+        }
+    ),
+    "adjudication_annotations": frozenset(
+        {
+            "annotation_id",
+            "event_id",
+            "reviewer_id",
+            "label",
+            "note",
             "created_ts_utc",
         }
     ),
