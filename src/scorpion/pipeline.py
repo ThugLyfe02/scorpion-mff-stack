@@ -11,6 +11,12 @@ from .eligibility import classify_eligibility
 from .invariants import assert_valid_book
 from .parser import parse_message_with_evidence
 from .policy_bundle import RuntimePolicyBundle
+from .processing_order import (
+    ensure_processing_order_schema,
+    load_pending_raw_in_receipt_order,
+    load_signals_in_processing_order,
+    register_raw_receipt,
+)
 from .reducer import reduce_book
 from .replay import state_fingerprint
 from .resilience import OperationalMode, ResilienceAssessment
@@ -43,7 +49,9 @@ class Pipeline:
     recent_events: list[SignalEvent] = field(init=False)
 
     def __post_init__(self) -> None:
-        historical_signals = self.store.load_signals()
+        with self.store.connect() as db:
+            ensure_processing_order_schema(db)
+        historical_signals = load_signals_in_processing_order(self.store.path)
         restored = restore_state(
             self.store.path,
             historical_signals,
@@ -64,9 +72,10 @@ class Pipeline:
             reason=restored.reason,
             state_fingerprint=state_fingerprint(self.state),
             policy_fingerprint=self.runtime_policy.fingerprint,
+            replay_order="durable_process_seq",
         )
 
-        for raw in self.store.load_pending_raw():
+        for raw in load_pending_raw_in_receipt_order(self.store.path):
             try:
                 self._process(raw, persist_raw=False)
             except Exception as exc:
@@ -90,6 +99,7 @@ class Pipeline:
         if persist_raw:
             raw_started_ns = time.perf_counter_ns()
             self.store.append_raw(raw)
+            register_raw_receipt(self.store.path, raw.revision_id)
             raw_persist_us = _elapsed_us(raw_started_ns)
         try:
             parse_started_ns = time.perf_counter_ns()
@@ -161,6 +171,7 @@ class Pipeline:
                     "decision_disposition": packet.disposition.value,
                     "operational_mode": packet.system_mode.value,
                     "policy_fingerprint": self.runtime_policy.fingerprint,
+                    "replay_order": "durable_process_seq",
                 },
                 stage_latencies_us=stage_latencies_us,
             )
@@ -172,7 +183,7 @@ class Pipeline:
             else:
                 effects = ()
                 if event.event_id not in self.state.seen_event_ids:
-                    historical_signals = self.store.load_signals()
+                    historical_signals = load_signals_in_processing_order(self.store.path)
                     restored = restore_state(
                         self.store.path,
                         historical_signals,
@@ -205,4 +216,5 @@ class Pipeline:
         raw: RawDiscordMessage,
     ) -> tuple[SignalEvent, tuple[Effect, ...]]:
         """Process a raw revision that has already crossed the durable receipt boundary."""
+        register_raw_receipt(self.store.path, raw.revision_id)
         return self._process(raw, persist_raw=False)
