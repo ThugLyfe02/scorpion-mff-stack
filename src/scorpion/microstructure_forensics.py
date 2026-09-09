@@ -7,7 +7,7 @@ from enum import StrEnum
 
 from .association import associate_followup_with_evidence
 from .config import CHANNELS
-from .domain import BookState, EffectKind, EventKind, RawDiscordMessage
+from .domain import BookState, EffectKind, EventKind, RawDiscordMessage, SignalEvent
 from .eligibility import (
     EligibilityDisposition,
     StrategyBucket,
@@ -18,6 +18,7 @@ from .execution_forensics import CompletedTrade
 from .history_archive import ArchivedDiscordMessage, ChannelCompleteness, HistoryArchive
 from .invariants import assert_valid_book
 from .microstructure import (
+    DecisionQuote,
     FillCertainty,
     MicroFillEnvelope,
     OptionMicrostructureTape,
@@ -121,6 +122,15 @@ class MicrostructureForensicsReport:
     uncertain_actionable_legs: int
 
 
+@dataclass(frozen=True, slots=True)
+class _DecisionMarket:
+    evidence: DecisionQuote
+    bid: Decimal
+    ask: Decimal
+    decision_ts: datetime
+    order_arrival: datetime
+
+
 @dataclass(slots=True)
 class _TradeLedger:
     entry_event_id: str
@@ -159,111 +169,133 @@ def _quantity_for_budget(budget: Decimal, option_price: Decimal) -> int:
 
 
 def _status_from_fill(fill: MicroFillEnvelope) -> MicroForensicStatus:
-    if fill.certainty is FillCertainty.AGGRESSIVE_DISPLAYED_COMPLETE:
-        return MicroForensicStatus.CERTIFIED_FILL
-    if fill.certainty is FillCertainty.AGGRESSIVE_DISPLAYED_PARTIAL:
-        return MicroForensicStatus.CERTIFIED_PARTIAL
-    if fill.certainty is FillCertainty.RESTING_QUEUE_UNKNOWN:
-        return MicroForensicStatus.RESTING_FILL_UNCERTAIN
-    if fill.certainty is FillCertainty.AGGRESSIVE_DEPTH_UNKNOWN:
-        return MicroForensicStatus.DEPTH_UNKNOWN
-    if fill.certainty is FillCertainty.NO_MARKET_STATE:
-        return MicroForensicStatus.NO_MARKET_STATE
-    return MicroForensicStatus.LIMIT_NOT_CERTIFIED
+    mapping = {
+        FillCertainty.AGGRESSIVE_DISPLAYED_COMPLETE: MicroForensicStatus.CERTIFIED_FILL,
+        FillCertainty.AGGRESSIVE_DISPLAYED_PARTIAL: MicroForensicStatus.CERTIFIED_PARTIAL,
+        FillCertainty.RESTING_QUEUE_UNKNOWN: MicroForensicStatus.RESTING_FILL_UNCERTAIN,
+        FillCertainty.AGGRESSIVE_DEPTH_UNKNOWN: MicroForensicStatus.DEPTH_UNKNOWN,
+        FillCertainty.NO_MARKET_STATE: MicroForensicStatus.NO_MARKET_STATE,
+    }
+    return mapping.get(fill.certainty, MicroForensicStatus.LIMIT_NOT_CERTIFIED)
 
 
-def _leg(
-    *,
-    event_id: str,
-    message_id: str,
-    event_kind: EventKind,
-    contract_key: str | None,
+def _base_leg(
+    event: SignalEvent,
     bucket: StrategyBucket,
     status: MicroForensicStatus,
-    source_ts_utc: datetime,
-    decision_ts_utc: datetime | None = None,
-    decision_quote_event_ns: int | None = None,
-    decision_quote_recv_ns: int | None = None,
-    decision_quote_bid: Decimal | None = None,
-    decision_quote_ask: Decimal | None = None,
-    limit_price: Decimal | None = None,
-    order_arrival_ts_utc: datetime | None = None,
-    requested_quantity: int = 0,
-    conservative_fill_quantity: int = 0,
-    possible_fill_quantity: int = 0,
-    fill_price: Decimal | None = None,
-    fill_certainty: FillCertainty | None = None,
-    fill_evidence_event_ns: int | None = None,
-    fill_evidence_publisher_id: int | None = None,
+    *,
     note: str = "",
+    market: _DecisionMarket | None = None,
+    limit_price: Decimal | None = None,
+    fill: MicroFillEnvelope | None = None,
 ) -> MicroForensicLeg:
+    quote = market.evidence.quote if market is not None else None
     return MicroForensicLeg(
-        event_id=event_id,
-        message_id=message_id,
-        event_kind=event_kind,
-        contract_key=contract_key,
+        event_id=event.event_id,
+        message_id=event.message_id,
+        event_kind=event.kind,
+        contract_key=event.contract_key,
         bucket=bucket,
         status=status,
-        source_ts_utc=source_ts_utc,
-        decision_ts_utc=decision_ts_utc,
-        decision_quote_event_ns=decision_quote_event_ns,
-        decision_quote_recv_ns=decision_quote_recv_ns,
-        decision_quote_bid=decision_quote_bid,
-        decision_quote_ask=decision_quote_ask,
+        source_ts_utc=event.source_ts_utc,
+        decision_ts_utc=market.decision_ts if market is not None else None,
+        decision_quote_event_ns=quote.ts_event_ns if quote is not None else None,
+        decision_quote_recv_ns=quote.ts_recv_ns if quote is not None else None,
+        decision_quote_bid=market.bid if market is not None else None,
+        decision_quote_ask=market.ask if market is not None else None,
         limit_price=limit_price,
-        order_arrival_ts_utc=order_arrival_ts_utc,
-        requested_quantity=requested_quantity,
-        conservative_fill_quantity=conservative_fill_quantity,
-        possible_fill_quantity=possible_fill_quantity,
-        fill_price=fill_price,
-        fill_certainty=fill_certainty,
-        fill_evidence_event_ns=fill_evidence_event_ns,
-        fill_evidence_publisher_id=fill_evidence_publisher_id,
+        order_arrival_ts_utc=market.order_arrival if market is not None else None,
+        requested_quantity=fill.requested_quantity if fill is not None else 0,
+        conservative_fill_quantity=fill.lower_bound_quantity if fill is not None else 0,
+        possible_fill_quantity=fill.upper_bound_quantity if fill is not None else 0,
+        fill_price=fill.modeled_price if fill is not None else None,
+        fill_certainty=fill.certainty if fill is not None else None,
+        fill_evidence_event_ns=fill.evidence_event_ns if fill is not None else None,
+        fill_evidence_publisher_id=fill.evidence_publisher_id if fill is not None else None,
         note=note,
     )
 
 
 def _fill_leg(
-    event_id: str,
-    message_id: str,
-    event_kind: EventKind,
-    contract_key: str,
+    event: SignalEvent,
     bucket: StrategyBucket,
-    source_ts_utc: datetime,
-    decision_ts: datetime,
-    decision_quote_event_ns: int,
-    decision_quote_recv_ns: int,
-    decision_bid: Decimal,
-    decision_ask: Decimal,
-    limit_price: Decimal | None,
-    order_arrival: datetime,
+    market: _DecisionMarket,
     fill: MicroFillEnvelope,
     *,
+    limit_price: Decimal | None = None,
     note: str = "",
 ) -> MicroForensicLeg:
-    return _leg(
-        event_id=event_id,
-        message_id=message_id,
-        event_kind=event_kind,
-        contract_key=contract_key,
-        bucket=bucket,
-        status=_status_from_fill(fill),
-        source_ts_utc=source_ts_utc,
-        decision_ts_utc=decision_ts,
-        decision_quote_event_ns=decision_quote_event_ns,
-        decision_quote_recv_ns=decision_quote_recv_ns,
-        decision_quote_bid=decision_bid,
-        decision_quote_ask=decision_ask,
+    detail = "; ".join(part for part in (note, fill.reason) if part)
+    return _base_leg(
+        event,
+        bucket,
+        _status_from_fill(fill),
+        note=detail,
+        market=market,
         limit_price=limit_price,
-        order_arrival_ts_utc=order_arrival,
-        requested_quantity=fill.requested_quantity,
-        conservative_fill_quantity=fill.lower_bound_quantity,
-        possible_fill_quantity=fill.upper_bound_quantity,
-        fill_price=fill.modeled_price,
-        fill_certainty=fill.certainty,
-        fill_evidence_event_ns=fill.evidence_event_ns,
-        fill_evidence_publisher_id=fill.evidence_publisher_id,
-        note="; ".join(part for part in (note, fill.reason) if part),
+        fill=fill,
+    )
+
+
+def _decision_market(
+    tape: OptionMicrostructureTape,
+    contract_key: str,
+    event: SignalEvent,
+    profile: MicrostructureExecutionProfile,
+) -> _DecisionMarket | None:
+    decision_ts = event.source_ts_utc.astimezone(UTC) + profile.decision_latency
+    order_arrival = decision_ts + profile.order_transport_latency
+    evidence = tape.decision_quote(
+        contract_key,
+        decision_ts,
+        feed_transport_latency=profile.feed_transport_latency,
+        max_age=profile.decision_quote_max_age,
+    )
+    if evidence is None:
+        return None
+    bid = evidence.quote.bid
+    ask = evidence.quote.ask
+    if bid is None or ask is None:
+        return None
+    return _DecisionMarket(evidence, bid, ask, decision_ts, order_arrival)
+
+
+def _apply_certified_buy(
+    state: BookState,
+    proposed_state: BookState,
+    contract_key: str,
+    generation: int,
+    fill: MicroFillEnvelope,
+) -> BookState | None:
+    del state
+    if fill.lower_bound_quantity <= 0 or fill.modeled_price is None:
+        return None
+    return apply_fill(
+        proposed_state,
+        contract_key,
+        generation,
+        fill.lower_bound_quantity,
+        fill.modeled_price,
+    )
+
+
+def _apply_certified_sell(
+    proposed_state: BookState,
+    contract_key: str,
+    generation: int,
+    fill: MicroFillEnvelope,
+    *,
+    final: bool = False,
+) -> BookState | None:
+    if fill.lower_bound_quantity <= 0 or fill.modeled_price is None:
+        return None
+    return apply_fill(
+        proposed_state,
+        contract_key,
+        generation,
+        -fill.lower_bound_quantity,
+        fill.modeled_price,
+        final=final,
     )
 
 
@@ -310,14 +342,10 @@ def run_microstructure_forensics(
             and not include_research_only
         ):
             legs.append(
-                _leg(
-                    event_id=event.event_id,
-                    message_id=event.message_id,
-                    event_kind=event.kind,
-                    contract_key=event.contract_key,
-                    bucket=eligibility.bucket,
-                    status=MicroForensicStatus.RESEARCH_ONLY,
-                    source_ts_utc=event.source_ts_utc,
+                _base_leg(
+                    event,
+                    eligibility.bucket,
+                    MicroForensicStatus.RESEARCH_ONLY,
                     note=eligibility.reason,
                 )
             )
@@ -326,14 +354,10 @@ def run_microstructure_forensics(
             continue
         if event.kind is EventKind.AMBIGUOUS:
             legs.append(
-                _leg(
-                    event_id=event.event_id,
-                    message_id=event.message_id,
-                    event_kind=event.kind,
-                    contract_key=event.contract_key,
-                    bucket=eligibility.bucket,
-                    status=MicroForensicStatus.REVIEW,
-                    source_ts_utc=event.source_ts_utc,
+                _base_leg(
+                    event,
+                    eligibility.bucket,
+                    MicroForensicStatus.REVIEW,
                     note=event.reason,
                 )
             )
@@ -348,14 +372,10 @@ def run_microstructure_forensics(
         if effect is None:
             state = proposed_state
             legs.append(
-                _leg(
-                    event_id=event.event_id,
-                    message_id=event.message_id,
-                    event_kind=event.kind,
-                    contract_key=event.contract_key,
-                    bucket=eligibility.bucket,
-                    status=MicroForensicStatus.NON_ACTIONABLE,
-                    source_ts_utc=event.source_ts_utc,
+                _base_leg(
+                    event,
+                    eligibility.bucket,
+                    MicroForensicStatus.NON_ACTIONABLE,
                     note="no deterministic effect",
                 )
             )
@@ -363,14 +383,10 @@ def run_microstructure_forensics(
         if effect.kind in {EffectKind.REVIEW, EffectKind.HALT}:
             state = proposed_state
             legs.append(
-                _leg(
-                    event_id=event.event_id,
-                    message_id=event.message_id,
-                    event_kind=event.kind,
-                    contract_key=event.contract_key,
-                    bucket=eligibility.bucket,
-                    status=MicroForensicStatus.REVIEW,
-                    source_ts_utc=event.source_ts_utc,
+                _base_leg(
+                    event,
+                    eligibility.bucket,
+                    MicroForensicStatus.REVIEW,
                     note=effect.reason,
                 )
             )
@@ -378,145 +394,95 @@ def run_microstructure_forensics(
         key = effect.contract_key
         if key is None:
             legs.append(
-                _leg(
-                    event_id=event.event_id,
-                    message_id=event.message_id,
-                    event_kind=event.kind,
-                    contract_key=None,
-                    bucket=eligibility.bucket,
-                    status=MicroForensicStatus.REVIEW,
-                    source_ts_utc=event.source_ts_utc,
+                _base_leg(
+                    event,
+                    eligibility.bucket,
+                    MicroForensicStatus.REVIEW,
                     note="effect missing contract",
                 )
             )
             continue
 
-        decision_ts = event.source_ts_utc.astimezone(UTC) + profile.decision_latency
-        order_arrival = decision_ts + profile.order_transport_latency
-        decision = tape.decision_quote(
-            key,
-            decision_ts,
-            feed_transport_latency=profile.feed_transport_latency,
-            max_age=profile.decision_quote_max_age,
-        )
-        if decision is None or decision.quote.bid is None or decision.quote.ask is None:
+        market = _decision_market(tape, key, event, profile)
+        if market is None:
             legs.append(
-                _leg(
-                    event_id=event.event_id,
-                    message_id=event.message_id,
-                    event_kind=event.kind,
-                    contract_key=key,
-                    bucket=eligibility.bucket,
-                    status=MicroForensicStatus.NO_DECISION_QUOTE,
-                    source_ts_utc=event.source_ts_utc,
-                    decision_ts_utc=decision_ts,
-                    order_arrival_ts_utc=order_arrival,
+                _base_leg(
+                    event,
+                    eligibility.bucket,
+                    MicroForensicStatus.NO_DECISION_QUOTE,
                     note="no quote was causally available to the strategy at decision time",
                 )
             )
             continue
-        quote = decision.quote
 
         if effect.kind is EffectKind.PROPOSE_OPEN:
             reference = event.referenced_price
             if reference is None:
                 legs.append(
-                    _leg(
-                        event_id=event.event_id,
-                        message_id=event.message_id,
-                        event_kind=event.kind,
-                        contract_key=key,
-                        bucket=eligibility.bucket,
-                        status=MicroForensicStatus.REVIEW,
-                        source_ts_utc=event.source_ts_utc,
-                        decision_ts_utc=decision_ts,
+                    _base_leg(
+                        event,
+                        eligibility.bucket,
+                        MicroForensicStatus.REVIEW,
+                        market=market,
                         note="entry missing source reference price",
                     )
                 )
                 continue
-            if entry_is_stale(reference, quote.ask):
+            if entry_is_stale(reference, market.ask):
                 legs.append(
-                    _leg(
-                        event_id=event.event_id,
-                        message_id=event.message_id,
-                        event_kind=event.kind,
-                        contract_key=key,
-                        bucket=eligibility.bucket,
-                        status=MicroForensicStatus.STALE_ENTRY,
-                        source_ts_utc=event.source_ts_utc,
-                        decision_ts_utc=decision_ts,
-                        decision_quote_event_ns=quote.ts_event_ns,
-                        decision_quote_recv_ns=quote.ts_recv_ns,
-                        decision_quote_bid=quote.bid,
-                        decision_quote_ask=quote.ask,
-                        order_arrival_ts_utc=order_arrival,
-                        note="causally available ask exceeded the +25% source-price dislocation gate",
+                    _base_leg(
+                        event,
+                        eligibility.bucket,
+                        MicroForensicStatus.STALE_ENTRY,
+                        market=market,
+                        note=(
+                            "causally available ask exceeded the +25% "
+                            "source-price dislocation gate"
+                        ),
                     )
                 )
                 continue
-            limit = entry_limit(reference, quote.ask)
+            limit = entry_limit(reference, market.ask)
             requested = (
                 1
                 if effect.reason == "first_entry_pipe_test"
-                else _quantity_for_budget(profile.base_budget(event.channel_id), quote.ask)
+                else _quantity_for_budget(profile.base_budget(event.channel_id), market.ask)
             )
             if requested <= 0:
                 legs.append(
-                    _leg(
-                        event_id=event.event_id,
-                        message_id=event.message_id,
-                        event_kind=event.kind,
-                        contract_key=key,
-                        bucket=eligibility.bucket,
-                        status=MicroForensicStatus.UNAFFORDABLE,
-                        source_ts_utc=event.source_ts_utc,
-                        decision_ts_utc=decision_ts,
-                        decision_quote_event_ns=quote.ts_event_ns,
-                        decision_quote_recv_ns=quote.ts_recv_ns,
-                        decision_quote_bid=quote.bid,
-                        decision_quote_ask=quote.ask,
+                    _base_leg(
+                        event,
+                        eligibility.bucket,
+                        MicroForensicStatus.UNAFFORDABLE,
+                        market=market,
                         limit_price=limit,
-                        order_arrival_ts_utc=order_arrival,
                     )
                 )
                 continue
             fill = tape.simulate_limit_buy(
                 key,
-                order_arrival_ts_utc=order_arrival,
+                order_arrival_ts_utc=market.order_arrival,
                 quantity=requested,
                 limit_price=limit,
                 max_wait=profile.entry_limit_wait,
                 market_quote_max_age=profile.market_quote_max_age,
             )
-            legs.append(
-                _fill_leg(
-                    event.event_id,
-                    event.message_id,
-                    event.kind,
-                    key,
-                    eligibility.bucket,
-                    event.source_ts_utc,
-                    decision_ts,
-                    quote.ts_event_ns,
-                    quote.ts_recv_ns,
-                    quote.bid,
-                    quote.ask,
-                    limit,
-                    order_arrival,
-                    fill,
-                )
-            )
-            if fill.lower_bound_quantity <= 0 or fill.modeled_price is None:
-                continue
-            filled_state = apply_fill(
+            legs.append(_fill_leg(event, eligibility.bucket, market, fill, limit_price=limit))
+            filled_state = _apply_certified_buy(
+                state,
                 proposed_state,
                 key,
                 effect.generation,
-                fill.lower_bound_quantity,
-                fill.modeled_price,
+                fill,
             )
-            cash_in = fill.modeled_price * fill.lower_bound_quantity * _OPTION_MULTIPLIER
+            if filled_state is None or fill.modeled_price is None:
+                continue
+            assert_valid_book(
+                filled_state,
+                max_open_positions=policy_bundle.base.max_open_positions,
+            )
             opened = datetime_from_ns(fill.evidence_event_ns or fill.order_arrival_ns)
+            cash_in = fill.modeled_price * fill.lower_bound_quantity * _OPTION_MULTIPLIER
             ledgers[key] = _TradeLedger(
                 entry_event_id=event.event_id,
                 contract_key=key,
@@ -535,15 +501,11 @@ def run_microstructure_forensics(
         ledger = ledgers.get(key)
         if position is None or ledger is None:
             legs.append(
-                _leg(
-                    event_id=event.event_id,
-                    message_id=event.message_id,
-                    event_kind=event.kind,
-                    contract_key=key,
-                    bucket=eligibility.bucket,
-                    status=MicroForensicStatus.REVIEW,
-                    source_ts_utc=event.source_ts_utc,
-                    decision_ts_utc=decision_ts,
+                _base_leg(
+                    event,
+                    eligibility.bucket,
+                    MicroForensicStatus.REVIEW,
+                    market=market,
                     note="no certified historical position exists for follow-up",
                 )
             )
@@ -551,46 +513,34 @@ def run_microstructure_forensics(
 
         if effect.kind is EffectKind.PROPOSE_ADD:
             reference = event.referenced_price
-            if reference is not None and entry_is_stale(reference, quote.ask):
+            if reference is not None and entry_is_stale(reference, market.ask):
                 legs.append(
-                    _leg(
-                        event_id=event.event_id,
-                        message_id=event.message_id,
-                        event_kind=event.kind,
-                        contract_key=key,
-                        bucket=eligibility.bucket,
-                        status=MicroForensicStatus.STALE_ENTRY,
-                        source_ts_utc=event.source_ts_utc,
-                        decision_ts_utc=decision_ts,
-                        decision_quote_event_ns=quote.ts_event_ns,
-                        decision_quote_recv_ns=quote.ts_recv_ns,
-                        decision_quote_bid=quote.bid,
-                        decision_quote_ask=quote.ask,
-                        order_arrival_ts_utc=order_arrival,
+                    _base_leg(
+                        event,
+                        eligibility.bucket,
+                        MicroForensicStatus.STALE_ENTRY,
+                        market=market,
                         note="source add failed the same dislocation gate as entries",
                     )
                 )
                 continue
-            limit = entry_limit(reference, quote.ask) if reference is not None else quote.ask
+            limit = entry_limit(reference, market.ask) if reference is not None else market.ask
             source_channel = position.source_channel_id or ledger.channel_id
-            requested = _quantity_for_budget(profile.add_budget(source_channel), quote.ask)
+            requested = _quantity_for_budget(profile.add_budget(source_channel), market.ask)
             if requested <= 0:
                 legs.append(
-                    _leg(
-                        event_id=event.event_id,
-                        message_id=event.message_id,
-                        event_kind=event.kind,
-                        contract_key=key,
-                        bucket=eligibility.bucket,
-                        status=MicroForensicStatus.UNAFFORDABLE,
-                        source_ts_utc=event.source_ts_utc,
-                        decision_ts_utc=decision_ts,
+                    _base_leg(
+                        event,
+                        eligibility.bucket,
+                        MicroForensicStatus.UNAFFORDABLE,
+                        market=market,
+                        limit_price=limit,
                     )
                 )
                 continue
             fill = tape.simulate_limit_buy(
                 key,
-                order_arrival_ts_utc=order_arrival,
+                order_arrival_ts_utc=market.order_arrival,
                 quantity=requested,
                 limit_price=limit,
                 max_wait=profile.entry_limit_wait,
@@ -598,32 +548,24 @@ def run_microstructure_forensics(
             )
             legs.append(
                 _fill_leg(
-                    event.event_id,
-                    event.message_id,
-                    event.kind,
-                    key,
+                    event,
                     eligibility.bucket,
-                    event.source_ts_utc,
-                    decision_ts,
-                    quote.ts_event_ns,
-                    quote.ts_recv_ns,
-                    quote.bid,
-                    quote.ask,
-                    limit,
-                    order_arrival,
+                    market,
                     fill,
+                    limit_price=limit,
                     note="source add only; no synthetic averaging",
                 )
             )
-            if fill.lower_bound_quantity <= 0 or fill.modeled_price is None:
-                continue
-            state = apply_fill(
+            filled_state = _apply_certified_buy(
+                state,
                 proposed_state,
                 key,
                 effect.generation,
-                fill.lower_bound_quantity,
-                fill.modeled_price,
+                fill,
             )
+            if filled_state is None or fill.modeled_price is None:
+                continue
+            state = filled_state
             ledger.gross_premium_in += (
                 fill.modeled_price * fill.lower_bound_quantity * _OPTION_MULTIPLIER
             )
@@ -638,53 +580,39 @@ def run_microstructure_forensics(
             if requested <= 0:
                 state = proposed_state
                 legs.append(
-                    _leg(
-                        event_id=event.event_id,
-                        message_id=event.message_id,
-                        event_kind=event.kind,
-                        contract_key=key,
-                        bucket=eligibility.bucket,
-                        status=MicroForensicStatus.NO_POSITION_QUANTITY,
-                        source_ts_utc=event.source_ts_utc,
-                        decision_ts_utc=decision_ts,
+                    _base_leg(
+                        event,
+                        eligibility.bucket,
+                        MicroForensicStatus.NO_POSITION_QUANTITY,
+                        market=market,
                         note="already at one runner contract",
                     )
                 )
                 continue
             fill = tape.simulate_aggressive_sell(
                 key,
-                order_arrival_ts_utc=order_arrival,
+                order_arrival_ts_utc=market.order_arrival,
                 quantity=requested,
                 market_quote_max_age=profile.market_quote_max_age,
             )
             legs.append(
                 _fill_leg(
-                    event.event_id,
-                    event.message_id,
-                    event.kind,
-                    key,
+                    event,
                     eligibility.bucket,
-                    event.source_ts_utc,
-                    decision_ts,
-                    quote.ts_event_ns,
-                    quote.ts_recv_ns,
-                    quote.bid,
-                    quote.ask,
-                    None,
-                    order_arrival,
+                    market,
                     fill,
                     note="trim-to-one; no synthetic runner exit",
                 )
             )
-            if fill.lower_bound_quantity <= 0 or fill.modeled_price is None:
-                continue
-            state = apply_fill(
+            filled_state = _apply_certified_sell(
                 proposed_state,
                 key,
                 effect.generation,
-                -fill.lower_bound_quantity,
-                fill.modeled_price,
+                fill,
             )
+            if filled_state is None or fill.modeled_price is None:
+                continue
+            state = filled_state
             ledger.gross_proceeds += (
                 fill.modeled_price * fill.lower_bound_quantity * _OPTION_MULTIPLIER
             )
@@ -699,58 +627,44 @@ def run_microstructure_forensics(
             if requested <= 0:
                 state = proposed_state
                 legs.append(
-                    _leg(
-                        event_id=event.event_id,
-                        message_id=event.message_id,
-                        event_kind=event.kind,
-                        contract_key=key,
-                        bucket=eligibility.bucket,
-                        status=MicroForensicStatus.NO_POSITION_QUANTITY,
-                        source_ts_utc=event.source_ts_utc,
-                        decision_ts_utc=decision_ts,
+                    _base_leg(
+                        event,
+                        eligibility.bucket,
+                        MicroForensicStatus.NO_POSITION_QUANTITY,
+                        market=market,
                     )
                 )
                 continue
             fill = tape.simulate_aggressive_sell(
                 key,
-                order_arrival_ts_utc=order_arrival,
+                order_arrival_ts_utc=market.order_arrival,
                 quantity=requested,
                 market_quote_max_age=profile.market_quote_max_age,
             )
+            complete_close = fill.conservative_complete
             legs.append(
                 _fill_leg(
-                    event.event_id,
-                    event.message_id,
-                    event.kind,
-                    key,
+                    event,
                     eligibility.bucket,
-                    event.source_ts_utc,
-                    decision_ts,
-                    quote.ts_event_ns,
-                    quote.ts_recv_ns,
-                    quote.bid,
-                    quote.ask,
-                    None,
-                    order_arrival,
+                    market,
                     fill,
                     note=(
                         "full close"
-                        if fill.conservative_complete
+                        if complete_close
                         else "close not fully supported by displayed depth"
                     ),
                 )
             )
-            if fill.lower_bound_quantity <= 0 or fill.modeled_price is None:
-                continue
-            complete_close = fill.conservative_complete
-            state = apply_fill(
+            filled_state = _apply_certified_sell(
                 proposed_state,
                 key,
                 effect.generation,
-                -fill.lower_bound_quantity,
-                fill.modeled_price,
+                fill,
                 final=complete_close,
             )
+            if filled_state is None or fill.modeled_price is None:
+                continue
+            state = filled_state
             ledger.gross_proceeds += (
                 fill.modeled_price * fill.lower_bound_quantity * _OPTION_MULTIPLIER
             )
@@ -822,12 +736,7 @@ def run_archive_microstructure_forensics(
         runtime_policy=policy_bundle,
         include_research_only=include_research_only,
     )
-    actionable = {
-        EventKind.ENTRY,
-        EventKind.ADD,
-        EventKind.TRIM,
-        EventKind.EXIT,
-    }
+    actionable = {EventKind.ENTRY, EventKind.ADD, EventKind.TRIM, EventKind.EXIT}
     certified = sum(
         leg.event_kind in actionable
         and leg.status
