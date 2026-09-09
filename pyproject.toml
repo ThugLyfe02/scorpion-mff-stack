@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scorpion-mff"
-version = "0.10.0"
-description = "Deterministic MFF control plane with nanosecond options microstructure replay, causal decision pricing, conservative fill certification, durable live processing order, point-in-time causal features, poison-event quarantine, and verified recovery."
+version = "0.15.0"
+description = "Deterministic MFF control plane with nanosecond options microstructure replay, causal decision pricing, adaptive shadow ensembles, regime-aware ML, immutable self-evolution challengers, durable processing order, and verified recovery."
 requires-python = ">=3.13"
 dependencies = [
   "discord.py>=2.4,<3",
@@ -47,6 +47,7 @@ scorpion-micro-bars = "scorpion.microstructure_bars:micro_bars_main"
 scorpion-micro-latency-value = "scorpion.microstructure_ops_cli:latency_value_main"
 scorpion-fill-calibration = "scorpion.microstructure_ops_cli:fill_calibration_main"
 scorpion-quant-audit = "scorpion.quant_audit:quant_audit_main"
+scorpion-evolution = "scorpion.evolution_cli:evolution_main"
 scorpion-opra-normalize = "scorpion.opra_bridge:opra_normalize_main"
 scorpion-ingest = "scorpion.runtime:ingest_main"
 
