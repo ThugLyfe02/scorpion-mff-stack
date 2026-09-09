@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections import Counter
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -11,10 +12,16 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .backtest_overfit import OverfitPolicy, build_daily_return_panel, evaluate_backtest_overfit
 from .config import ALLOWED_CHANNEL_IDS
 from .contract_terms import ContractTermsRegistry
 from .dataset_fingerprint import fingerprint_history_archive
 from .execution_attribution import build_execution_attribution_report
+from .execution_meta_labels import (
+    ExecutionMetaLabelPolicy,
+    build_execution_meta_labels,
+    persist_execution_meta_labels,
+)
 from .execution_trust import FillTrustPolicy, assess_fill_model_trust
 from .fill_calibration import evaluate_fill_calibration
 from .history_archive import HistoryArchive
@@ -96,6 +103,11 @@ def microstructure_forensics_main() -> None:
         help="Permit sizing research before empirical fill-model trust is established.",
     )
     parser.add_argument(
+        "--meta-label-db",
+        type=Path,
+        help="Optional research DB for execution-aware shadow-model targets.",
+    )
+    parser.add_argument(
         "--code-revision",
         default=os.environ.get("SCORPION_CODE_REVISION", "").strip(),
     )
@@ -136,6 +148,8 @@ def microstructure_forensics_main() -> None:
     walk_forward_policy = WalkForwardPolicy()
     fill_trust_policy = FillTrustPolicy()
     regime_policy = RegimeStabilityPolicy()
+    overfit_policy = OverfitPolicy()
+    meta_label_policy = ExecutionMetaLabelPolicy()
     report = run_archive_microstructure_forensics(
         archive,
         tape,
@@ -191,6 +205,11 @@ def microstructure_forensics_main() -> None:
     )
 
     attribution, attribution_legs = build_execution_attribution_report(report, tape)
+    execution_meta_labels = build_execution_meta_labels(
+        report,
+        tape,
+        policy=meta_label_policy,
+    )
 
     certified_completed = tuple(
         trade for trade in report.completed_trades if trade.depth_evidence_complete
@@ -219,6 +238,13 @@ def microstructure_forensics_main() -> None:
     }
     walk_passed = {name for name, item in walk_reports.items() if item.passed}
 
+    _, overfit_panel = build_daily_return_panel(
+        segments,
+        minimum_trade_samples=sizing_constraints.min_samples,
+    )
+    overfit_report = evaluate_backtest_overfit(overfit_panel, policy=overfit_policy)
+    selection_overfit_ok = overfit_report.passed
+
     history_fp = fingerprint_history_archive(archive, channel_ids=channels)
     market_fp = fingerprint_file(args.events)
     datasets = {
@@ -239,6 +265,8 @@ def microstructure_forensics_main() -> None:
             "walk_forward": walk_forward_policy,
             "fill_trust": fill_trust_policy,
             "regime_stability": regime_policy,
+            "backtest_overfit": overfit_policy,
+            "execution_meta_labels": meta_label_policy,
         },
         datasets=datasets,
         parameters={
@@ -248,6 +276,14 @@ def microstructure_forensics_main() -> None:
         },
     )
 
+    meta_labels_persisted = 0
+    if args.meta_label_db is not None:
+        meta_labels_persisted = persist_execution_meta_labels(
+            args.meta_label_db,
+            execution_meta_labels,
+            research_manifest_hash=manifest.manifest_hash,
+        )
+
     sizing_gate_ok = (
         completeness_ok
         and quality_ok
@@ -256,11 +292,13 @@ def microstructure_forensics_main() -> None:
         and contract_terms_ok
         and fill_model_trust_ok
         and regime_stability_ok
+        and selection_overfit_ok
     )
     status_counts = {
         status.value: sum(leg.status is status for leg in report.legs)
         for status in MicroForensicStatus
     }
+    meta_outcomes = Counter(label.outcome.value for label in execution_meta_labels)
     payload: dict[str, Any] = {
         "research_manifest": {
             **manifest.payload(),
@@ -286,8 +324,15 @@ def microstructure_forensics_main() -> None:
         "fill_model_trust": asdict(fill_trust) if fill_trust is not None else None,
         "fill_model_trust_ok": fill_model_trust_ok,
         "execution_attribution": asdict(attribution),
+        "execution_meta_labels": {
+            "count": len(execution_meta_labels),
+            "persisted": meta_labels_persisted,
+            "outcome_counts": dict(sorted(meta_outcomes.items())),
+        },
         "regime_stability": asdict(regime_stability),
         "regime_stability_ok": regime_stability_ok,
+        "backtest_overfit": asdict(overfit_report),
+        "selection_overfit_ok": selection_overfit_ok,
         "completed_certified_trades": len(certified_completed),
         "leg_status_counts": status_counts,
         "segment_rankings": [asdict(item) for item in rankings],
@@ -328,6 +373,11 @@ def microstructure_forensics_main() -> None:
             "Certified trade performance is not proven stable across spread, quote-age, latency, "
             "and session regimes; authoritative sizing is withheld."
         )
+    if not selection_overfit_ok:
+        warnings.append(
+            "The strategy-selection search is not proven robust under CSCV-style backtest-overfit "
+            "testing; authoritative sizing is withheld."
+        )
 
     if sizing_gate_ok:
         payload["sizing_envelopes"] = [
@@ -350,13 +400,15 @@ def microstructure_forensics_main() -> None:
         if not payload["sizing_envelopes"]:
             warnings.append(
                 "No segment survived contract truth, calibrated execution evidence, regime "
-                "stability, statistical selection, and purged out-of-sample gates."
+                "stability, selection-overfit control, statistical selection, and purged "
+                "out-of-sample gates."
             )
 
     if args.full:
         payload["completed_trades"] = [asdict(item) for item in report.completed_trades]
         payload["legs"] = [asdict(item) for item in report.legs]
         payload["execution_attribution_legs"] = [asdict(item) for item in attribution_legs]
+        payload["execution_meta_label_rows"] = [asdict(item) for item in execution_meta_labels]
 
     rendered = json.dumps(payload, indent=2, sort_keys=True, default=_json_default)
     if args.output is not None:
