@@ -144,8 +144,10 @@ def evaluate_nested_temporal_selection(
     """Evaluate whether the *candidate selection procedure* works out of sample.
 
     Candidate ranking for fold ``t`` may use only folds strictly before ``t``. The current fold
-    is used only after a candidate is selected. Oracle performance is diagnostic and never enters
-    the selection rule. This component is research-only and cannot activate a candidate.
+    is used only after a candidate is selected. The oracle-regret benchmark is constrained to
+    candidates that were already safety-eligible from the same prior-fold evidence; an unsafe
+    high-reward policy therefore cannot make a correctly conservative selector look inferior.
+    This component is research-only and cannot activate a candidate.
     """
     policy = policy or NestedSelectionPolicy()
     candidates, folds, indexed = _index(observations)
@@ -190,9 +192,10 @@ def evaluate_nested_temporal_selection(
             failures.append(f"no_safe_candidate_for_fold:{fold}")
             continue
         training_reward, selected = max(ranked, key=lambda item: (item[0], item[1]))
+        safe_candidates = tuple(candidate for _, candidate in ranked)
         selected_row = indexed[(selected, fold)]
         oracle_row = max(
-            (indexed[(candidate, fold)] for candidate in candidates),
+            (indexed[(candidate, fold)] for candidate in safe_candidates),
             key=lambda item: (item.reward, item.candidate_id),
         )
         selections.append(
