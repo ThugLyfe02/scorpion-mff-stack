@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .adaptive_ensemble import AdaptiveEnsembleSnapshot
+from .bayesian_changepoint import BayesianChangePointReport
 from .evolution_ledger import (
     EvolutionCandidate,
     EvolutionTrigger,
@@ -61,6 +62,7 @@ class EvolutionObservation:
     fill_model_trusted: bool
     drift_active: bool
     residual_hotspots: ResidualHotspotReport | None = None
+    abrupt_changepoint: BayesianChangePointReport | None = None
 
     def __post_init__(self) -> None:
         if self.observed_ts_utc.tzinfo is None or self.observed_ts_utc.utcoffset() is None:
@@ -104,6 +106,24 @@ def _target_slices(observation: EvolutionObservation) -> tuple[str, ...]:
     )
 
 
+def _abrupt_degradation(observation: EvolutionObservation) -> bool:
+    return observation.abrupt_changepoint is not None and observation.abrupt_changepoint.degradation
+
+
+def _drift_reasons(observation: EvolutionObservation) -> tuple[str, ...]:
+    reasons: list[str] = []
+    if observation.drift_active:
+        reasons.append("distribution_drift_active")
+    if _abrupt_degradation(observation):
+        assert observation.abrupt_changepoint is not None
+        reasons.append(
+            "bayesian_degradation_changepoint:"
+            f"p={observation.abrupt_changepoint.posterior_changepoint_probability:.6f}:"
+            f"delta={observation.abrupt_changepoint.rate_change:.6f}"
+        )
+    return tuple(reasons)
+
+
 def evaluate_evolution_need(
     baseline: EvolutionBaseline | None,
     observation: EvolutionObservation,
@@ -113,16 +133,20 @@ def evaluate_evolution_need(
     """Decide whether evidence changed enough to generate a new research challenger."""
     policy = policy or EvolutionControlPolicy()
     target_slices = _target_slices(observation)
+    drift_reasons = _drift_reasons(observation)
     if baseline is None:
         enough_data = observation.dataset_samples >= policy.minimum_new_samples
         hotspot_triggered = bool(target_slices)
-        should_generate = enough_data or hotspot_triggered
-        if hotspot_triggered:
+        drift_triggered = bool(drift_reasons)
+        should_generate = enough_data or hotspot_triggered or drift_triggered
+        if drift_triggered:
+            initial_primary = EvolutionTrigger.DRIFT
+            initial_triggers: tuple[EvolutionTrigger, ...] = (EvolutionTrigger.DRIFT,)
+            initial_reasons = drift_reasons
+        elif hotspot_triggered:
             initial_primary = EvolutionTrigger.RESIDUAL_HOTSPOT
-            initial_triggers: tuple[EvolutionTrigger, ...] = (
-                EvolutionTrigger.RESIDUAL_HOTSPOT,
-            )
-            initial_reasons: tuple[str, ...] = (
+            initial_triggers = (EvolutionTrigger.RESIDUAL_HOTSPOT,)
+            initial_reasons = (
                 "initial_targeted_residual_hotspot:" + ",".join(target_slices[:5]),
             )
         elif enough_data:
@@ -156,9 +180,9 @@ def evaluate_evolution_need(
 
     triggers: list[EvolutionTrigger] = []
     reasons: list[str] = []
-    if observation.drift_active:
+    if drift_reasons:
         triggers.append(EvolutionTrigger.DRIFT)
-        reasons.append("distribution_drift_active")
+        reasons.extend(drift_reasons)
     if baseline.fill_model_trusted and not observation.fill_model_trusted:
         triggers.append(EvolutionTrigger.CALIBRATION_DECAY)
         reasons.append("fill_model_trust_degraded")
