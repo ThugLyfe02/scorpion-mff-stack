@@ -4,9 +4,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from .adaptive_ensemble import AdaptiveEnsembleSnapshot
+from .bayesian_changepoint import BayesianChangePointReport
 from .canary import CanaryReport, CanaryStatus
 from .conformal import ConformalEvaluation
 from .ensemble_diversity import EnsembleDiversityReport
+from .feature_family_selection import FeatureFamilySelectionReport
 from .feature_stability import FeatureStabilityReport
 from .hyperparameter_plateau import HyperparameterPlateauReport
 from .incremental_oof_value import IncrementalOOFReport
@@ -18,6 +20,7 @@ from .oof_stacking import CrossFittedStackingReport
 from .parameter_surface import ParameterSurfaceReport
 from .pareto_selection import ParetoSelectionReport
 from .regime_mixture import RegimeMixtureReport
+from .return_distribution_dominance import DistributionDominanceReport
 from .safe_policy_improvement import SafePolicyImprovementReport
 from .selective import SelectivePolicy
 from .sequential_evidence import ExecutionEvidenceMonitorSnapshot, SequentialEvidenceStatus
@@ -56,6 +59,8 @@ class PromotionEvidence:
     temporal_crossfit: TemporalCrossFitReport | None = None
     stacking: CrossFittedStackingReport | None = None
     incremental_oof: IncrementalOOFReport | None = None
+    feature_family_selection: FeatureFamilySelectionReport | None = None
+    required_feature_family_id: str | None = None
     nested_selection: NestedSelectionReport | None = None
     hyperparameter_plateau: HyperparameterPlateauReport | None = None
     parameter_surface: ParameterSurfaceReport | None = None
@@ -69,6 +74,8 @@ class PromotionEvidence:
     label_noise: LabelNoiseReport | None = None
     uncertainty_health: UncertaintyHealthReport | None = None
     safe_policy_improvement: SafePolicyImprovementReport | None = None
+    return_distribution: DistributionDominanceReport | None = None
+    bayesian_changepoint: BayesianChangePointReport | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +100,11 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         raise ValueError("anytime_accuracy_lower_bound must be between 0 and 1")
     if not 0.0 <= evidence.minimum_label_consensus_rate <= 1.0:
         raise ValueError("minimum_label_consensus_rate must be between 0 and 1")
+    if (
+        evidence.required_feature_family_id is not None
+        and not evidence.required_feature_family_id.strip()
+    ):
+        raise ValueError("required_feature_family_id cannot be blank")
 
     failures: list[str] = []
     if not evidence.candidate.qualified:
@@ -107,6 +119,11 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         failures.append("research_manifest_missing")
     if evidence.online_drifted:
         failures.append("online_drift_active")
+    if evidence.bayesian_changepoint is not None and evidence.bayesian_changepoint.degradation:
+        failures.append(
+            "bayesian_degradation_changepoint_active:"
+            f"p={evidence.bayesian_changepoint.posterior_changepoint_probability:.6f}"
+        )
     if not evidence.dataset_complete:
         failures.append("dataset_not_complete")
     if not evidence.quote_coverage_ok:
@@ -168,6 +185,14 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         failures.extend(
             f"incremental_oof:{item}" for item in evidence.incremental_oof.failures
         )
+    if evidence.required_feature_family_id is not None:
+        if evidence.feature_family_selection is None:
+            failures.append("feature_family_selection_missing_for_required_family")
+        elif evidence.required_feature_family_id not in evidence.feature_family_selection.selected_families:
+            failures.append(
+                "required_feature_family_not_selected:"
+                f"{evidence.required_feature_family_id}"
+            )
     if evidence.nested_selection is not None and not evidence.nested_selection.qualified:
         failures.append("nested_temporal_selection_not_qualified")
         failures.extend(
@@ -242,6 +267,11 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         failures.extend(
             f"policy_improvement:{item}"
             for item in evidence.safe_policy_improvement.failures
+        )
+    if evidence.return_distribution is not None and not evidence.return_distribution.qualified:
+        failures.append("return_distribution_dominance_not_qualified")
+        failures.extend(
+            f"return_distribution:{item}" for item in evidence.return_distribution.failures
         )
 
     if failures:
