@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from .canary import CanaryReport, CanaryStatus
+from .conformal import ConformalEvaluation
 from .selective import SelectivePolicy
 from .tournament import CandidateScore
 from .uncertainty_envelope import ExecutionUncertaintyEnvelope
@@ -30,6 +31,7 @@ class PromotionEvidence:
     runtime_certified: bool | None = None
     anytime_accuracy_lower_bound: float | None = None
     required_anytime_accuracy_lower_bound: float = 0.95
+    conformal: ConformalEvaluation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +94,9 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         < evidence.required_anytime_accuracy_lower_bound
     ):
         failures.append("anytime_accuracy_confidence_sequence_below_requirement")
+    if evidence.conformal is not None and not evidence.conformal.qualified:
+        failures.append("conformal_prediction_set_not_qualified")
+        failures.extend(f"conformal:{item}" for item in evidence.conformal.failures)
 
     if failures:
         return PromotionDecision(
