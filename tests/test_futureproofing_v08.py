@@ -1,7 +1,7 @@
 import asyncio
 import sqlite3
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from scorpion.active_learning import ReviewCandidate
