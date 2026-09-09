@@ -71,10 +71,9 @@ def _one_sided_sign_p_value(successes: int, trials: int) -> float:
         return 1.0
     if not 0 <= successes <= trials:
         raise ValueError("successes must be between zero and trials")
-    return min(
-        1.0,
-        sum(math.comb(trials, k) for k in range(successes, trials + 1)) / (2**trials),
-    )
+    numerator = float(sum(math.comb(trials, k) for k in range(successes, trials + 1)))
+    denominator = float(2**trials)
+    return min(1.0, numerator / denominator)
 
 
 def _bh_q_values(rows: list[tuple[str, float]]) -> dict[str, float]:
