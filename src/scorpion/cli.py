@@ -8,17 +8,25 @@ from decimal import Decimal
 from pathlib import Path
 
 from .accuracy import score_decisions
+from .causal_features import (
+    backfill_feature_snapshots,
+    load_training_rows,
+    verify_feature_store,
+)
 from .causal_trace import trace_event
 from .certification import certify_runtime
 from .decision_store import unresolved_packet_count
 from .domain import EventKind, SignalEvent
+from .failure_quarantine import load_quarantined, requeue_quarantined
+from .fault_certification import certify_replay_faults
 from .integrity import IntegrityLedger
 from .ops_queue import load_operator_inbox
 from .policy_bundle import RuntimePolicyBundle
+from .processing_order import inspect_processing_order, load_signals_in_processing_order
 from .provenance import canonical_json
 from .reconciliation import ExternalPositionObservation, reconcile_positions
 from .recovery import create_verified_backup
-from .replay import replay, state_fingerprint
+from .replay import ReplayOrder, replay, state_fingerprint
 from .resilience import assess_resilience
 from .schema_contract import inspect_schema
 from .stage_trace import load_stage_latency_report, storage_snapshot
@@ -74,6 +82,16 @@ def schema_main() -> None:
     print(json.dumps(asdict(inspect_schema(args.db)), indent=2, sort_keys=True))
 
 
+def order_main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", default="scorpion.db")
+    args = parser.parse_args()
+    report = inspect_processing_order(args.db)
+    print(json.dumps(asdict(report), indent=2, sort_keys=True))
+    if not report.complete:
+        raise SystemExit(2)
+
+
 def backup_main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("output", type=Path)
@@ -99,6 +117,75 @@ def snapshot_main() -> None:
         "created_ts_utc": checkpoint.created_ts_utc.isoformat(),
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def features_main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", default="scorpion.db")
+    parser.add_argument("--backfill", action="store_true")
+    parser.add_argument("--window", type=int, default=100)
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--export", type=Path, help="write labeled causal rows as JSONL")
+    args = parser.parse_args()
+    payload: dict[str, object] = {}
+    if args.backfill:
+        payload["backfill"] = asdict(
+            backfill_feature_snapshots(
+                args.db,
+                window=args.window,
+                limit=args.limit,
+            )
+        )
+    verification = verify_feature_store(args.db)
+    payload["verification"] = asdict(verification)
+    rows = load_training_rows(args.db)
+    payload["training_rows"] = len(rows)
+    if args.export is not None:
+        lines = [json.dumps(asdict(row), sort_keys=True) for row in rows]
+        args.export.write_text("\n".join(lines) + ("\n" if lines else ""))
+        payload["export"] = str(args.export)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    if not verification.valid:
+        raise SystemExit(2)
+
+
+def quarantine_main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", default="scorpion.db")
+    parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--requeue")
+    parser.add_argument("--operator", default="")
+    parser.add_argument("--note", default="")
+    args = parser.parse_args()
+    if args.requeue:
+        requeue_quarantined(
+            args.db,
+            args.requeue,
+            operator=args.operator,
+            note=args.note,
+        )
+    items = load_quarantined(args.db, limit=args.limit)
+    print(
+        json.dumps(
+            {
+                "count": len(items),
+                "items": [asdict(item) for item in items],
+            },
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+    )
+
+
+def fault_certify_main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", default="scorpion.db")
+    args = parser.parse_args()
+    report = certify_replay_faults(args.db)
+    print(json.dumps(asdict(report), indent=2, sort_keys=True))
+    if not report.passed:
+        raise SystemExit(2)
 
 
 def policy_main() -> None:
@@ -165,11 +252,16 @@ def ops_main() -> None:
     inbox = load_operator_inbox(args.db, limit=args.queue_limit)
     schema = inspect_schema(args.db)
     temporal = load_temporal_stream_report(args.db)
+    processing_order = inspect_processing_order(args.db)
+    feature_store = verify_feature_store(args.db)
+    quarantined = load_quarantined(args.db, limit=10)
     policy = RuntimePolicyBundle()
     payload = {
         "operational_mode": resilience.mode.value,
         "policy_fingerprint": policy.fingerprint,
         "schema": asdict(schema),
+        "processing_order": asdict(processing_order),
+        "causal_feature_store": asdict(feature_store),
         "temporal_integrity": asdict(temporal),
         "resilience_signals": [
             {
@@ -181,6 +273,7 @@ def ops_main() -> None:
         ],
         "recommended_actions": list(resilience.recommended_actions),
         "unresolved_decision_packets": unresolved_packet_count(args.db),
+        "quarantined_raw_revisions": [asdict(item) for item in quarantined],
         "operator_inbox": [
             {
                 "packet_id": item.packet_id,
@@ -204,7 +297,7 @@ def ops_main() -> None:
         "storage": asdict(storage),
         "integrity": asdict(integrity),
     }
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    print(json.dumps(payload, indent=2, sort_keys=True, default=str))
 
 
 def reconcile_main() -> None:
@@ -228,8 +321,8 @@ def reconcile_main() -> None:
         for row in rows
         if isinstance(row, dict)
     ]
-    store = Store(args.db)
-    state, _ = replay(store.load_signals())
+    signals = load_signals_in_processing_order(args.db)
+    state, _ = replay(signals, order=ReplayOrder.INPUT)
     report = reconcile_positions(state, observations)
     payload = {
         "clean": report.clean,
