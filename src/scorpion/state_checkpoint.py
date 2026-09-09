@@ -161,7 +161,10 @@ def create_state_checkpoint(
                 created.isoformat(),
             ),
         )
-        checkpoint_id = int(cursor.lastrowid)
+        raw_checkpoint_id = cursor.lastrowid
+        if raw_checkpoint_id is None:
+            raise RuntimeError("SQLite did not return a checkpoint row id")
+        checkpoint_id = int(raw_checkpoint_id)
     return StateCheckpoint(
         checkpoint_id,
         policy.fingerprint,
@@ -236,28 +239,31 @@ def restore_state(
     policy = runtime_policy or RuntimePolicyBundle()
     checkpoint = load_latest_verified_checkpoint(path, signals, runtime_policy=policy)
     if checkpoint is None:
-        state, effects = replay(signals, policy.base)
+        full_state, replayed_effects = replay(signals, policy.base)
         return CheckpointRestore(
             False,
             None,
             len(signals),
-            state,
-            effects,
+            full_state,
+            replayed_effects,
             "full_replay",
         )
 
-    state = checkpoint.state
+    restored_state = checkpoint.state
     tail = signals[checkpoint.signal_count :]
-    effects: list[Effect] = []
+    tail_effects: list[Effect] = []
     for event in tail:
-        state, produced = reduce_book(state, event, policy.base)
-        effects.extend(produced)
-    assert_valid_book(state, max_open_positions=policy.base.max_open_positions)
+        restored_state, produced = reduce_book(restored_state, event, policy.base)
+        tail_effects.extend(produced)
+    assert_valid_book(
+        restored_state,
+        max_open_positions=policy.base.max_open_positions,
+    )
     return CheckpointRestore(
         True,
         checkpoint.checkpoint_id,
         len(tail),
-        state,
-        tuple(effects),
+        restored_state,
+        tuple(tail_effects),
         "verified_policy_bound_checkpoint_plus_tail",
     )
