@@ -157,6 +157,8 @@ def _folds(
             continue
         observed = sum(row.truth for row in fold_rows) / len(fold_rows)
         predicted = sum(row.probability for row in fold_rows) / len(fold_rows)
+        model_brier = _brier(fold_rows)
+        baseline_brier = observed * (1.0 - observed)
         result.append(
             TemporalFoldMetrics(
                 fold=index,
@@ -164,8 +166,8 @@ def _folds(
                 positives=sum(row.truth for row in fold_rows),
                 mean_probability=predicted,
                 observed_rate=observed,
-                brier=_brier(fold_rows),
-                mean_edge=observed - 0.5,
+                brier=model_brier,
+                mean_edge=baseline_brier - model_brier,
             )
         )
     return tuple(result)
@@ -186,10 +188,7 @@ def evaluate_temporal_crossfit(
 
     policy = policy or TemporalCrossFitPolicy()
     ordered = sorted(predictions, key=lambda row: (row.event_ts_utc, row.event_id))
-    leakage = sum(
-        row.trained_through_ts_utc >= row.event_ts_utc
-        for row in ordered
-    )
+    leakage = sum(row.trained_through_ts_utc >= row.event_ts_utc for row in ordered)
     positives = sum(row.truth for row in ordered)
     auc = _auc(ordered)
     brier = _brier(ordered)
