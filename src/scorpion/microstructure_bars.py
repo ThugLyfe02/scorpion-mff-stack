@@ -6,7 +6,12 @@ from dataclasses import asdict, dataclass
 from datetime import timedelta
 from decimal import Decimal
 
-from .microstructure import MarketEventKind, OptionMarketEvent, OptionMicrostructureTape, datetime_from_ns
+from .microstructure import (
+    MarketEventKind,
+    OptionMarketEvent,
+    OptionMicrostructureTape,
+    datetime_from_ns,
+)
 
 _NS_PER_SECOND = 1_000_000_000
 
@@ -62,11 +67,7 @@ def aggregate_diagnostic_bars(
         ordered = sorted(items, key=lambda item: (item.ts_event_ns, item.sequence))
         quotes = [item for item in ordered if item.kind is MarketEventKind.QUOTE]
         trades = [item for item in ordered if item.kind is MarketEventKind.TRADE]
-        trade_prices = [
-            item.trade_price
-            for item in trades
-            if item.trade_price is not None
-        ]
+        trade_prices = [item.trade_price for item in trades if item.trade_price is not None]
         bars.append(
             DiagnosticBar(
                 contract_key=contract_key,
