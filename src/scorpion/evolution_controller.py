@@ -118,30 +118,31 @@ def evaluate_evolution_need(
         hotspot_triggered = bool(target_slices)
         should_generate = enough_data or hotspot_triggered
         if hotspot_triggered:
-            primary = EvolutionTrigger.RESIDUAL_HOTSPOT
-            triggers = (EvolutionTrigger.RESIDUAL_HOTSPOT,)
-            reasons = (
-                "initial_targeted_residual_hotspot:"
-                + ",".join(target_slices[:5]),
+            initial_primary = EvolutionTrigger.RESIDUAL_HOTSPOT
+            initial_triggers: tuple[EvolutionTrigger, ...] = (
+                EvolutionTrigger.RESIDUAL_HOTSPOT,
+            )
+            initial_reasons: tuple[str, ...] = (
+                "initial_targeted_residual_hotspot:" + ",".join(target_slices[:5]),
             )
         elif enough_data:
-            primary = EvolutionTrigger.NEW_DATA
-            triggers = (EvolutionTrigger.NEW_DATA,)
-            reasons = ("initial_evolution_candidate_ready",)
+            initial_primary = EvolutionTrigger.NEW_DATA
+            initial_triggers = (EvolutionTrigger.NEW_DATA,)
+            initial_reasons = ("initial_evolution_candidate_ready",)
         else:
-            primary = None
-            triggers = ()
-            reasons = ("insufficient_initial_data_for_evolution",)
+            initial_primary = None
+            initial_triggers = ()
+            initial_reasons = ("insufficient_initial_data_for_evolution",)
         return EvolutionDecision(
             should_generate=should_generate,
-            primary_trigger=primary,
-            triggers=triggers,
+            primary_trigger=initial_primary,
+            triggers=initial_triggers,
             new_samples=observation.dataset_samples,
             weight_l1_change=0.0,
             feature_changes=len(observation.feature_stability.qualified_features),
             regime_changes=len(observation.regime_mixture.regimes),
             cooldown_active=False,
-            reasons=reasons,
+            reasons=initial_reasons,
         )
 
     new_samples = max(0, observation.dataset_samples - baseline.dataset_samples)
