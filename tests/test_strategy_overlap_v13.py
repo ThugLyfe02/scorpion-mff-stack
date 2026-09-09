@@ -73,3 +73,29 @@ def test_deduplicated_universe_prefers_specific_nested_representative_determinis
     repeated, repeated_report = deduplicate_strategy_universe(dict(reversed(tuple(segments.items()))))
     assert tuple(universe) == tuple(repeated)
     assert report.clusters == repeated_report.clusters
+
+
+def test_large_umbrella_segment_cannot_bridge_disjoint_children_into_one_cluster():
+    aapl = tuple(_trade(f"aapl-{index}", "AAPL", index) for index in range(10))
+    nvda = tuple(_trade(f"nvda-{index}", "NVDA", 20 + index) for index in range(10))
+    segments = {
+        "all": aapl + nvda,
+        "ticker:AAPL": aapl,
+        "ticker:NVDA": nvda,
+    }
+    universe, report = deduplicate_strategy_universe(segments)
+    assert report.effective_hypotheses == 3
+    assert set(universe) == {"all", "ticker:AAPL", "ticker:NVDA"}
+    child_pair = next(
+        pair
+        for pair in report.pairs
+        if {pair.left, pair.right} == {"ticker:AAPL", "ticker:NVDA"}
+    )
+    assert child_pair.shared_trades == 0
+    assert child_pair.equivalent is False
+    umbrella_pairs = [
+        pair for pair in report.pairs if "all" in {pair.left, pair.right}
+    ]
+    assert all(pair.containment == 1.0 for pair in umbrella_pairs)
+    assert all(pair.size_ratio == 0.5 for pair in umbrella_pairs)
+    assert all(pair.equivalent is False for pair in umbrella_pairs)
