@@ -129,9 +129,9 @@ def bind_event_processing_order(db: sqlite3.Connection, event_id: str) -> int:
 def register_raw_receipt(path: str | Path, raw_event_id: str) -> int:
     with sqlite3.connect(str(path), timeout=5.0, isolation_level=None) as db:
         db.execute("PRAGMA foreign_keys=ON")
+        ensure_processing_order_schema(db)
         db.execute("BEGIN IMMEDIATE")
         try:
-            ensure_processing_order_schema(db)
             sequence = bind_raw_receipt_order(db, raw_event_id)
             db.execute("COMMIT")
         except Exception:
