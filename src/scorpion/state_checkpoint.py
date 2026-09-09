@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from .domain import BookState, PositionState, PositionStatus, SignalEvent
+from .domain import BookState, Effect, PositionState, PositionStatus, SignalEvent
 from .invariants import assert_valid_book
 from .policy_bundle import RuntimePolicyBundle
 from .reducer import reduce_book
@@ -48,6 +48,7 @@ class CheckpointRestore:
     checkpoint_id: int | None
     tail_events: int
     state: BookState
+    effects_to_rematerialize: tuple[Effect, ...]
     reason: str
 
 
@@ -235,18 +236,28 @@ def restore_state(
     policy = runtime_policy or RuntimePolicyBundle()
     checkpoint = load_latest_verified_checkpoint(path, signals, runtime_policy=policy)
     if checkpoint is None:
-        state, _ = replay(signals, policy.base)
-        return CheckpointRestore(False, None, len(signals), state, "full_replay")
+        state, effects = replay(signals, policy.base)
+        return CheckpointRestore(
+            False,
+            None,
+            len(signals),
+            state,
+            effects,
+            "full_replay",
+        )
 
     state = checkpoint.state
     tail = signals[checkpoint.signal_count :]
+    effects: list[Effect] = []
     for event in tail:
-        state, _ = reduce_book(state, event, policy.base)
+        state, produced = reduce_book(state, event, policy.base)
+        effects.extend(produced)
     assert_valid_book(state, max_open_positions=policy.base.max_open_positions)
     return CheckpointRestore(
         True,
         checkpoint.checkpoint_id,
         len(tail),
         state,
+        tuple(effects),
         "verified_policy_bound_checkpoint_plus_tail",
     )
