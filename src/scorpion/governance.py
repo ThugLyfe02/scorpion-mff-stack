@@ -8,6 +8,7 @@ from .conformal import ConformalEvaluation
 from .mondrian_conformal import MondrianEvaluation
 from .selective import SelectivePolicy
 from .sequential_evidence import ExecutionEvidenceMonitorSnapshot, SequentialEvidenceStatus
+from .temporal_crossfit import TemporalCrossFitReport
 from .tournament import CandidateScore
 from .uncertainty_envelope import ExecutionUncertaintyEnvelope
 from .walk_forward import WalkForwardReport
@@ -36,6 +37,7 @@ class PromotionEvidence:
     conformal: ConformalEvaluation | None = None
     mondrian_conformal: MondrianEvaluation | None = None
     sequential_evidence: ExecutionEvidenceMonitorSnapshot | None = None
+    temporal_crossfit: TemporalCrossFitReport | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +113,11 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         and evidence.sequential_evidence.status is SequentialEvidenceStatus.ALARM
     ):
         failures.append("anytime_valid_sequential_degradation_alarm")
+    if evidence.temporal_crossfit is not None and not evidence.temporal_crossfit.passed:
+        failures.append("temporal_crossfit_not_qualified")
+        failures.extend(
+            f"temporal_crossfit:{item}" for item in evidence.temporal_crossfit.failures
+        )
 
     if failures:
         return PromotionDecision(
