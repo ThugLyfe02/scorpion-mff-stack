@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scorpion-mff"
-version = "0.8.0"
-description = "Deterministic MFF control plane with durable ingress backpressure, verified state checkpoints, multi-provider quote consensus, anytime-valid quality monitoring, and diversity-aware review allocation."
+version = "0.9.0"
+description = "Deterministic MFF control plane with durable live processing order, point-in-time causal features, poison-event quarantine, verified recovery, adaptive intelligence routing, and replay fault certification."
 requires-python = ">=3.13"
 dependencies = [
   "discord.py>=2.4,<3",
@@ -27,8 +27,12 @@ scorpion-accuracy = "scorpion.cli:accuracy_main"
 scorpion-ops = "scorpion.cli:ops_main"
 scorpion-storage = "scorpion.cli:storage_main"
 scorpion-schema = "scorpion.cli:schema_main"
+scorpion-order = "scorpion.cli:order_main"
 scorpion-backup = "scorpion.cli:backup_main"
 scorpion-snapshot = "scorpion.cli:snapshot_main"
+scorpion-features = "scorpion.cli:features_main"
+scorpion-quarantine = "scorpion.cli:quarantine_main"
+scorpion-fault-certify = "scorpion.cli:fault_certify_main"
 scorpion-policy = "scorpion.cli:policy_main"
 scorpion-time = "scorpion.cli:temporal_main"
 scorpion-trace = "scorpion.cli:trace_main"
