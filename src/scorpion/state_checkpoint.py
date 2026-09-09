@@ -10,8 +10,9 @@ from pathlib import Path
 from .domain import BookState, Effect, PositionState, PositionStatus, SignalEvent
 from .invariants import assert_valid_book
 from .policy_bundle import RuntimePolicyBundle
+from .processing_order import load_signals_in_processing_order
 from .reducer import reduce_book
-from .replay import replay, state_fingerprint
+from .replay import ReplayOrder, replay, state_fingerprint
 from .store import Store
 
 _SCHEMA = """
@@ -132,8 +133,8 @@ def create_state_checkpoint(
 ) -> StateCheckpoint:
     policy = runtime_policy or RuntimePolicyBundle()
     store = Store(path)
-    signals = store.load_signals()
-    state, _ = replay(signals, policy.base)
+    signals = load_signals_in_processing_order(path)
+    state, _ = replay(signals, policy.base, order=ReplayOrder.INPUT)
     assert_valid_book(state, max_open_positions=policy.base.max_open_positions)
     last_event_id = signals[-1].event_id if signals else ""
     integrity_hash = _integrity_hash_for_event(path, last_event_id)
@@ -239,14 +240,18 @@ def restore_state(
     policy = runtime_policy or RuntimePolicyBundle()
     checkpoint = load_latest_verified_checkpoint(path, signals, runtime_policy=policy)
     if checkpoint is None:
-        full_state, replayed_effects = replay(signals, policy.base)
+        full_state, replayed_effects = replay(
+            signals,
+            policy.base,
+            order=ReplayOrder.INPUT,
+        )
         return CheckpointRestore(
             False,
             None,
             len(signals),
             full_state,
             replayed_effects,
-            "full_replay",
+            "full_replay_durable_process_order",
         )
 
     restored_state = checkpoint.state
@@ -265,5 +270,5 @@ def restore_state(
         len(tail),
         restored_state,
         tuple(tail_effects),
-        "verified_policy_bound_checkpoint_plus_tail",
+        "verified_policy_bound_checkpoint_plus_process_order_tail",
     )
