@@ -6,9 +6,9 @@ from pathlib import Path
 
 from .integrity import IntegrityLedger
 from .policy_bundle import RuntimePolicyBundle
+from .processing_order import inspect_processing_order, load_signals_in_processing_order
 from .provenance import FileFingerprint, fingerprint_file
-from .replay import replay, state_fingerprint
-from .store import Store
+from .replay import ReplayOrder, replay, state_fingerprint
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +18,8 @@ class RecoverySnapshot:
     integrity_head: str
     database_evidence_ok: bool
     policy_fingerprint: str
+    process_order_fingerprint: str
+    processing_order_complete: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,17 +38,23 @@ def _snapshot(
     *,
     runtime_policy: RuntimePolicyBundle,
 ) -> RecoverySnapshot:
-    store = Store(path)
-    signals = store.load_signals()
-    state, _ = replay(signals, runtime_policy.base)
+    signals = load_signals_in_processing_order(path)
+    state, _ = replay(
+        signals,
+        runtime_policy.base,
+        order=ReplayOrder.INPUT,
+    )
     ledger = IntegrityLedger(path)
     evidence = ledger.verify_database()
+    processing_order = inspect_processing_order(path)
     return RecoverySnapshot(
         signal_count=len(signals),
         state_fingerprint=state_fingerprint(state),
         integrity_head=ledger.head_hash(),
         database_evidence_ok=evidence.ok,
         policy_fingerprint=runtime_policy.fingerprint,
+        process_order_fingerprint=processing_order.process_fingerprint,
+        processing_order_complete=processing_order.complete,
     )
 
 
@@ -77,6 +85,10 @@ def verify_backup(
         failures.append("source_database_evidence_failed")
     if not backup.database_evidence_ok:
         failures.append("backup_database_evidence_failed")
+    if not source.processing_order_complete:
+        failures.append("source_processing_order_incomplete")
+    if not backup.processing_order_complete:
+        failures.append("backup_processing_order_incomplete")
     if source.signal_count != backup.signal_count:
         failures.append(f"signal_count:{source.signal_count}!={backup.signal_count}")
     if source.state_fingerprint != backup.state_fingerprint:
@@ -85,6 +97,8 @@ def verify_backup(
         failures.append("integrity_head_mismatch")
     if source.policy_fingerprint != backup.policy_fingerprint:
         failures.append("policy_fingerprint_mismatch")
+    if source.process_order_fingerprint != backup.process_order_fingerprint:
+        failures.append("process_order_fingerprint_mismatch")
     return BackupVerification(
         source=source,
         backup=backup,
