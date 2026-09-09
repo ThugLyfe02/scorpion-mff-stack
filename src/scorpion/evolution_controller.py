@@ -116,8 +116,8 @@ def evaluate_evolution_need(
             reasons=(
                 "initial_evolution_candidate_ready"
                 if enough
-                else "insufficient_initial_data_for_evolution"
-            ,),
+                else "insufficient_initial_data_for_evolution",
+            ),
         )
 
     new_samples = max(0, observation.dataset_samples - baseline.dataset_samples)
@@ -137,7 +137,10 @@ def evaluate_evolution_need(
     if baseline.fill_model_trusted and not observation.fill_model_trusted:
         triggers.append(EvolutionTrigger.CALIBRATION_DECAY)
         reasons.append("fill_model_trust_degraded")
-    if feature_changes >= policy.minimum_feature_changes or regime_changes >= policy.minimum_regime_changes:
+    if (
+        feature_changes >= policy.minimum_feature_changes
+        or regime_changes >= policy.minimum_regime_changes
+    ):
         triggers.append(EvolutionTrigger.REGIME_CHANGE)
         reasons.append(
             f"structural_change:features={feature_changes},regimes={regime_changes}"
