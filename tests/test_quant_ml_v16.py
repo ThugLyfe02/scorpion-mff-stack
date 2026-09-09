@@ -8,6 +8,11 @@ from scorpion.label_consensus import (
     LabelConsensusPolicy,
     evaluate_label_consensus,
 )
+from scorpion.label_noise_audit import (
+    LabelNoisePolicy,
+    OOFLabelPrediction,
+    audit_oof_label_noise,
+)
 from scorpion.safe_policy_improvement import (
     PairedPolicyOutcome,
     PolicyImprovementStatus,
@@ -67,6 +72,37 @@ def test_adjudication_pool_is_append_only_and_consensus_replayable(tmp_path):
     )
     assert report.events == 1
     assert report.event_consensus[0].label == "ENTRY"
+
+
+def test_oof_label_noise_audit_surfaces_only_suspicious_resolved_truth():
+    rows: list[OOFLabelPrediction] = []
+    for index in range(100):
+        observed = EventKind.ENTRY if index % 2 == 0 else EventKind.IGNORE
+        if index in {4, 16, 28, 41}:
+            probabilities = (
+                {EventKind.ENTRY: 0.05, EventKind.IGNORE: 0.95}
+                if observed is EventKind.ENTRY
+                else {EventKind.ENTRY: 0.95, EventKind.IGNORE: 0.05}
+            )
+        else:
+            probabilities = (
+                {EventKind.ENTRY: 0.90, EventKind.IGNORE: 0.10}
+                if observed is EventKind.ENTRY
+                else {EventKind.ENTRY: 0.10, EventKind.IGNORE: 0.90}
+            )
+        rows.append(OOFLabelPrediction(f"e-{index}", observed, probabilities))
+    report = audit_oof_label_noise(
+        rows,
+        labels=(EventKind.ENTRY, EventKind.IGNORE),
+        policy=LabelNoisePolicy(
+            minimum_class_samples=20,
+            low_self_confidence_quantile=0.10,
+            minimum_alternative_margin=0.50,
+            maximum_flagged_rate=0.10,
+        ),
+    )
+    assert report.qualified is True
+    assert {item.event_id for item in report.issues} == {"e-4", "e-16", "e-28", "e-41"}
 
 
 def test_uncertainty_decomposition_distinguishes_epistemic_from_aleatoric():
@@ -131,13 +167,14 @@ def _paired_outcomes(*, escalation: bool = False, unstable: bool = False):
     for day_index in range(25):
         improvement = -0.06 if unstable and day_index % 4 == 0 else 0.02
         for event_index in range(5):
+            escalation_row = escalation and day_index == 0 and event_index == 0
             rows.append(
                 PairedPolicyOutcome(
                     event_id=f"{day_index}-{event_index}",
                     market_date=start + timedelta(days=day_index),
                     incumbent_reward=0.00,
                     challenger_reward=improvement,
-                    incumbent_actionable=False if escalation and day_index == 0 and event_index == 0 else True,
+                    incumbent_actionable=not escalation_row,
                     challenger_actionable=True,
                 )
             )
