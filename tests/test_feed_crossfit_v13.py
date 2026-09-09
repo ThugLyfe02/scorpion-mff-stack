@@ -2,18 +2,17 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from scorpion.feed_integrity import (
-    evaluate_feed_integrity,
     FeedContinuityMode,
     FeedIntegrityStatus,
+    evaluate_feed_integrity,
 )
 from scorpion.microstructure import MarketEventKind, OptionMarketEvent
 from scorpion.temporal_crossfit import (
-    evaluate_temporal_crossfit,
     TemporalCrossFitPolicy,
     TemporalCrossFitStatus,
     TemporalPrediction,
+    evaluate_temporal_crossfit,
 )
-
 
 BASE_NS = 1_789_000_000_000_000_000
 CONTRACT = "AAPL|CALL|200|2026-09-18"
