@@ -29,6 +29,7 @@ from .execution_meta_labels import (
 from .execution_trust import FillTrustPolicy, assess_fill_model_trust
 from .fill_calibration import evaluate_fill_calibration
 from .history_archive import HistoryArchive
+from .liquidity_capacity import LiquidityCapacityPolicy, evaluate_liquidity_capacity
 from .microstructure import OptionMicrostructureTape, ns_from_datetime
 from .microstructure_forensics import (
     MicroForensicStatus,
@@ -154,6 +155,7 @@ def microstructure_forensics_main() -> None:
     fill_trust_policy = FillTrustPolicy()
     regime_policy = RegimeStabilityPolicy()
     overfit_policy = OverfitPolicy()
+    capacity_policy = LiquidityCapacityPolicy()
     meta_label_policy = ExecutionMetaLabelPolicy()
     report = run_archive_microstructure_forensics(
         archive,
@@ -235,6 +237,8 @@ def microstructure_forensics_main() -> None:
         policy=regime_policy,
     )
     regime_stability_ok = regime_stability.passed
+    capacity_report = evaluate_liquidity_capacity(report, tape, policy=capacity_policy)
+    liquidity_capacity_ok = capacity_report.robust
 
     segments = segment_completed_trades(certified_completed)
     rankings = rank_segments(segments, constraints=sizing_constraints)
@@ -281,6 +285,7 @@ def microstructure_forensics_main() -> None:
             "fill_trust": fill_trust_policy,
             "regime_stability": regime_policy,
             "backtest_overfit": overfit_policy,
+            "liquidity_capacity": capacity_policy,
             "execution_meta_labels": meta_label_policy,
         },
         datasets=datasets,
@@ -308,6 +313,7 @@ def microstructure_forensics_main() -> None:
         and tick_alignment_ok
         and fill_model_trust_ok
         and regime_stability_ok
+        and liquidity_capacity_ok
         and selection_overfit_ok
     )
     status_counts = {
@@ -349,6 +355,8 @@ def microstructure_forensics_main() -> None:
         },
         "regime_stability": asdict(regime_stability),
         "regime_stability_ok": regime_stability_ok,
+        "liquidity_capacity": asdict(capacity_report),
+        "liquidity_capacity_ok": liquidity_capacity_ok,
         "backtest_overfit": asdict(overfit_report),
         "selection_overfit_ok": selection_overfit_ok,
         "completed_certified_trades": len(certified_completed),
@@ -396,6 +404,11 @@ def microstructure_forensics_main() -> None:
             "Certified trade performance is not proven stable across spread, quote-age, latency, "
             "and session regimes; authoritative sizing is withheld."
         )
+    if not liquidity_capacity_ok:
+        warnings.append(
+            "The baseline clip is not robust under displayed-depth haircut stress across enough "
+            "complete lifecycles; authoritative sizing is withheld."
+        )
     if not selection_overfit_ok:
         warnings.append(
             "The strategy-selection search is not proven robust under CSCV-style backtest-overfit "
@@ -423,8 +436,8 @@ def microstructure_forensics_main() -> None:
         if not payload["sizing_envelopes"]:
             warnings.append(
                 "No segment survived contract/tick truth, calibrated execution evidence, "
-                "regime stability, selection-overfit control, statistical selection, and "
-                "purged out-of-sample gates."
+                "liquidity capacity, regime stability, selection-overfit control, statistical "
+                "selection, and purged out-of-sample gates."
             )
 
     if args.full:
