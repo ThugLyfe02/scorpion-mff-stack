@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_CONTRACT_VERSION = "2026.09.v2"
+SCHEMA_CONTRACT_VERSION = "2026.09.v3"
 
 _REQUIRED: dict[str, frozenset[str]] = {
     "raw_discord_events": frozenset(
@@ -62,6 +62,30 @@ _OPTIONAL_ADVANCED: dict[str, frozenset[str]] = {
             "state_fingerprint",
             "state_json",
         }
+    ),
+    "raw_receipt_order": frozenset({"receipt_seq", "raw_event_id"}),
+    "event_processing_order": frozenset({"process_seq", "event_id"}),
+    "causal_feature_snapshots": frozenset(
+        {
+            "event_id",
+            "feature_set_version",
+            "process_seq",
+            "feature_json",
+            "feature_sha256",
+        }
+    ),
+    "raw_failure_state": frozenset(
+        {
+            "raw_event_id",
+            "attempt_count",
+            "state",
+            "last_error",
+            "updated_ts_utc",
+            "requeued_by",
+        }
+    ),
+    "raw_failure_events": frozenset(
+        {"failure_id", "raw_event_id", "attempt_number", "error", "occurred_ts_utc"}
     ),
 }
 
