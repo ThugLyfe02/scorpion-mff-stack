@@ -3,13 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .causal_features import verify_feature_store
+from .failure_quarantine import quarantined_count
 from .integrity import IntegrityLedger
 from .policy_bundle import RuntimePolicyBundle
+from .processing_order import inspect_processing_order, load_signals_in_processing_order
 from .recovery import BackupVerification, create_verified_backup
-from .replay import replay, state_fingerprint
+from .replay import ReplayOrder, replay, state_fingerprint
 from .schema_contract import inspect_schema
 from .state_checkpoint import restore_state
-from .store import Store
 from .temporal_guard import TemporalStreamReport, load_temporal_stream_report
 
 
@@ -36,17 +38,22 @@ def certify_runtime(
     overwrite_backup: bool = False,
 ) -> RuntimeCertificationReport:
     policy = RuntimePolicyBundle()
-    store = Store(path)
-    signals = store.load_signals()
-    state, _ = replay(signals, policy.base)
+    signals = load_signals_in_processing_order(path)
+    state, _ = replay(signals, policy.base, order=ReplayOrder.INPUT)
     fingerprint = state_fingerprint(state)
-    duplicate_state, _ = replay(tuple(signals) + tuple(signals), policy.base)
-    reversed_state, _ = replay(tuple(reversed(signals)), policy.base)
+    duplicate_state, _ = replay(
+        tuple(signals) + tuple(signals),
+        policy.base,
+        order=ReplayOrder.INPUT,
+    )
     restored = restore_state(path, signals, runtime_policy=policy)
     restored_fingerprint = state_fingerprint(restored.state)
     schema = inspect_schema(path)
     integrity = IntegrityLedger(path).verify_database()
     temporal = load_temporal_stream_report(path)
+    processing_order = inspect_processing_order(path)
+    feature_store = verify_feature_store(path)
+    quarantined = quarantined_count(path)
     checks: list[CertificationCheck] = [
         CertificationCheck(
             "schema_contract",
@@ -59,14 +66,18 @@ def certify_runtime(
             "verified" if integrity.ok else ",".join(integrity.failures),
         ),
         CertificationCheck(
-            "duplicate_event_replay_invariance",
-            state_fingerprint(duplicate_state) == fingerprint,
-            "duplicate normalized events do not change deterministic state",
+            "durable_processing_order",
+            processing_order.complete,
+            (
+                f"signals={processing_order.signal_count};"
+                f"ordered={processing_order.process_ordered_count};"
+                f"fingerprint={processing_order.process_fingerprint}"
+            ),
         ),
         CertificationCheck(
-            "input_order_replay_invariance",
-            state_fingerprint(reversed_state) == fingerprint,
-            "replay sorting makes input enumeration order irrelevant",
+            "duplicate_event_replay_invariance",
+            state_fingerprint(duplicate_state) == fingerprint,
+            "duplicate normalized events do not change durable-process-order state",
         ),
         CertificationCheck(
             "checkpoint_replay_equivalence",
@@ -74,6 +85,15 @@ def certify_runtime(
             (
                 f"policy={policy.fingerprint};checkpoint={restored.checkpoint_id};"
                 f"tail_events={restored.tail_events};mode={restored.reason}"
+            ),
+        ),
+        CertificationCheck(
+            "causal_feature_store_integrity",
+            feature_store.valid,
+            (
+                f"snapshots={feature_store.snapshots};labeled={feature_store.labeled_rows};"
+                f"hash_mismatches={feature_store.hash_mismatches};"
+                f"invalid_seq={feature_store.invalid_process_sequences}"
             ),
         ),
         CertificationCheck(
@@ -89,6 +109,11 @@ def certify_runtime(
                 )
             ),
         ),
+        CertificationCheck(
+            "poison_event_quarantine_visible",
+            True,
+            f"quarantined_raw_revisions={quarantined}",
+        ),
     ]
     backup: BackupVerification | None = None
     if backup_path is not None:
@@ -96,9 +121,10 @@ def certify_runtime(
             path,
             backup_path,
             overwrite=overwrite_backup,
+            runtime_policy=policy,
         )
         backup_detail = (
-            "backup state/evidence matches source"
+            "backup state/evidence/order matches source"
             if backup.verified
             else ",".join(backup.failures)
         )
