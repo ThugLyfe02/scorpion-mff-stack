@@ -10,7 +10,7 @@ def test_higher_mean_with_worse_left_tail_is_rejected():
     rows: list[PairedReturn] = []
     for index in range(120):
         incumbent = 0.02 if index % 5 else -0.05
-        challenger = 0.05 if index % 10 else -0.40
+        challenger = 0.06 if index % 10 else -0.40
         rows.append(PairedReturn(str(index), incumbent, challenger))
     report = evaluate_return_distribution_dominance(
         rows,
@@ -22,7 +22,7 @@ def test_higher_mean_with_worse_left_tail_is_rejected():
     )
     assert report.challenger_mean > report.incumbent_mean
     assert report.status is DistributionDominanceStatus.FAILED
-    assert report.q10_delta < 0
+    assert report.worst_lower_partial_delta < 0
     assert report.second_order_noninferior is False
 
 
