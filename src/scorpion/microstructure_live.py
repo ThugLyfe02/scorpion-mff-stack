@@ -37,9 +37,11 @@ class ShadowExecutionIntent:
             raise ValueError("intent_id and contract_key are required")
         if self.quantity <= 0:
             raise ValueError("quantity must be positive")
-        if self.side is ShadowIntentSide.BUY_LIMIT:
-            if self.limit_price is None or self.limit_price <= 0:
-                raise ValueError("BUY_LIMIT requires a positive limit_price")
+        if (
+            self.side is ShadowIntentSide.BUY_LIMIT
+            and (self.limit_price is None or self.limit_price <= 0)
+        ):
+            raise ValueError("BUY_LIMIT requires a positive limit_price")
         if self.observation_window < timedelta(0):
             raise ValueError("observation_window cannot be negative")
         if self.market_quote_max_age < timedelta(0):
@@ -139,7 +141,10 @@ async def replay_market_events_wall_clock(
         raise ValueError("speed cannot be negative")
     if max_sleep < 0:
         raise ValueError("max_sleep cannot be negative")
-    ordered = sorted(events, key=lambda event: (event.ts_recv_ns, event.ts_event_ns, event.sequence))
+    ordered = sorted(
+        events,
+        key=lambda event: (event.ts_recv_ns, event.ts_event_ns, event.sequence),
+    )
     if not ordered:
         return
     base_recv_ns = ordered[0].ts_recv_ns
