@@ -16,6 +16,7 @@ class ContractTerms:
     deliverable: str
     adjusted: bool
     source: str
+    min_price_increment: Decimal | None = None
 
     def __post_init__(self) -> None:
         if not self.contract_key.strip():
@@ -26,6 +27,8 @@ class ContractTerms:
             raise ValueError("valid_to_ns must be greater than valid_from_ns")
         if self.multiplier <= 0:
             raise ValueError("multiplier must be positive")
+        if self.min_price_increment is not None and self.min_price_increment <= 0:
+            raise ValueError("min_price_increment must be positive when present")
         if not self.source.strip():
             raise ValueError("source is required")
 
@@ -39,6 +42,10 @@ class ContractTerms:
         return not self.adjusted and self.multiplier == Decimal("100")
 
     @property
+    def execution_terms_complete(self) -> bool:
+        return self.standard_equity_option and self.min_price_increment is not None
+
+    @property
     def fingerprint(self) -> str:
         material = "|".join(
             (
@@ -49,6 +56,7 @@ class ContractTerms:
                 self.deliverable,
                 "1" if self.adjusted else "0",
                 self.source,
+                str(self.min_price_increment or ""),
             )
         )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -62,6 +70,7 @@ class ContractTermsCoverage:
     ambiguous: tuple[str, ...]
     adjusted: tuple[str, ...]
     nonstandard_multiplier: tuple[str, ...]
+    missing_price_increment: tuple[str, ...] = ()
 
     @property
     def complete(self) -> bool:
@@ -71,14 +80,19 @@ class ContractTermsCoverage:
     def standard_only(self) -> bool:
         return self.complete and not self.adjusted and not self.nonstandard_multiplier
 
+    @property
+    def execution_ready(self) -> bool:
+        return self.standard_only and not self.missing_price_increment
+
 
 class ContractTermsRegistry:
-    """Point-in-time option contract economics.
+    """Point-in-time option contract economics and execution increments.
 
     Contract terms are deliberately separate from ticker/strike/expiry identity. A corporate
     action can change deliverables or multiplier without making the historical premium itself
     invalid. Research should therefore resolve the economic terms that were effective at the
-    event timestamp rather than blindly multiplying every option premium by 100.
+    event timestamp rather than blindly multiplying every option premium by 100 or assuming
+    that every mathematically computed limit is a venue-valid price increment.
     """
 
     def __init__(self, terms: tuple[ContractTerms, ...]) -> None:
@@ -111,6 +125,11 @@ class ContractTermsRegistry:
                         deliverable=str(row.get("deliverable", "")),
                         adjusted=bool(row.get("adjusted", False)),
                         source=str(row.get("source", "UNKNOWN")),
+                        min_price_increment=(
+                            Decimal(str(row["min_price_increment"]))
+                            if row.get("min_price_increment") is not None
+                            else None
+                        ),
                     )
                 )
             except (KeyError, TypeError, ValueError) as exc:
@@ -131,6 +150,7 @@ class ContractTermsRegistry:
         ambiguous: set[str] = set()
         adjusted: set[str] = set()
         nonstandard: set[str] = set()
+        missing_increment: set[str] = set()
         covered = 0
         for contract_key, ts_ns in requests:
             matches = self.matching(contract_key, ts_ns)
@@ -146,6 +166,8 @@ class ContractTermsRegistry:
                 adjusted.add(contract_key)
             if item.multiplier != Decimal("100"):
                 nonstandard.add(contract_key)
+            if item.min_price_increment is None:
+                missing_increment.add(contract_key)
         return ContractTermsCoverage(
             requested=len(requests),
             covered=covered,
@@ -153,6 +175,7 @@ class ContractTermsRegistry:
             ambiguous=tuple(sorted(ambiguous)),
             adjusted=tuple(sorted(adjusted)),
             nonstandard_multiplier=tuple(sorted(nonstandard)),
+            missing_price_increment=tuple(sorted(missing_increment)),
         )
 
     @property
