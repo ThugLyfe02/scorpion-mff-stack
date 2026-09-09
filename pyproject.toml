@@ -46,6 +46,7 @@ scorpion-micro-plan = "scorpion.microstructure_ops_cli:micro_plan_main"
 scorpion-micro-bars = "scorpion.microstructure_bars:micro_bars_main"
 scorpion-micro-latency-value = "scorpion.microstructure_ops_cli:latency_value_main"
 scorpion-fill-calibration = "scorpion.microstructure_ops_cli:fill_calibration_main"
+scorpion-quant-audit = "scorpion.quant_audit:quant_audit_main"
 scorpion-opra-normalize = "scorpion.opra_bridge:opra_normalize_main"
 scorpion-ingest = "scorpion.runtime:ingest_main"
 
