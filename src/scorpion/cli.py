@@ -22,6 +22,7 @@ from .replay import replay, state_fingerprint
 from .resilience import assess_resilience
 from .schema_contract import inspect_schema
 from .stage_trace import load_stage_latency_report, storage_snapshot
+from .state_checkpoint import create_state_checkpoint
 from .storage_health import checkpoint_wal, evaluate_storage_health, inspect_storage
 from .store import Store
 from .temporal_guard import load_temporal_stream_report
@@ -81,6 +82,23 @@ def backup_main() -> None:
     args = parser.parse_args()
     report = create_verified_backup(args.db, args.output, overwrite=args.overwrite)
     print(json.dumps(asdict(report), indent=2, sort_keys=True))
+
+
+def snapshot_main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", default="scorpion.db")
+    args = parser.parse_args()
+    checkpoint = create_state_checkpoint(args.db, runtime_policy=RuntimePolicyBundle())
+    payload = {
+        "checkpoint_id": checkpoint.checkpoint_id,
+        "policy_fingerprint": checkpoint.policy_fingerprint,
+        "signal_count": checkpoint.signal_count,
+        "last_event_id": checkpoint.last_event_id,
+        "integrity_record_hash": checkpoint.integrity_record_hash,
+        "state_fingerprint": checkpoint.state_fingerprint,
+        "created_ts_utc": checkpoint.created_ts_utc.isoformat(),
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def policy_main() -> None:
