@@ -7,6 +7,7 @@ from .adaptive_ensemble import AdaptiveEnsembleSnapshot
 from .canary import CanaryReport, CanaryStatus
 from .conformal import ConformalEvaluation
 from .feature_stability import FeatureStabilityReport
+from .incremental_oof_value import IncrementalOOFReport
 from .label_consensus import LabelConsensusReport
 from .label_noise_audit import LabelNoiseReport
 from .mondrian_conformal import MondrianEvaluation
@@ -49,6 +50,7 @@ class PromotionEvidence:
     sequential_evidence: ExecutionEvidenceMonitorSnapshot | None = None
     temporal_crossfit: TemporalCrossFitReport | None = None
     stacking: CrossFittedStackingReport | None = None
+    incremental_oof: IncrementalOOFReport | None = None
     adaptive_ensemble: AdaptiveEnsembleSnapshot | None = None
     feature_stability: FeatureStabilityReport | None = None
     regime_mixture: RegimeMixtureReport | None = None
@@ -151,6 +153,11 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
     if evidence.stacking is not None and not evidence.stacking.qualified:
         failures.append("chronological_oof_stacking_not_qualified")
         failures.extend(f"stacking:{item}" for item in evidence.stacking.failures)
+    if evidence.incremental_oof is not None and not evidence.incremental_oof.qualified:
+        failures.append("incremental_oof_value_not_qualified")
+        failures.extend(
+            f"incremental_oof:{item}" for item in evidence.incremental_oof.failures
+        )
     if evidence.adaptive_ensemble is not None and not evidence.adaptive_ensemble.trusted:
         failures.append("adaptive_ensemble_not_trusted")
         failures.extend(
