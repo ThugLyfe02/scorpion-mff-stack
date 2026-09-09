@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 
+from .discord_snowflake import assess_snowflake_timestamp
 from .domain import RawDiscordMessage
 
 
@@ -22,6 +23,7 @@ class TemporalPolicy:
     maximum_receive_lag: timedelta = timedelta(seconds=5)
     maximum_quote_lag: timedelta = timedelta(seconds=3)
     maximum_source_regression: timedelta = timedelta(milliseconds=250)
+    snowflake_api_tolerance: timedelta = timedelta(seconds=1)
 
     def __post_init__(self) -> None:
         if min(
@@ -29,6 +31,7 @@ class TemporalPolicy:
             self.maximum_receive_lag,
             self.maximum_quote_lag,
             self.maximum_source_regression,
+            self.snowflake_api_tolerance,
         ) < timedelta(0):
             raise ValueError("temporal tolerances cannot be negative")
 
@@ -82,6 +85,25 @@ def assess_message_time(
                 f"receive lag {receive_lag.total_seconds():.6f}s",
             )
         )
+
+    snowflake = assess_snowflake_timestamp(
+        raw.message_id,
+        source,
+        tolerance=policy.snowflake_api_tolerance,
+    )
+    if snowflake.available and not snowflake.consistent:
+        delta = snowflake.delta_from_api_ts
+        findings.append(
+            TemporalFinding(
+                "discord_snowflake_clock_mismatch",
+                TemporalSeverity.CRITICAL,
+                (
+                    "Discord API creation timestamp disagrees with timestamp encoded in "
+                    f"message snowflake by {abs(delta.total_seconds()) if delta else 0.0:.6f}s"
+                ),
+            )
+        )
+
     if raw.edited_ts_utc is not None:
         edited = raw.edited_ts_utc.astimezone(UTC)
         if edited < source:
@@ -174,6 +196,7 @@ def load_temporal_stream_report(
     edit_errors = 0
     regressions = 0
     for row in rows:
+        message_id = str(row[0])
         channel_id = str(row[1])
         author_id = str(row[2])
         source = datetime.fromisoformat(str(row[3])).astimezone(UTC)
@@ -182,6 +205,12 @@ def load_temporal_stream_report(
         receive_lags_ms.append(lag.total_seconds() * 1000.0)
         future += int(lag < -policy.source_future_tolerance)
         high_lag += int(lag > policy.maximum_receive_lag)
+        snowflake = assess_snowflake_timestamp(
+            message_id,
+            source,
+            tolerance=policy.snowflake_api_tolerance,
+        )
+        future += int(snowflake.available and not snowflake.consistent)
         if row[5] is not None:
             edited = datetime.fromisoformat(str(row[5])).astimezone(UTC)
             edit_errors += int(edited < source)
