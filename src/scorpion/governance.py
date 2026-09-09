@@ -7,12 +7,14 @@ from .adaptive_ensemble import AdaptiveEnsembleSnapshot
 from .canary import CanaryReport, CanaryStatus
 from .conformal import ConformalEvaluation
 from .feature_stability import FeatureStabilityReport
+from .hyperparameter_plateau import HyperparameterPlateauReport
 from .incremental_oof_value import IncrementalOOFReport
 from .label_consensus import LabelConsensusReport
 from .label_noise_audit import LabelNoiseReport
 from .mondrian_conformal import MondrianEvaluation
 from .nested_temporal_selection import NestedSelectionReport
 from .oof_stacking import CrossFittedStackingReport
+from .pareto_selection import ParetoSelectionReport
 from .regime_mixture import RegimeMixtureReport
 from .safe_policy_improvement import SafePolicyImprovementReport
 from .selective import SelectivePolicy
@@ -53,6 +55,8 @@ class PromotionEvidence:
     stacking: CrossFittedStackingReport | None = None
     incremental_oof: IncrementalOOFReport | None = None
     nested_selection: NestedSelectionReport | None = None
+    hyperparameter_plateau: HyperparameterPlateauReport | None = None
+    pareto_selection: ParetoSelectionReport | None = None
     adaptive_ensemble: AdaptiveEnsembleSnapshot | None = None
     feature_stability: FeatureStabilityReport | None = None
     regime_mixture: RegimeMixtureReport | None = None
@@ -165,6 +169,26 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         failures.extend(
             f"nested_selection:{item}" for item in evidence.nested_selection.failures
         )
+    if (
+        evidence.hyperparameter_plateau is not None
+        and not evidence.hyperparameter_plateau.qualified
+    ):
+        failures.append("hyperparameter_plateau_not_qualified")
+        failures.extend(
+            f"hyperparameter_plateau:{item}"
+            for item in evidence.hyperparameter_plateau.failures
+        )
+    if evidence.pareto_selection is not None:
+        if not evidence.pareto_selection.qualified:
+            failures.append("pareto_selection_not_qualified")
+            failures.extend(
+                f"pareto_selection:{item}" for item in evidence.pareto_selection.failures
+            )
+        elif evidence.candidate.name not in evidence.pareto_selection.frontier:
+            failures.append(
+                "candidate_not_on_safe_pareto_frontier:"
+                f"{evidence.candidate.name}"
+            )
     if evidence.adaptive_ensemble is not None and not evidence.adaptive_ensemble.trusted:
         failures.append("adaptive_ensemble_not_trusted")
         failures.extend(
