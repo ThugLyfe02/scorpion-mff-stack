@@ -14,6 +14,7 @@ from .decision_packet import DecisionDisposition, OperatorDecisionPacket
 from .decision_store import append_decision_packet
 from .domain import Effect, SignalEvent
 from .integrity import append_integrity_record
+from .processing_order import bind_event_processing_order
 from .stage_trace import append_stage_trace
 from .store import Store
 
@@ -22,6 +23,7 @@ from .store import Store
 class TransitionCommitResult:
     inserted: bool
     effect_count: int
+    process_seq: int
     pipeline_latency_us: int
     transaction_latency_us: int
     db_precommit_us: int
@@ -93,6 +95,7 @@ class SQLiteTransitionCommitter:
                     ),
                 )
                 inserted = cursor.rowcount == 1
+                process_seq = bind_event_processing_order(db, event.event_id)
                 effect_count = 0
                 effect_status = _effect_status(decision_packet) if effects else ""
                 if inserted:
@@ -157,6 +160,7 @@ class SQLiteTransitionCommitter:
                             "parser_rule": parser.rule_id,
                             "parser_confidence": parser.confidence,
                             "association_method": association.method,
+                            "process_seq": process_seq,
                             "effect_count": effect_count,
                             "effect_kinds": effect_kinds,
                             "effect_status": effect_status,
@@ -188,6 +192,7 @@ class SQLiteTransitionCommitter:
                         created_ts_utc=created,
                     )
                 metadata = dict(heartbeat_metadata)
+                metadata["process_seq"] = process_seq
                 metadata["pipeline_latency_us"] = pipeline_latency_us
                 metadata["db_precommit_us"] = db_precommit_us
                 db.execute(
@@ -212,6 +217,7 @@ class SQLiteTransitionCommitter:
         return TransitionCommitResult(
             inserted=inserted,
             effect_count=effect_count,
+            process_seq=process_seq,
             pipeline_latency_us=pipeline_latency_us,
             transaction_latency_us=transaction_latency_us,
             db_precommit_us=db_precommit_us,
