@@ -199,6 +199,17 @@ def update_adaptive_ensemble(
         updates = 0
 
     if drift_active:
+        if previous is not None:
+            return AdaptiveEnsembleSnapshot(
+                updates=previous.updates,
+                drift_active=True,
+                weights=previous.weights,
+                effective_models=previous.effective_models,
+                entropy=previous.entropy,
+                max_weight=previous.max_weight,
+                status=AdaptiveEnsembleStatus.FROZEN_DRIFT,
+                failures=previous.failures,
+            )
         return _snapshot(
             prior_log,
             cumulative,
