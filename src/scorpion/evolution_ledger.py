@@ -20,6 +20,7 @@ class EvolutionTrigger(StrEnum):
     CALIBRATION_DECAY = "CALIBRATION_DECAY"
     REGIME_CHANGE = "REGIME_CHANGE"
     MODEL_DEGRADATION = "MODEL_DEGRADATION"
+    RESIDUAL_HOTSPOT = "RESIDUAL_HOTSPOT"
 
 
 class EvolutionCandidateStatus(StrEnum):
@@ -40,6 +41,7 @@ class EvolutionCandidate:
     ensemble_snapshot_hash: str
     model_weights: tuple[tuple[str, float], ...]
     regimes: tuple[str, ...]
+    target_slices: tuple[str, ...]
     adaptive_updates: int
     status: EvolutionCandidateStatus
     failures: tuple[str, ...]
@@ -81,6 +83,7 @@ def _canonical_payload(
     ensemble_snapshot_hash: str,
     model_weights: tuple[tuple[str, float], ...],
     regimes: tuple[str, ...],
+    target_slices: tuple[str, ...],
     adaptive_updates: int,
     status: EvolutionCandidateStatus,
     failures: tuple[str, ...],
@@ -96,6 +99,7 @@ def _canonical_payload(
         "ensemble_snapshot_hash": ensemble_snapshot_hash,
         "model_weights": [[model_id, round(weight, 12)] for model_id, weight in model_weights],
         "regimes": list(regimes),
+        "target_slices": list(target_slices),
         "adaptive_updates": adaptive_updates,
         "status": status.value,
         "failures": list(failures),
@@ -118,6 +122,7 @@ def build_evolution_candidate(
     feature_stability: FeatureStabilityReport,
     adaptive_ensemble: AdaptiveEnsembleSnapshot,
     regime_mixture: RegimeMixtureReport,
+    target_slices: tuple[str, ...] = (),
 ) -> EvolutionCandidate:
     """Assemble an immutable *research* challenger from already-validated evidence.
 
@@ -134,6 +139,7 @@ def build_evolution_candidate(
         if not value.strip():
             raise ValueError(f"{name} is required")
 
+    normalized_targets = tuple(sorted({item.strip() for item in target_slices if item.strip()}))
     failures: list[str] = []
     if not feature_stability.qualified:
         failures.append("feature_stability_not_qualified")
@@ -172,6 +178,7 @@ def build_evolution_candidate(
         ensemble_snapshot_hash=ensemble_hash,
         model_weights=model_weights,
         regimes=regimes,
+        target_slices=normalized_targets,
         adaptive_updates=adaptive_ensemble.updates,
         status=status,
         failures=failure_tuple,
@@ -189,6 +196,7 @@ def build_evolution_candidate(
         ensemble_snapshot_hash=ensemble_hash,
         model_weights=model_weights,
         regimes=regimes,
+        target_slices=normalized_targets,
         adaptive_updates=adaptive_ensemble.updates,
         status=status,
         failures=failure_tuple,
@@ -208,6 +216,7 @@ def persist_evolution_candidate(path: str | Path, candidate: EvolutionCandidate)
         ensemble_snapshot_hash=candidate.ensemble_snapshot_hash,
         model_weights=candidate.model_weights,
         regimes=candidate.regimes,
+        target_slices=candidate.target_slices,
         adaptive_updates=candidate.adaptive_updates,
         status=candidate.status,
         failures=candidate.failures,
@@ -250,22 +259,28 @@ def list_evolution_candidates(path: str | Path) -> tuple[dict[str, object], ...]
         rows = db.execute(
             """
             SELECT candidate_id,parent_release_id,trigger,status,code_revision,
-                   policy_fingerprint,dataset_fingerprint,feature_set_version,created_ts_utc
+                   policy_fingerprint,dataset_fingerprint,feature_set_version,candidate_json,
+                   created_ts_utc
             FROM evolution_candidates
             ORDER BY created_ts_utc,candidate_id
             """
         ).fetchall()
-    return tuple(
-        {
-            "candidate_id": str(row["candidate_id"]),
-            "parent_release_id": str(row["parent_release_id"]),
-            "trigger": str(row["trigger"]),
-            "status": str(row["status"]),
-            "code_revision": str(row["code_revision"]),
-            "policy_fingerprint": str(row["policy_fingerprint"]),
-            "dataset_fingerprint": str(row["dataset_fingerprint"]),
-            "feature_set_version": str(row["feature_set_version"]),
-            "created_ts_utc": str(row["created_ts_utc"]),
-        }
-        for row in rows
-    )
+    output: list[dict[str, object]] = []
+    for row in rows:
+        payload = json.loads(str(row["candidate_json"]))
+        target_slices = payload.get("target_slices", []) if isinstance(payload, dict) else []
+        output.append(
+            {
+                "candidate_id": str(row["candidate_id"]),
+                "parent_release_id": str(row["parent_release_id"]),
+                "trigger": str(row["trigger"]),
+                "status": str(row["status"]),
+                "code_revision": str(row["code_revision"]),
+                "policy_fingerprint": str(row["policy_fingerprint"]),
+                "dataset_fingerprint": str(row["dataset_fingerprint"]),
+                "feature_set_version": str(row["feature_set_version"]),
+                "target_slices": tuple(str(item) for item in target_slices),
+                "created_ts_utc": str(row["created_ts_utc"]),
+            }
+        )
+    return tuple(output)
