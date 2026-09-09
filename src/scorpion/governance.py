@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from .adaptive_ensemble import AdaptiveEnsembleSnapshot
 from .canary import CanaryReport, CanaryStatus
 from .conformal import ConformalEvaluation
+from .feature_stability import FeatureStabilityReport
 from .mondrian_conformal import MondrianEvaluation
 from .oof_stacking import CrossFittedStackingReport
+from .regime_mixture import RegimeMixtureReport
 from .selective import SelectivePolicy
 from .sequential_evidence import ExecutionEvidenceMonitorSnapshot, SequentialEvidenceStatus
 from .temporal_crossfit import TemporalCrossFitReport
@@ -40,6 +43,9 @@ class PromotionEvidence:
     sequential_evidence: ExecutionEvidenceMonitorSnapshot | None = None
     temporal_crossfit: TemporalCrossFitReport | None = None
     stacking: CrossFittedStackingReport | None = None
+    adaptive_ensemble: AdaptiveEnsembleSnapshot | None = None
+    feature_stability: FeatureStabilityReport | None = None
+    regime_mixture: RegimeMixtureReport | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +129,21 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
     if evidence.stacking is not None and not evidence.stacking.qualified:
         failures.append("chronological_oof_stacking_not_qualified")
         failures.extend(f"stacking:{item}" for item in evidence.stacking.failures)
+    if evidence.adaptive_ensemble is not None and not evidence.adaptive_ensemble.trusted:
+        failures.append("adaptive_ensemble_not_trusted")
+        failures.extend(
+            f"adaptive_ensemble:{item}" for item in evidence.adaptive_ensemble.failures
+        )
+        if evidence.adaptive_ensemble.drift_active:
+            failures.append("adaptive_ensemble_frozen_by_drift")
+    if evidence.feature_stability is not None and not evidence.feature_stability.qualified:
+        failures.append("temporal_feature_stability_not_qualified")
+        failures.extend(
+            f"feature_stability:{item}" for item in evidence.feature_stability.failures
+        )
+    if evidence.regime_mixture is not None and not evidence.regime_mixture.qualified:
+        failures.append("regime_conditioned_mixture_not_qualified")
+        failures.extend(f"regime_mixture:{item}" for item in evidence.regime_mixture.failures)
 
     if failures:
         return PromotionDecision(
