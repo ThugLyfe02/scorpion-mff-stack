@@ -119,7 +119,10 @@ def _pair(
     )
 
 
-def _clusters(groups: tuple[str, ...], pairs: tuple[TailDependencePair, ...]) -> tuple[TailRiskCluster, ...]:
+def _clusters(
+    groups: tuple[str, ...],
+    pairs: tuple[TailDependencePair, ...],
+) -> tuple[TailRiskCluster, ...]:
     parent = {group: group for group in groups}
 
     def find(value: str) -> str:
