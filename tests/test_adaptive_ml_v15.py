@@ -79,10 +79,9 @@ def test_feature_stability_rejects_time_flipping_predictor():
         for index in range(40):
             target = index % 2 == 0
             stable = (2.0 if target else 0.0) + fold * 0.01 + (index % 3) * 0.001
-            if fold % 2 == 0:
-                flipping = 2.0 if target else 0.0
-            else:
-                flipping = 0.0 if target else 2.0
+            positive_direction = 2.0 if target else 0.0
+            negative_direction = 0.0 if target else 2.0
+            flipping = positive_direction if fold % 2 == 0 else negative_direction
             rows.append(
                 FeatureStabilityExample(
                     event_id=f"{fold}-{index}",
