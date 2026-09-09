@@ -206,7 +206,7 @@ def test_runtime_certification_proves_replay_and_evidence_invariance(tmp_path, r
         "schema_contract",
         "database_evidence_integrity",
         "duplicate_event_replay_invariance",
-        "input_order_replay_invariance",
+        "durable_processing_order",
         "temporal_integrity",
     }
 
