@@ -55,7 +55,7 @@ def test_label_consensus_downweights_consistently_wrong_reviewer():
     assert all(item.status is ConsensusStatus.ACCEPTED for item in report.event_consensus)
 
 
-def test_adjudication_pool_is_append_only_and_consensus_replayable(tmp_path):
+def test_adjudication_pool_is_append_only_and_single_dispute_fails_closed(tmp_path):
     path = tmp_path / "labels.db"
     assert append_annotation(path, event_id="e1", reviewer_id="r1", label="ENTRY") is True
     assert append_annotation(path, event_id="e1", reviewer_id="r2", label="ENTRY") is True
@@ -71,7 +71,8 @@ def test_adjudication_pool_is_append_only_and_consensus_replayable(tmp_path):
         ),
     )
     assert report.events == 1
-    assert report.event_consensus[0].label == "ENTRY"
+    assert report.event_consensus[0].status is ConsensusStatus.REVIEW_REQUIRED
+    assert report.event_consensus[0].label is None
 
 
 def test_oof_label_noise_audit_surfaces_only_suspicious_resolved_truth():
