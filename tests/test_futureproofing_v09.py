@@ -1,7 +1,8 @@
 import asyncio
 import sqlite3
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, date, timedelta
+from decimal import Decimal
 
 import pytest
 
@@ -12,7 +13,7 @@ from scorpion.causal_features import (
     load_training_rows,
     verify_feature_store,
 )
-from scorpion.domain import EventKind
+from scorpion.domain import EventKind, SignalEvent
 from scorpion.failure_quarantine import (
     QuarantinedRawRevision,
     load_quarantined,
@@ -21,6 +22,7 @@ from scorpion.failure_quarantine import (
 from scorpion.fault_certification import certify_replay_faults
 from scorpion.pipeline import Pipeline
 from scorpion.processing_order import (
+    bind_event_processing_order,
     inspect_processing_order,
     load_signals_in_processing_order,
 )
@@ -58,21 +60,38 @@ def test_live_process_order_survives_out_of_order_source_timestamps(tmp_path, ra
     assert state_fingerprint(restarted.state) == state_fingerprint(pipeline.state)
 
 
-def test_fault_certification_reports_when_source_time_order_would_change_state(
-    tmp_path,
-    raw_factory,
-):
+def test_fault_certification_reports_when_source_time_order_would_change_state(tmp_path):
     store = Store(tmp_path / "order-sensitive.db")
-    pipeline = Pipeline(store, allowed_author_ids=frozenset({"author"}))
-    entry = raw_factory("AAPL 200C TODAY @ 1.00", message_id="entry")
-    stop = raw_factory("STOP", message_id="stop", minute=1)
-    stop = replace(
-        stop,
-        source_ts_utc=entry.source_ts_utc - timedelta(seconds=1),
-        received_ts_utc=entry.received_ts_utc + timedelta(seconds=1),
+    entry_ts = __import__("datetime").datetime(2026, 9, 8, 14, 0, tzinfo=UTC)
+    entry = SignalEvent(
+        event_id="entry-event",
+        message_id="entry-message",
+        kind=EventKind.ENTRY,
+        channel_id="968352649437126676",
+        author_id="author",
+        source_ts_utc=entry_ts,
+        received_ts_utc=entry_ts,
+        ticker="AAPL",
+        option_side="CALL",
+        strike=Decimal("200"),
+        expiry=date(2026, 9, 8),
+        referenced_price=Decimal("1.00"),
     )
-    asyncio.run(pipeline.handle(entry))
-    asyncio.run(pipeline.handle(stop))
+    stop = SignalEvent(
+        event_id="stop-event",
+        message_id="stop-message",
+        kind=EventKind.STOP,
+        channel_id="968352649437126676",
+        author_id="author",
+        source_ts_utc=entry_ts - timedelta(seconds=1),
+        received_ts_utc=entry_ts + timedelta(seconds=1),
+    )
+    assert store.append_signal(entry) is True
+    with store.connect() as db:
+        bind_event_processing_order(db, entry.event_id)
+    assert store.append_signal(stop) is True
+    with store.connect() as db:
+        bind_event_processing_order(db, stop.event_id)
 
     report = certify_replay_faults(store.path)
     assert report.passed is True
