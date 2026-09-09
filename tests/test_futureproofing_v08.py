@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from scorpion.active_learning import ReviewCandidate
+from scorpion.calibration import CalibrationStatus
 from scorpion.confidence_sequence import (
     OnlineBernoulliMonitor,
     anytime_bernoulli_confidence_sequence,
@@ -13,9 +14,16 @@ from scorpion.discord_snowflake import (
     assess_snowflake_timestamp,
     decode_snowflake_timestamp,
 )
+from scorpion.domain import EventKind
+from scorpion.inference_router import (
+    InferenceContext,
+    InferenceDepth,
+    allocate_inference_budget,
+    route_inference,
+)
 from scorpion.pipeline import Pipeline
-from scorpion.policy_bundle import RuntimePolicyBundle
 from scorpion.quote_consensus import ConsensusQuoteCache, QuoteConsensusStatus
+from scorpion.resilience import OperationalMode
 from scorpion.review_allocator import ReviewWorkItem, allocate_review_budget
 from scorpion.runtime import _queue_capacity
 from scorpion.state_checkpoint import (
@@ -41,6 +49,31 @@ def _review_candidate(event_id: str, confidence: float) -> ReviewCandidate:
         association_confidence=0.95,
         novelty_score=0.50,
         ensemble_entropy=0.20,
+    )
+
+
+def _inference_context(
+    event_id: str,
+    *,
+    kind: EventKind = EventKind.ENTRY,
+    parser_confidence: float = 0.99,
+    association_confidence: float = 0.99,
+    novelty_score: float = 0.05,
+    ensemble_entropy: float = 0.02,
+    calibration_status: CalibrationStatus = CalibrationStatus.TRUSTED,
+    mode: OperationalMode = OperationalMode.NORMAL,
+    parser_conflict: bool = False,
+) -> InferenceContext:
+    return InferenceContext(
+        event_id=event_id,
+        event_kind=kind,
+        parser_confidence=parser_confidence,
+        association_confidence=association_confidence,
+        novelty_score=novelty_score,
+        ensemble_entropy=ensemble_entropy,
+        calibration_status=calibration_status,
+        operational_mode=mode,
+        parser_conflict=parser_conflict,
     )
 
 
@@ -112,6 +145,62 @@ def test_review_allocator_spends_budget_on_marginal_information_not_duplicates()
     assert "a" in selected
     assert "c" in selected
     assert "b" in allocation.deferred_event_ids
+
+
+def test_inference_router_keeps_obvious_calibrated_cases_off_expensive_models():
+    route = route_inference(_inference_context("easy"))
+    assert route.depth is InferenceDepth.NONE
+    assert route.cost_units == 0
+    assert "deterministic_evidence_sufficient" in route.reasons
+
+
+def test_inference_router_escalates_novel_ambiguous_conflicting_cases():
+    route = route_inference(
+        _inference_context(
+            "hard",
+            kind=EventKind.AMBIGUOUS,
+            parser_confidence=0.40,
+            association_confidence=0.50,
+            novelty_score=0.90,
+            ensemble_entropy=0.60,
+            calibration_status=CalibrationStatus.DEGRADED,
+            mode=OperationalMode.DEGRADED,
+            parser_conflict=True,
+        )
+    )
+    assert route.depth is InferenceDepth.DEEP
+    assert route.cost_units == 5
+    assert "parser_conflict" in route.reasons
+
+
+def test_inference_budget_spends_compute_on_highest_information_value():
+    contexts = (
+        _inference_context("easy"),
+        _inference_context(
+            "critical",
+            kind=EventKind.AMBIGUOUS,
+            parser_confidence=0.20,
+            association_confidence=0.40,
+            novelty_score=0.95,
+            ensemble_entropy=0.80,
+            calibration_status=CalibrationStatus.UNCALIBRATED,
+            parser_conflict=True,
+        ),
+        _inference_context(
+            "medium",
+            parser_confidence=0.75,
+            association_confidence=0.80,
+            novelty_score=0.45,
+            ensemble_entropy=0.20,
+            calibration_status=CalibrationStatus.PROVISIONAL,
+        ),
+    )
+    allocation = allocate_inference_budget(contexts, budget_units=5)
+    selected = {route.event_id for route in allocation.selected}
+    assert "critical" in selected
+    assert "easy" in selected
+    assert allocation.used_units == 5
+    assert any(route.event_id == "medium" for route in allocation.deferred)
 
 
 def test_verified_checkpoint_restores_only_tail_events(tmp_path, raw_factory):
