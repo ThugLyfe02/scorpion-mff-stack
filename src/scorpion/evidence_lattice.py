@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from .backtest_overfit import OverfitReport
+from .backtest_overfit import BacktestOverfitReport
 from .distribution_robust import DistributionRobustReport
 from .feed_integrity import FeedIntegrityReport
 from .liquidity_capacity import LiquidityCapacityReport
@@ -29,7 +29,7 @@ class ResearchEvidence:
     walk_forward_ok: bool
     regime_stability: RegimeStabilityReport | None = None
     distribution_robustness: DistributionRobustReport | None = None
-    backtest_overfit: OverfitReport | None = None
+    backtest_overfit: BacktestOverfitReport | None = None
     liquidity_capacity: LiquidityCapacityReport | None = None
     feed_integrity: FeedIntegrityReport | None = None
 
@@ -105,9 +105,9 @@ def evaluate_research_authority(evidence: ResearchEvidence) -> ResearchAuthority
     if evidence.liquidity_capacity is None:
         sizing_failures.append("liquidity_capacity_not_supplied")
     elif not evidence.liquidity_capacity.robust:
-        sizing_failures.append("liquidity_capacity_failed")
-        sizing_failures.extend(
-            f"capacity:{item}" for item in evidence.liquidity_capacity.failures
+        sizing_failures.append(
+            "liquidity_capacity_failed:"
+            f"max_robust_clip_multiplier={evidence.liquidity_capacity.max_robust_clip_multiplier:.3f}"
         )
 
     if sizing_failures:
