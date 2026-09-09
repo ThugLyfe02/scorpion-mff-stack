@@ -85,10 +85,6 @@ class _Config:
     false_action_rate: float
     wrong_action_rate: float
 
-    @property
-    def safety_eligible(self) -> bool:
-        return True
-
 
 def _configs(observations: Sequence[HyperparameterObservation]) -> tuple[_Config, ...]:
     grouped: dict[str, list[HyperparameterObservation]] = defaultdict(list)
@@ -149,11 +145,19 @@ def _distance_and_axis(
 
 def _top_half_fold_ratio(selected: _Config, eligible: Sequence[_Config]) -> float:
     selected_folds = dict(selected.folds)
-    common = sorted(
-        set(selected_folds).intersection(
-            *(set(dict(item.folds)) for item in eligible if item.config_id != selected.config_id)
+    common = (
+        sorted(
+            set(selected_folds).intersection(
+                *(
+                    set(dict(item.folds))
+                    for item in eligible
+                    if item.config_id != selected.config_id
+                )
+            )
         )
-    ) if len(eligible) > 1 else sorted(selected_folds)
+        if len(eligible) > 1
+        else sorted(selected_folds)
+    )
     if not common:
         return 0.0
     hits = 0
@@ -166,7 +170,11 @@ def _top_half_fold_ratio(selected: _Config, eligible: Sequence[_Config]) -> floa
             ),
             reverse=True,
         )
-        selected_rank = next(index for index, (_, name) in enumerate(ranked) if name == selected.config_id)
+        selected_rank = next(
+            index
+            for index, (_, name) in enumerate(ranked)
+            if name == selected.config_id
+        )
         hits += int(selected_rank < max(1, (len(ranked) + 1) // 2))
     return hits / len(common)
 
@@ -225,7 +233,11 @@ def evaluate_parameter_surface(
         )
     rewards = [item.mean_reward for item in neighbors]
     reward_mean = abs(statistics.fmean(rewards)) if rewards else 0.0
-    reward_cv = statistics.pstdev(rewards) / reward_mean if len(rewards) > 1 and reward_mean > 0 else 0.0
+    reward_cv = (
+        statistics.pstdev(rewards) / reward_mean
+        if len(rewards) > 1 and reward_mean > 0
+        else 0.0
+    )
     if reward_cv > policy.maximum_neighbor_reward_cv:
         failures.append(
             f"neighbor_reward_cv_above_threshold:{reward_cv:.6f}>"
