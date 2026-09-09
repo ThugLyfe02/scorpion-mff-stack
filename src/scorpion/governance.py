@@ -28,6 +28,8 @@ class PromotionEvidence:
     canary: CanaryReport | None = None
     execution_uncertainty: ExecutionUncertaintyEnvelope | None = None
     runtime_certified: bool | None = None
+    anytime_accuracy_lower_bound: float | None = None
+    required_anytime_accuracy_lower_bound: float = 0.95
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +46,13 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
     research, validation, canary observation, runtime certification, and deployment authority
     separated even as the system becomes more automated.
     """
+    if not 0.0 <= evidence.required_anytime_accuracy_lower_bound <= 1.0:
+        raise ValueError("required_anytime_accuracy_lower_bound must be between 0 and 1")
+    if evidence.anytime_accuracy_lower_bound is not None and not (
+        0.0 <= evidence.anytime_accuracy_lower_bound <= 1.0
+    ):
+        raise ValueError("anytime_accuracy_lower_bound must be between 0 and 1")
+
     failures: list[str] = []
     if not evidence.candidate.qualified:
         failures.append("candidate_tournament_not_qualified")
@@ -77,6 +86,12 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         )
     if evidence.runtime_certified is False:
         failures.append("runtime_certification_failed")
+    if (
+        evidence.anytime_accuracy_lower_bound is not None
+        and evidence.anytime_accuracy_lower_bound
+        < evidence.required_anytime_accuracy_lower_bound
+    ):
+        failures.append("anytime_accuracy_confidence_sequence_below_requirement")
 
     if failures:
         return PromotionDecision(
