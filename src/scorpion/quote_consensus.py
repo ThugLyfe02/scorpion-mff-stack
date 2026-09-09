@@ -123,7 +123,7 @@ class ConsensusQuoteCache:
                 f"need {self.minimum_providers} fresh providers; found {len(fresh)}",
             )
 
-        mids = [float((quote.bid + quote.ask) / Decimal("2")) for _, quote in fresh]
+        mids = [(quote.bid + quote.ask) / Decimal("2") for _, quote in fresh]
         median_mid = statistics.median(mids)
         if median_mid <= 0:
             return QuoteConsensus(
@@ -134,7 +134,8 @@ class ConsensusQuoteCache:
                 1.0,
                 "non-positive consensus midpoint",
             )
-        dispersion = max(abs(mid - median_mid) / median_mid for mid in mids)
+        dispersion_decimal = max(abs(mid - median_mid) / median_mid for mid in mids)
+        dispersion = float(dispersion_decimal)
         if dispersion > self.maximum_midpoint_dispersion:
             return QuoteConsensus(
                 QuoteConsensusStatus.PROVIDER_DISAGREEMENT,
@@ -145,8 +146,8 @@ class ConsensusQuoteCache:
                 "fresh provider midpoints exceed configured disagreement tolerance",
             )
 
-        bid = Decimal(str(statistics.median(float(quote.bid) for _, quote in fresh)))
-        ask = Decimal(str(statistics.median(float(quote.ask) for _, quote in fresh)))
+        bid = statistics.median([quote.bid for _, quote in fresh])
+        ask = statistics.median([quote.ask for _, quote in fresh])
         if ask < bid:
             return QuoteConsensus(
                 QuoteConsensusStatus.CROSSED_CONSENSUS,
