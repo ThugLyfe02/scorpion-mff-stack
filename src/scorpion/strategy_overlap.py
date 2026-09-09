@@ -9,11 +9,13 @@ from .execution_forensics import CompletedTrade
 class StrategyOverlapPolicy:
     minimum_jaccard_for_equivalence: float = 0.75
     minimum_containment_for_equivalence: float = 0.90
+    minimum_size_ratio_for_containment_equivalence: float = 0.75
 
     def __post_init__(self) -> None:
         for value in (
             self.minimum_jaccard_for_equivalence,
             self.minimum_containment_for_equivalence,
+            self.minimum_size_ratio_for_containment_equivalence,
         ):
             if not 0.0 <= value <= 1.0:
                 raise ValueError("overlap thresholds must be in [0,1]")
@@ -28,6 +30,7 @@ class StrategyOverlapPair:
     shared_trades: int
     jaccard: float
     containment: float
+    size_ratio: float
     equivalent: bool
 
 
@@ -66,11 +69,17 @@ def _pair(
     shared = len(left_ids & right_ids)
     union = len(left_ids | right_ids)
     smaller = min(len(left_ids), len(right_ids))
+    larger = max(len(left_ids), len(right_ids))
     jaccard = shared / union if union else 1.0
     containment = shared / smaller if smaller else 0.0
+    size_ratio = smaller / larger if larger else 1.0
+    containment_equivalent = (
+        containment >= policy.minimum_containment_for_equivalence
+        and size_ratio >= policy.minimum_size_ratio_for_containment_equivalence
+    )
     equivalent = (
         jaccard >= policy.minimum_jaccard_for_equivalence
-        or containment >= policy.minimum_containment_for_equivalence
+        or containment_equivalent
     )
     return StrategyOverlapPair(
         left=left,
@@ -80,6 +89,7 @@ def _pair(
         shared_trades=shared,
         jaccard=jaccard,
         containment=containment,
+        size_ratio=size_ratio,
         equivalent=equivalent,
     )
 
@@ -115,11 +125,11 @@ def _representative(
     members: tuple[str, ...],
     segments: dict[str, tuple[CompletedTrade, ...]],
 ) -> str:
-    """Prefer the most specific strategy with enough evidence, deterministically.
+    """Prefer the most specific near-duplicate strategy deterministically.
 
-    Smaller trade sets are preferred inside an equivalence cluster because parent aggregates such
-    as ``all`` can contain a more specific channel/ticker hypothesis. Ties are lexical for stable
-    manifests.
+    Equivalence already requires strong trade-set overlap and comparable set sizes. Inside such a
+    cluster, the smaller set is the more specific formulation and avoids selecting umbrella
+    aliases such as ``all`` when a nearly identical channel/ticker hypothesis exists.
     """
 
     return min(members, key=lambda name: (len(segments[name]), name))
@@ -169,8 +179,5 @@ def deduplicate_strategy_universe(
 ) -> tuple[dict[str, tuple[CompletedTrade, ...]], StrategyOverlapReport]:
     report = analyze_strategy_overlap(segments, policy=policy)
     representatives = {cluster.representative for cluster in report.clusters}
-    universe = {
-        name: segments[name]
-        for name in sorted(representatives)
-    }
+    universe = {name: segments[name] for name in sorted(representatives)}
     return universe, report
