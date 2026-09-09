@@ -15,6 +15,7 @@ from .regime_mixture import RegimeMixtureReport
 from .safe_policy_improvement import SafePolicyImprovementReport
 from .selective import SelectivePolicy
 from .sequential_evidence import ExecutionEvidenceMonitorSnapshot, SequentialEvidenceStatus
+from .shift_weighted_conformal import ShiftWeightedConformalEvaluation
 from .temporal_crossfit import TemporalCrossFitReport
 from .tournament import CandidateScore
 from .uncertainty_decomposition import UncertaintyHealthReport
@@ -44,6 +45,7 @@ class PromotionEvidence:
     required_anytime_accuracy_lower_bound: float = 0.95
     conformal: ConformalEvaluation | None = None
     mondrian_conformal: MondrianEvaluation | None = None
+    shift_weighted_conformal: ShiftWeightedConformalEvaluation | None = None
     sequential_evidence: ExecutionEvidenceMonitorSnapshot | None = None
     temporal_crossfit: TemporalCrossFitReport | None = None
     stacking: CrossFittedStackingReport | None = None
@@ -126,6 +128,15 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         failures.append("class_conditional_conformal_not_qualified")
         failures.extend(
             f"mondrian_conformal:{item}" for item in evidence.mondrian_conformal.failures
+        )
+    if (
+        evidence.shift_weighted_conformal is not None
+        and not evidence.shift_weighted_conformal.qualified
+    ):
+        failures.append("shift_weighted_conformal_not_qualified")
+        failures.extend(
+            f"shift_conformal:{item}"
+            for item in evidence.shift_weighted_conformal.failures
         )
     if (
         evidence.sequential_evidence is not None
