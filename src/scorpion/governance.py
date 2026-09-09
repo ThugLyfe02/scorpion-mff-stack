@@ -8,6 +8,7 @@ from .canary import CanaryReport, CanaryStatus
 from .conformal import ConformalEvaluation
 from .feature_stability import FeatureStabilityReport
 from .label_consensus import LabelConsensusReport
+from .label_noise_audit import LabelNoiseReport
 from .mondrian_conformal import MondrianEvaluation
 from .oof_stacking import CrossFittedStackingReport
 from .regime_mixture import RegimeMixtureReport
@@ -51,6 +52,7 @@ class PromotionEvidence:
     regime_mixture: RegimeMixtureReport | None = None
     label_consensus: LabelConsensusReport | None = None
     minimum_label_consensus_rate: float = 0.90
+    label_noise: LabelNoiseReport | None = None
     uncertainty_health: UncertaintyHealthReport | None = None
     safe_policy_improvement: SafePolicyImprovementReport | None = None
 
@@ -161,6 +163,9 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
                 "label_consensus_rate_below_requirement:"
                 f"{acceptance_rate:.6f}<{evidence.minimum_label_consensus_rate:.6f}"
             )
+    if evidence.label_noise is not None and not evidence.label_noise.qualified:
+        failures.append("out_of_fold_label_noise_not_qualified")
+        failures.extend(f"label_noise:{item}" for item in evidence.label_noise.failures)
     if evidence.uncertainty_health is not None and not evidence.uncertainty_health.qualified:
         failures.append("ensemble_uncertainty_health_not_qualified")
         failures.extend(
