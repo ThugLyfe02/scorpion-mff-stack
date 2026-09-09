@@ -7,6 +7,7 @@ from .canary import CanaryReport, CanaryStatus
 from .conformal import ConformalEvaluation
 from .mondrian_conformal import MondrianEvaluation
 from .selective import SelectivePolicy
+from .sequential_evidence import ExecutionEvidenceMonitorSnapshot, SequentialEvidenceStatus
 from .tournament import CandidateScore
 from .uncertainty_envelope import ExecutionUncertaintyEnvelope
 from .walk_forward import WalkForwardReport
@@ -34,6 +35,7 @@ class PromotionEvidence:
     required_anytime_accuracy_lower_bound: float = 0.95
     conformal: ConformalEvaluation | None = None
     mondrian_conformal: MondrianEvaluation | None = None
+    sequential_evidence: ExecutionEvidenceMonitorSnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +106,11 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         failures.extend(
             f"mondrian_conformal:{item}" for item in evidence.mondrian_conformal.failures
         )
+    if (
+        evidence.sequential_evidence is not None
+        and evidence.sequential_evidence.status is SequentialEvidenceStatus.ALARM
+    ):
+        failures.append("anytime_valid_sequential_degradation_alarm")
 
     if failures:
         return PromotionDecision(
