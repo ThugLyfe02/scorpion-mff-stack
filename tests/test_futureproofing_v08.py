@@ -230,7 +230,7 @@ def test_checkpoint_policy_mismatch_falls_back_to_full_replay(tmp_path, raw_fact
     changed = replace(pipeline.runtime_policy, policy_version="runtime-policy-v2")
     restored = restore_state(store.path, store.load_signals(), runtime_policy=changed)
     assert restored.used_checkpoint is False
-    assert restored.reason == "full_replay"
+    assert restored.reason == "full_replay_durable_process_order"
 
 
 def test_corrupt_checkpoint_is_rejected_and_full_replay_remains_available(tmp_path, raw_factory):
