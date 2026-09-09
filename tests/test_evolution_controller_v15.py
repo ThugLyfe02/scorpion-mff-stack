@@ -31,7 +31,11 @@ def _features(names: tuple[str, ...] = ("spread", "quote_age")) -> FeatureStabil
     )
 
 
-def _ensemble(*, drift: bool = False, weights: tuple[float, float] = (0.6, 0.4)) -> AdaptiveEnsembleSnapshot:
+def _ensemble(
+    *,
+    drift: bool = False,
+    weights: tuple[float, float] = (0.6, 0.4),
+) -> AdaptiveEnsembleSnapshot:
     return AdaptiveEnsembleSnapshot(
         updates=500,
         drift_active=drift,
