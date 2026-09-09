@@ -22,6 +22,7 @@ from .selection_adjusted import (
 )
 from .sizing_lab import rank_segments, segment_completed_trades
 from .strategy_selector import SelectionStatus, select_candidates
+from .stress_cluster_risk import StressClusterRiskReport, evaluate_stress_cluster_risk
 from .tail_dependence import TailDependenceReport, evaluate_tail_dependence
 
 
@@ -31,6 +32,7 @@ class QuantAuditReport:
     selected_segments: tuple[str, ...]
     portfolio: PortfolioClusterReport
     tail_dependence: TailDependenceReport
+    stress_clusters: StressClusterRiskReport
     ticker_hierarchy: HierarchicalReport
     channel_hierarchy: HierarchicalReport
     selection_adjusted: tuple[SelectionAdjustedPerformance, ...]
@@ -55,6 +57,7 @@ def run_quant_audit(trades: tuple[CompletedTrade, ...]) -> QuantAuditReport:
     )
     portfolio = evaluate_portfolio_clusters(trades)
     tail_dependence = evaluate_tail_dependence(trades)
+    stress_clusters = evaluate_stress_cluster_risk(trades, tail_dependence)
     ticker_hierarchy = evaluate_hierarchical_shrinkage(ticker_groups(trades))
     channel_hierarchy = evaluate_hierarchical_shrinkage(channel_groups(trades))
     selection_adjusted = evaluate_selected_segments(
@@ -70,6 +73,8 @@ def run_quant_audit(trades: tuple[CompletedTrade, ...]) -> QuantAuditReport:
     failures: list[str] = []
     if not portfolio.passed:
         failures.extend(f"portfolio:{item}" for item in portfolio.failures)
+    if not stress_clusters.passed:
+        failures.extend(f"stress_cluster:{item}" for item in stress_clusters.failures)
     failures.extend(
         f"selection_adjusted:{item.segment}:{failure}"
         for item in selection_adjusted
@@ -81,6 +86,7 @@ def run_quant_audit(trades: tuple[CompletedTrade, ...]) -> QuantAuditReport:
         selected_segments=selected,
         portfolio=portfolio,
         tail_dependence=tail_dependence,
+        stress_clusters=stress_clusters,
         ticker_hierarchy=ticker_hierarchy,
         channel_hierarchy=channel_hierarchy,
         selection_adjusted=selection_adjusted,
@@ -129,8 +135,9 @@ def _trade_from_row(row: dict[str, object]) -> CompletedTrade:
 def quant_audit_main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Run portfolio clustering, latent lower-tail dependence, hierarchical shrinkage, "
-            "and selection-adjusted diagnostics on certified CompletedTrade JSONL. Research-only."
+            "Run portfolio clustering, latent lower-tail/stress-cluster risk, hierarchical "
+            "shrinkage, and selection-adjusted diagnostics on certified CompletedTrade JSONL. "
+            "Research-only."
         )
     )
     parser.add_argument("trades", type=Path)
