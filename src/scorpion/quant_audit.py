@@ -85,6 +85,22 @@ def run_quant_audit(trades: tuple[CompletedTrade, ...]) -> QuantAuditReport:
     )
 
 
+def _int_value(value: object, field: str) -> int:
+    if isinstance(value, bool):
+        raise TypeError(f"{field} must be an integer, not bool")
+    if isinstance(value, (int, float, str)):
+        return int(value)
+    raise TypeError(f"{field} must be int-compatible")
+
+
+def _float_value(value: object, field: str) -> float:
+    if isinstance(value, bool):
+        raise TypeError(f"{field} must be numeric, not bool")
+    if isinstance(value, (int, float, str)):
+        return float(value)
+    raise TypeError(f"{field} must be float-compatible")
+
+
 def _trade_from_row(row: dict[str, object]) -> CompletedTrade:
     return CompletedTrade(
         entry_event_id=str(row["entry_event_id"]),
@@ -94,14 +110,14 @@ def _trade_from_row(row: dict[str, object]) -> CompletedTrade:
         bucket=StrategyBucket(str(row["bucket"])),
         opened_ts_utc=datetime.fromisoformat(str(row["opened_ts_utc"])),
         closed_ts_utc=datetime.fromisoformat(str(row["closed_ts_utc"])),
-        initial_quantity=int(row["initial_quantity"]),
-        add_count=int(row["add_count"]),
-        trim_count=int(row["trim_count"]),
+        initial_quantity=_int_value(row["initial_quantity"], "initial_quantity"),
+        add_count=_int_value(row["add_count"], "add_count"),
+        trim_count=_int_value(row["trim_count"], "trim_count"),
         gross_premium_in=Decimal(str(row["gross_premium_in"])),
         gross_proceeds=Decimal(str(row["gross_proceeds"])),
         pnl=Decimal(str(row["pnl"])),
         return_fraction=Decimal(str(row["return_fraction"])),
-        holding_seconds=float(row["holding_seconds"]),
+        holding_seconds=_float_value(row["holding_seconds"], "holding_seconds"),
         depth_evidence_complete=bool(row.get("depth_evidence_complete", False)),
     )
 
