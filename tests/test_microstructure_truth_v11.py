@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from scorpion.contract_terms import ContractTerms, ContractTermsRegistry
 from scorpion.domain import EventKind
+from scorpion.eligibility import StrategyBucket
 from scorpion.execution_attribution import build_execution_attribution_report
 from scorpion.execution_trust import FillModelTrust, assess_fill_model_trust
 from scorpion.fill_calibration import FillCalibrationReport
@@ -160,7 +161,7 @@ def test_execution_attribution_separates_latency_spread_and_post_fill_markout():
         message_id="message-1",
         event_kind=EventKind.ENTRY,
         contract_key=key,
-        bucket="SINGLE_NAME",  # type: ignore[arg-type]
+        bucket=StrategyBucket.CORE_SINGLE_NAME,
         status=MicroForensicStatus.CERTIFIED_FILL,
         source_ts_utc=base,
         decision_ts_utc=base + timedelta(milliseconds=250),
