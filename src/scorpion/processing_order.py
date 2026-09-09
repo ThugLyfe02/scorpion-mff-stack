@@ -10,24 +10,6 @@ from pathlib import Path
 
 from .domain import EventKind, RawDiscordMessage, SignalEvent
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS raw_receipt_order (
-    receipt_seq INTEGER PRIMARY KEY AUTOINCREMENT,
-    raw_event_id TEXT NOT NULL UNIQUE,
-    FOREIGN KEY(raw_event_id) REFERENCES raw_discord_events(raw_event_id)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_receipt_order_event
-ON raw_receipt_order(raw_event_id);
-
-CREATE TABLE IF NOT EXISTS event_processing_order (
-    process_seq INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_id TEXT NOT NULL UNIQUE,
-    FOREIGN KEY(event_id) REFERENCES signal_events(event_id)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_event_processing_order_event
-ON event_processing_order(event_id);
-"""
-
 
 @dataclass(frozen=True, slots=True)
 class ProcessingOrderReport:
@@ -54,15 +36,38 @@ class ProcessingOrderReport:
         )
 
 
-def ensure_processing_order_schema(db: sqlite3.Connection) -> None:
-    """Create/migrate durable arrival and live-state mutation orders.
+def _ensure_tables_only(db: sqlite3.Connection) -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS raw_receipt_order (
+            receipt_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            raw_event_id TEXT NOT NULL UNIQUE,
+            FOREIGN KEY(raw_event_id) REFERENCES raw_discord_events(raw_event_id)
+        )
+        """
+    )
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_receipt_order_event "
+        "ON raw_receipt_order(raw_event_id)"
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS event_processing_order (
+            process_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL UNIQUE,
+            FOREIGN KEY(event_id) REFERENCES signal_events(event_id)
+        )
+        """
+    )
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_event_processing_order_event "
+        "ON event_processing_order(event_id)"
+    )
 
-    Existing records predate these tables. Missing raw rows are backfilled by persisted receive
-    time; missing normalized rows are backfilled by the previous canonical replay order. New raw
-    arrivals and normalized commits should call the bind helpers so order becomes explicit rather
-    than inferred from clocks.
-    """
-    db.executescript(_SCHEMA)
+
+def ensure_processing_order_schema(db: sqlite3.Connection) -> None:
+    """Create/migrate durable arrival and live-state mutation orders."""
+    _ensure_tables_only(db)
     missing_raw = db.execute(
         """
         SELECT r.raw_event_id
@@ -97,6 +102,7 @@ def ensure_processing_order_schema(db: sqlite3.Connection) -> None:
 def bind_raw_receipt_order(db: sqlite3.Connection, raw_event_id: str) -> int:
     if not raw_event_id.strip():
         raise ValueError("raw_event_id is required")
+    _ensure_tables_only(db)
     db.execute(
         "INSERT OR IGNORE INTO raw_receipt_order(raw_event_id) VALUES (?)",
         (raw_event_id,),
@@ -113,6 +119,7 @@ def bind_raw_receipt_order(db: sqlite3.Connection, raw_event_id: str) -> int:
 def bind_event_processing_order(db: sqlite3.Connection, event_id: str) -> int:
     if not event_id.strip():
         raise ValueError("event_id is required")
+    _ensure_tables_only(db)
     db.execute(
         "INSERT OR IGNORE INTO event_processing_order(event_id) VALUES (?)",
         (event_id,),
@@ -129,7 +136,7 @@ def bind_event_processing_order(db: sqlite3.Connection, event_id: str) -> int:
 def register_raw_receipt(path: str | Path, raw_event_id: str) -> int:
     with sqlite3.connect(str(path), timeout=5.0, isolation_level=None) as db:
         db.execute("PRAGMA foreign_keys=ON")
-        ensure_processing_order_schema(db)
+        _ensure_tables_only(db)
         db.execute("BEGIN IMMEDIATE")
         try:
             sequence = bind_raw_receipt_order(db, raw_event_id)
