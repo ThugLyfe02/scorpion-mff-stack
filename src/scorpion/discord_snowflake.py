@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 _DISCORD_EPOCH_MS = 1420070400000
+_TIMESTAMP_SHIFT = 22
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,15 +18,17 @@ class SnowflakeAssessment:
 def decode_snowflake_timestamp(message_id: str) -> datetime | None:
     """Decode Discord's timestamp-bearing snowflake ID without a network call.
 
-    Synthetic/non-numeric IDs are common in tests and historical fixtures; they simply return
-    None rather than becoming temporal failures.
+    Synthetic/non-numeric IDs are common in tests and historical fixtures. Numeric fixtures such
+    as ``1`` also exist; they contain no nonzero Discord timestamp field and are intentionally
+    treated as unavailable rather than as messages created exactly at Discord's epoch.
     """
     if not message_id.isdigit():
         return None
     value = int(message_id)
-    if value <= 0:
+    timestamp_component = value >> _TIMESTAMP_SHIFT
+    if timestamp_component <= 0:
         return None
-    timestamp_ms = (value >> 22) + _DISCORD_EPOCH_MS
+    timestamp_ms = timestamp_component + _DISCORD_EPOCH_MS
     try:
         return datetime.fromtimestamp(timestamp_ms / 1000.0, tz=UTC)
     except (OverflowError, OSError, ValueError):
