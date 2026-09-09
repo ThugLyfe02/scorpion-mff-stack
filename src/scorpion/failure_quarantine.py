@@ -12,6 +12,16 @@ class FailureDisposition(StrEnum):
     QUARANTINED = "QUARANTINED"
 
 
+class QuarantinedRawRevision(RuntimeError):
+    def __init__(self, raw_event_id: str, attempt_count: int, error: str) -> None:
+        self.raw_event_id = raw_event_id
+        self.attempt_count = attempt_count
+        self.original_error = error
+        super().__init__(
+            f"raw revision {raw_event_id} quarantined after {attempt_count} failed attempts"
+        )
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS raw_failure_state (
     raw_event_id TEXT PRIMARY KEY,
