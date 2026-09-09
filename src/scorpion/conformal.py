@@ -83,7 +83,8 @@ def _validate_probabilities(
 ) -> None:
     missing = [label for label in labels if label not in probabilities]
     if missing:
-        raise ValueError("probability row is missing labels: " + ",".join(item.value for item in missing))
+        missing_labels = ",".join(item.value for item in missing)
+        raise ValueError("probability row is missing labels: " + missing_labels)
     values = [probabilities[label] for label in labels]
     if any(value < 0 or value > 1 for value in values):
         raise ValueError("probabilities must be in [0,1]")
