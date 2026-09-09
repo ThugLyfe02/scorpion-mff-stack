@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_CONTRACT_VERSION = "2026.09.v3"
+SCHEMA_CONTRACT_VERSION = "2026.09.v4"
 
 _REQUIRED: dict[str, frozenset[str]] = {
     "raw_discord_events": frozenset(
@@ -86,6 +86,30 @@ _OPTIONAL_ADVANCED: dict[str, frozenset[str]] = {
     ),
     "raw_failure_events": frozenset(
         {"failure_id", "raw_event_id", "attempt_number", "error", "occurred_ts_utc"}
+    ),
+    "adaptive_ensemble_state": frozenset(
+        {
+            "ensemble_id",
+            "model_id",
+            "log_weight",
+            "cumulative_loss",
+            "updates",
+            "updated_ts_utc",
+        }
+    ),
+    "evolution_candidates": frozenset(
+        {
+            "candidate_id",
+            "parent_release_id",
+            "trigger",
+            "code_revision",
+            "policy_fingerprint",
+            "dataset_fingerprint",
+            "feature_set_version",
+            "candidate_sha256",
+            "status",
+            "created_ts_utc",
+        }
     ),
 }
 
