@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scorpion-mff"
-version = "0.9.0"
-description = "Deterministic MFF control plane with durable live processing order, point-in-time causal features, poison-event quarantine, verified recovery, adaptive intelligence routing, and replay fault certification."
+version = "0.10.0"
+description = "Deterministic MFF control plane with nanosecond options microstructure replay, causal decision pricing, conservative fill certification, durable live processing order, point-in-time causal features, poison-event quarantine, and verified recovery."
 requires-python = ">=3.13"
 dependencies = [
   "discord.py>=2.4,<3",
@@ -41,6 +41,8 @@ scorpion-uncertainty = "scorpion.uncertainty_cli:uncertainty_main"
 scorpion-reconcile = "scorpion.cli:reconcile_main"
 scorpion-history-sync = "scorpion.history_sync:history_sync_main"
 scorpion-forensics = "scorpion.forensics_cli:forensics_main"
+scorpion-micro-forensics = "scorpion.microstructure_cli:microstructure_forensics_main"
+scorpion-opra-normalize = "scorpion.opra_bridge:opra_normalize_main"
 scorpion-ingest = "scorpion.runtime:ingest_main"
 
 [tool.hatch.build.targets.wheel]
