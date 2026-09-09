@@ -44,6 +44,10 @@ class ProcessingFailure:
     error: str
 
 
+def _ensure_schema(db: sqlite3.Connection) -> None:
+    db.executescript(_SCHEMA)
+
+
 def record_processing_failure(
     path: str | Path,
     raw_event_id: str,
@@ -57,9 +61,9 @@ def record_processing_failure(
     clean_error = error[:500]
     with sqlite3.connect(str(path), timeout=5.0, isolation_level=None) as db:
         db.execute("PRAGMA foreign_keys=ON")
+        _ensure_schema(db)
         db.execute("BEGIN IMMEDIATE")
         try:
-            db.executescript(_SCHEMA)
             row = db.execute(
                 "SELECT attempt_count FROM raw_failure_state WHERE raw_event_id=?",
                 (raw_event_id,),
@@ -91,7 +95,11 @@ def record_processing_failure(
                 """,
                 (raw_event_id, attempts, clean_error, now),
             )
-            raw_status = "QUARANTINED" if disposition is FailureDisposition.QUARANTINED else "PENDING"
+            raw_status = (
+                "QUARANTINED"
+                if disposition is FailureDisposition.QUARANTINED
+                else "PENDING"
+            )
             db.execute(
                 """
                 UPDATE raw_processing
@@ -118,9 +126,10 @@ def requeue_quarantined(
         raise ValueError("operator is required")
     now = datetime.now(UTC).isoformat()
     with sqlite3.connect(str(path), timeout=5.0, isolation_level=None) as db:
+        db.execute("PRAGMA foreign_keys=ON")
+        _ensure_schema(db)
         db.execute("BEGIN IMMEDIATE")
         try:
-            db.executescript(_SCHEMA)
             row = db.execute(
                 "SELECT state FROM raw_failure_state WHERE raw_event_id=?",
                 (raw_event_id,),
@@ -136,7 +145,11 @@ def requeue_quarantined(
                 (now, operator, note[:1000], raw_event_id),
             )
             db.execute(
-                "UPDATE raw_processing SET status='PENDING',updated_ts_utc=?,error='' WHERE raw_event_id=?",
+                """
+                UPDATE raw_processing
+                SET status='PENDING',updated_ts_utc=?,error=''
+                WHERE raw_event_id=?
+                """,
                 (now, raw_event_id),
             )
             db.execute("COMMIT")
@@ -147,7 +160,7 @@ def requeue_quarantined(
 
 def quarantined_count(path: str | Path) -> int:
     with sqlite3.connect(str(path)) as db:
-        db.executescript(_SCHEMA)
+        _ensure_schema(db)
         row = db.execute(
             "SELECT COUNT(*) FROM raw_failure_state WHERE state='QUARANTINED'"
         ).fetchone()
