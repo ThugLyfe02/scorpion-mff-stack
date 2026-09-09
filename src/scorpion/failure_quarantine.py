@@ -54,6 +54,19 @@ class ProcessingFailure:
     error: str
 
 
+@dataclass(frozen=True, slots=True)
+class QuarantinedItem:
+    raw_event_id: str
+    message_id: str
+    channel_id: str
+    author_id: str
+    attempt_count: int
+    last_error: str
+    updated_ts_utc: datetime
+    requeued_by: str
+    requeue_note: str
+
+
 def _ensure_schema(db: sqlite3.Connection) -> None:
     db.executescript(_SCHEMA)
 
@@ -166,6 +179,42 @@ def requeue_quarantined(
         except Exception:
             db.execute("ROLLBACK")
             raise
+
+
+def load_quarantined(path: str | Path, *, limit: int = 100) -> tuple[QuarantinedItem, ...]:
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    db = sqlite3.connect(str(path))
+    db.row_factory = sqlite3.Row
+    try:
+        _ensure_schema(db)
+        rows = db.execute(
+            """
+            SELECT q.*,r.message_id,r.channel_id,r.author_id
+            FROM raw_failure_state q
+            JOIN raw_discord_events r ON r.raw_event_id=q.raw_event_id
+            WHERE q.state='QUARANTINED'
+            ORDER BY q.updated_ts_utc DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    finally:
+        db.close()
+    return tuple(
+        QuarantinedItem(
+            raw_event_id=str(row["raw_event_id"]),
+            message_id=str(row["message_id"]),
+            channel_id=str(row["channel_id"]),
+            author_id=str(row["author_id"]),
+            attempt_count=int(row["attempt_count"]),
+            last_error=str(row["last_error"]),
+            updated_ts_utc=datetime.fromisoformat(str(row["updated_ts_utc"])).astimezone(UTC),
+            requeued_by=str(row["requeued_by"]),
+            requeue_note=str(row["requeue_note"]),
+        )
+        for row in rows
+    )
 
 
 def quarantined_count(path: str | Path) -> int:
