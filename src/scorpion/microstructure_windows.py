@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from .association import associate_followup_with_evidence
 from .domain import BookState, EventKind, RawDiscordMessage
 from .history_archive import ArchivedDiscordMessage
+from .microstructure import OptionMicrostructureTape, ns_from_datetime
 from .parser import parse_message_with_evidence
 from .policy_bundle import RuntimePolicyBundle
 from .reducer import reduce_book
@@ -20,12 +21,21 @@ class AcquisitionWindow:
     contract_key: str
     starts_ts_utc: datetime
     ends_ts_utc: datetime
+    warmup_starts_ts_utc: datetime
     event_ids: tuple[str, ...]
     message_ids: tuple[str, ...]
 
     @property
     def duration_seconds(self) -> float:
         return max(0.0, (self.ends_ts_utc - self.starts_ts_utc).total_seconds())
+
+    @property
+    def query_duration_seconds(self) -> float:
+        return max(0.0, (self.ends_ts_utc - self.warmup_starts_ts_utc).total_seconds())
+
+    @property
+    def warmup_seconds(self) -> float:
+        return max(0.0, (self.starts_ts_utc - self.warmup_starts_ts_utc).total_seconds())
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +45,17 @@ class AcquisitionPlan:
     associated_events: int
     unassociated_events: int
     total_window_seconds: float
+    total_query_seconds: float
     plan_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class AcquisitionCoverage:
+    windows: int
+    warmup_state_available: int
+    missing_warmup_contracts: tuple[str, ...]
+    coverage_rate: float
+    complete: bool
 
 
 def _to_raw(message: ArchivedDiscordMessage) -> RawDiscordMessage:
@@ -58,6 +78,7 @@ def _canonical_payload(windows: tuple[AcquisitionWindow, ...]) -> str:
             "contract_key": window.contract_key,
             "starts_ts_utc": window.starts_ts_utc.astimezone(UTC).isoformat(),
             "ends_ts_utc": window.ends_ts_utc.astimezone(UTC).isoformat(),
+            "warmup_starts_ts_utc": window.warmup_starts_ts_utc.astimezone(UTC).isoformat(),
             "event_ids": list(window.event_ids),
             "message_ids": list(window.message_ids),
         }
@@ -72,18 +93,21 @@ def build_acquisition_plan(
     allowed_author_ids: frozenset[str],
     pre_context: timedelta = timedelta(seconds=2),
     post_context: timedelta = timedelta(seconds=10),
+    quote_warmup: timedelta = timedelta(seconds=60),
     merge_gap: timedelta = timedelta(seconds=1),
     runtime_policy: RuntimePolicyBundle | None = None,
 ) -> AcquisitionPlan:
     """Derive contract-scoped microstructure windows before purchasing/querying market data.
 
-    Windows are driven by the same deterministic parser/association/reducer lineage as runtime.
-    This lets a data provider request be restricted to the seconds surrounding source actions,
-    while the resulting plan remains reproducible and cryptographically fingerprinted.
+    The analysis window remains tight around the Discord action. ``quote_warmup`` extends only
+    the provider-query boundary so a quote that became active before the analysis window can be
+    reconstructed. This prevents narrow-window data acquisition from preferentially keeping only
+    highly active contracts that happened to update immediately before an alert.
     """
     for name, value in (
         ("pre_context", pre_context),
         ("post_context", post_context),
+        ("quote_warmup", quote_warmup),
         ("merge_gap", merge_gap),
     ):
         if value < timedelta(0):
@@ -118,11 +142,13 @@ def build_acquisition_plan(
             continue
         associated += 1
         source = event.source_ts_utc.astimezone(UTC)
+        analysis_start = source - pre_context
         raw_windows.append(
             AcquisitionWindow(
                 contract_key=key,
-                starts_ts_utc=source - pre_context,
+                starts_ts_utc=analysis_start,
                 ends_ts_utc=source + post_context,
+                warmup_starts_ts_utc=analysis_start - quote_warmup,
                 event_ids=(event.event_id,),
                 message_ids=(event.message_id,),
             )
@@ -146,6 +172,10 @@ def build_acquisition_plan(
                 contract_key=previous.contract_key,
                 starts_ts_utc=min(previous.starts_ts_utc, window.starts_ts_utc),
                 ends_ts_utc=max(previous.ends_ts_utc, window.ends_ts_utc),
+                warmup_starts_ts_utc=min(
+                    previous.warmup_starts_ts_utc,
+                    window.warmup_starts_ts_utc,
+                ),
                 event_ids=previous.event_ids + window.event_ids,
                 message_ids=previous.message_ids + window.message_ids,
             )
@@ -160,7 +190,36 @@ def build_acquisition_plan(
         associated_events=associated,
         unassociated_events=unassociated,
         total_window_seconds=sum(item.duration_seconds for item in windows),
+        total_query_seconds=sum(item.query_duration_seconds for item in windows),
         plan_sha256=hashlib.sha256(material.encode("utf-8")).hexdigest(),
+    )
+
+
+def verify_acquisition_warmup(
+    plan: AcquisitionPlan,
+    tape: OptionMicrostructureTape,
+) -> AcquisitionCoverage:
+    missing: list[str] = []
+    available = 0
+    for window in plan.windows:
+        analysis_start_ns = ns_from_datetime(window.starts_ts_utc)
+        warmup_span = window.starts_ts_utc - window.warmup_starts_ts_utc
+        quote = tape.market_quote_at(
+            window.contract_key,
+            analysis_start_ns,
+            max_age=warmup_span,
+        )
+        if quote is None:
+            missing.append(window.contract_key)
+        else:
+            available += 1
+    total = len(plan.windows)
+    return AcquisitionCoverage(
+        windows=total,
+        warmup_state_available=available,
+        missing_warmup_contracts=tuple(sorted(set(missing))),
+        coverage_rate=available / total if total else 0.0,
+        complete=available == total and total > 0,
     )
 
 
@@ -170,12 +229,16 @@ def acquisition_plan_payload(plan: AcquisitionPlan) -> dict[str, object]:
         "associated_events": plan.associated_events,
         "unassociated_events": plan.unassociated_events,
         "total_window_seconds": plan.total_window_seconds,
+        "total_query_seconds": plan.total_query_seconds,
         "plan_sha256": plan.plan_sha256,
         "windows": [
             {
                 **asdict(window),
                 "starts_ts_utc": window.starts_ts_utc.isoformat(),
                 "ends_ts_utc": window.ends_ts_utc.isoformat(),
+                "warmup_starts_ts_utc": window.warmup_starts_ts_utc.isoformat(),
+                "warmup_seconds": window.warmup_seconds,
+                "query_duration_seconds": window.query_duration_seconds,
             }
             for window in plan.windows
         ],
