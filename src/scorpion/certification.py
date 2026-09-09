@@ -4,9 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .integrity import IntegrityLedger
+from .policy_bundle import RuntimePolicyBundle
 from .recovery import BackupVerification, create_verified_backup
 from .replay import replay, state_fingerprint
 from .schema_contract import inspect_schema
+from .state_checkpoint import restore_state
 from .store import Store
 from .temporal_guard import TemporalStreamReport, load_temporal_stream_report
 
@@ -33,12 +35,15 @@ def certify_runtime(
     backup_path: str | Path | None = None,
     overwrite_backup: bool = False,
 ) -> RuntimeCertificationReport:
+    policy = RuntimePolicyBundle()
     store = Store(path)
     signals = store.load_signals()
-    state, _ = replay(signals)
+    state, _ = replay(signals, policy.base)
     fingerprint = state_fingerprint(state)
-    duplicate_state, _ = replay(tuple(signals) + tuple(signals))
-    reversed_state, _ = replay(tuple(reversed(signals)))
+    duplicate_state, _ = replay(tuple(signals) + tuple(signals), policy.base)
+    reversed_state, _ = replay(tuple(reversed(signals)), policy.base)
+    restored = restore_state(path, signals, runtime_policy=policy)
+    restored_fingerprint = state_fingerprint(restored.state)
     schema = inspect_schema(path)
     integrity = IntegrityLedger(path).verify_database()
     temporal = load_temporal_stream_report(path)
@@ -62,6 +67,14 @@ def certify_runtime(
             "input_order_replay_invariance",
             state_fingerprint(reversed_state) == fingerprint,
             "replay sorting makes input enumeration order irrelevant",
+        ),
+        CertificationCheck(
+            "checkpoint_replay_equivalence",
+            restored_fingerprint == fingerprint,
+            (
+                f"policy={policy.fingerprint};checkpoint={restored.checkpoint_id};"
+                f"tail_events={restored.tail_events};mode={restored.reason}"
+            ),
         ),
         CertificationCheck(
             "temporal_integrity",
