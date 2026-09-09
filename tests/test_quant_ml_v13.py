@@ -80,20 +80,36 @@ def _fast_portfolio_policy() -> PortfolioClusterPolicy:
 
 def test_portfolio_cluster_passes_diversified_days_and_rejects_same_ticker_concentration():
     diversified = tuple(
-        _trade(
-            index,
-            "0.05" if index % 4 else "-0.02",
-            ticker="AAPL" if index % 2 == 0 else "NVDA",
+        trade
+        for day in range(25)
+        for trade in (
+            _trade(
+                day * 2,
+                "0.05" if day % 4 else "-0.02",
+                ticker="AAPL",
+                day_offset=day,
+            ),
+            _trade(
+                day * 2 + 1,
+                "0.04" if day % 5 else "-0.01",
+                ticker="NVDA",
+                day_offset=day,
+            ),
         )
-        for index in range(25)
     )
     passed = evaluate_portfolio_clusters(diversified, policy=_fast_portfolio_policy())
     assert passed.status is PortfolioClusterStatus.PASS
+    assert passed.max_concurrency == 2
+    assert passed.max_same_ticker_premium_share == 0.5
     assert passed.max_research_risk_fraction == 0.01
 
     concentrated = tuple(
-        _trade(index, "0.05", ticker="AAPL")
-        for index in range(25)
+        trade
+        for day in range(25)
+        for trade in (
+            _trade(day * 2 + 1000, "0.05", ticker="AAPL", day_offset=day),
+            _trade(day * 2 + 1001, "0.04", ticker="AAPL", day_offset=day),
+        )
     )
     failed = evaluate_portfolio_clusters(concentrated, policy=_fast_portfolio_policy())
     assert failed.status is PortfolioClusterStatus.FAIL
