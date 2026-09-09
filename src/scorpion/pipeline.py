@@ -8,6 +8,11 @@ from .association import associate_followup_with_evidence
 from .decision_packet import OperatorDecisionPacket, build_decision_packet
 from .domain import BookState, Effect, RawDiscordMessage, SignalEvent
 from .eligibility import classify_eligibility
+from .failure_quarantine import (
+    FailureDisposition,
+    QuarantinedRawRevision,
+    record_processing_failure,
+)
 from .invariants import assert_valid_book
 from .parser import parse_message_with_evidence
 from .policy_bundle import RuntimePolicyBundle
@@ -45,10 +50,13 @@ class Pipeline:
     resilience_assessment: ResilienceAssessment = field(default_factory=_normal_resilience)
     source_shift_resolver: SourceShiftResolver | None = None
     runtime_policy: RuntimePolicyBundle = field(default_factory=RuntimePolicyBundle)
+    maximum_raw_attempts: int = 3
     state: BookState = field(init=False)
     recent_events: list[SignalEvent] = field(init=False)
 
     def __post_init__(self) -> None:
+        if self.maximum_raw_attempts <= 0:
+            raise ValueError("maximum_raw_attempts must be positive")
         with self.store.connect() as db:
             ensure_processing_order_schema(db)
         historical_signals = load_signals_in_processing_order(self.store.path)
@@ -78,8 +86,17 @@ class Pipeline:
         for raw in load_pending_raw_in_receipt_order(self.store.path):
             try:
                 self._process(raw, persist_raw=False)
+            except QuarantinedRawRevision as exc:
+                self.store.set_halt(True, f"raw_quarantined:{exc.raw_event_id}")
+                self.store.heartbeat(
+                    "replay-recovery",
+                    status="quarantined_raw",
+                    raw_revision_id=exc.raw_event_id,
+                    attempt_count=exc.attempt_count,
+                    policy_fingerprint=self.runtime_policy.fingerprint,
+                )
+                continue
             except Exception as exc:
-                self.store.mark_raw_failed(raw.revision_id, type(exc).__name__)
                 self.store.set_halt(True, f"raw_recovery_failed:{raw.revision_id}")
                 raise RuntimeError("failed to recover pending raw Discord revision") from exc
 
@@ -196,16 +213,34 @@ class Pipeline:
                         max_open_positions=self.runtime_policy.base.max_open_positions,
                     )
             return event, effects
+        except QuarantinedRawRevision:
+            raise
         except Exception as exc:
-            self.store.mark_raw_failed(raw.revision_id, type(exc).__name__)
+            failure = record_processing_failure(
+                self.store.path,
+                raw.revision_id,
+                type(exc).__name__,
+                maximum_attempts=self.maximum_raw_attempts,
+            )
             self.store.heartbeat(
                 "pipeline",
                 last_message_id=raw.message_id,
                 last_revision_id=raw.revision_id,
-                status="error",
+                status=(
+                    "quarantined"
+                    if failure.disposition is FailureDisposition.QUARANTINED
+                    else "error"
+                ),
                 error=type(exc).__name__,
+                raw_failure_attempts=failure.attempt_count,
                 policy_fingerprint=self.runtime_policy.fingerprint,
             )
+            if failure.disposition is FailureDisposition.QUARANTINED:
+                raise QuarantinedRawRevision(
+                    raw.revision_id,
+                    failure.attempt_count,
+                    failure.error,
+                ) from exc
             raise
 
     async def handle(self, raw: RawDiscordMessage) -> tuple[SignalEvent, tuple[Effect, ...]]:
