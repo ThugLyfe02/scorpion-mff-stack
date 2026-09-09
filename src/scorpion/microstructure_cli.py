@@ -12,9 +12,13 @@ from typing import Any
 
 from . import __version__
 from .config import ALLOWED_CHANNEL_IDS
+from .contract_terms import ContractTermsRegistry
 from .dataset_fingerprint import fingerprint_history_archive
+from .execution_attribution import build_execution_attribution_report
+from .execution_trust import FillTrustPolicy, assess_fill_model_trust
+from .fill_calibration import evaluate_fill_calibration
 from .history_archive import HistoryArchive
-from .microstructure import OptionMicrostructureTape
+from .microstructure import OptionMicrostructureTape, ns_from_datetime
 from .microstructure_forensics import (
     MicroForensicStatus,
     MicrostructureExecutionProfile,
@@ -71,6 +75,26 @@ def microstructure_forensics_main() -> None:
     parser.add_argument("--limit-wait-ms", type=int, default=5000)
     parser.add_argument("--min-certified-execution-coverage", type=float, default=0.95)
     parser.add_argument(
+        "--contract-terms",
+        type=Path,
+        help="Point-in-time contract terms JSONL with verified multiplier/deliverable metadata.",
+    )
+    parser.add_argument(
+        "--allow-unverified-contract-terms",
+        action="store_true",
+        help="Permit diagnostics without verified standard-contract terms; not recommended.",
+    )
+    parser.add_argument(
+        "--fill-calibration-db",
+        type=Path,
+        help="Shadow/paper fill calibration database used to gate authoritative research.",
+    )
+    parser.add_argument(
+        "--allow-uncalibrated-fill-model",
+        action="store_true",
+        help="Permit sizing research before empirical fill-model trust is established.",
+    )
+    parser.add_argument(
         "--code-revision",
         default=os.environ.get("SCORPION_CODE_REVISION", "").strip(),
     )
@@ -109,6 +133,7 @@ def microstructure_forensics_main() -> None:
     )
     sizing_constraints = SizingConstraints()
     walk_forward_policy = WalkForwardPolicy()
+    fill_trust_policy = FillTrustPolicy()
     report = run_archive_microstructure_forensics(
         archive,
         tape,
@@ -122,13 +147,48 @@ def microstructure_forensics_main() -> None:
     completeness_ok = all(item.exhaustive for item in report.completeness)
     evidence_denominator = report.certified_actionable_legs + report.uncertain_actionable_legs
     certified_coverage = (
-        report.certified_actionable_legs / evidence_denominator
-        if evidence_denominator
-        else 0.0
+        report.certified_actionable_legs / evidence_denominator if evidence_denominator else 0.0
     )
     certified_coverage_ok = certified_coverage >= args.min_certified_execution_coverage
     provenance_ok = bool(args.code_revision.strip())
     quality_ok = not quality.critical
+
+    contract_requests = tuple(
+        (leg.contract_key, ns_from_datetime(leg.source_ts_utc))
+        for leg in report.legs
+        if leg.contract_key is not None
+    )
+    contract_registry = (
+        ContractTermsRegistry.from_jsonl(args.contract_terms)
+        if args.contract_terms is not None
+        else None
+    )
+    contract_coverage = (
+        contract_registry.coverage(contract_requests) if contract_registry is not None else None
+    )
+    contract_terms_ok = (
+        contract_coverage.standard_only
+        if contract_coverage is not None
+        else args.allow_unverified_contract_terms
+    )
+
+    fill_calibration = (
+        evaluate_fill_calibration(args.fill_calibration_db)
+        if args.fill_calibration_db is not None
+        else None
+    )
+    fill_trust = (
+        assess_fill_model_trust(fill_calibration, policy=fill_trust_policy)
+        if fill_calibration is not None
+        else None
+    )
+    fill_model_trust_ok = (
+        fill_trust.allows_authoritative_research
+        if fill_trust is not None
+        else args.allow_uncalibrated_fill_model
+    )
+
+    attribution, attribution_legs = build_execution_attribution_report(report, tape)
 
     certified_completed = tuple(
         trade for trade in report.completed_trades if trade.depth_evidence_complete
@@ -138,9 +198,7 @@ def microstructure_forensics_main() -> None:
     ranking_by_segment = {metric.segment: metric for metric in rankings}
     selections = select_candidates(rankings)
     selected = {
-        item.segment
-        for item in selections
-        if item.status is SelectionStatus.SELECTED
+        item.segment for item in selections if item.status is SelectionStatus.SELECTED
     }
     walk_reports = {
         name: evaluate_walk_forward(
@@ -154,6 +212,13 @@ def microstructure_forensics_main() -> None:
 
     history_fp = fingerprint_history_archive(archive, channel_ids=channels)
     market_fp = fingerprint_file(args.events)
+    datasets = {
+        "discord_history": history_fp.sha256,
+        "option_microstructure": market_fp.sha256,
+        "contract_terms": (
+            contract_registry.fingerprint if contract_registry is not None else "UNSET"
+        ),
+    }
     manifest = build_research_manifest(
         code_revision=args.code_revision.strip() or "UNSET",
         package_version=__version__,
@@ -163,11 +228,9 @@ def microstructure_forensics_main() -> None:
             "microstructure_execution_profile": profile,
             "sizing_constraints": sizing_constraints,
             "walk_forward": walk_forward_policy,
+            "fill_trust": fill_trust_policy,
         },
-        datasets={
-            "discord_history": history_fp.sha256,
-            "option_microstructure": market_fp.sha256,
-        },
+        datasets=datasets,
         parameters={
             "channels": tuple(sorted(channels)),
             "include_research_only": args.include_research_only,
@@ -180,6 +243,8 @@ def microstructure_forensics_main() -> None:
         and quality_ok
         and certified_coverage_ok
         and provenance_ok
+        and contract_terms_ok
+        and fill_model_trust_ok
     )
     status_counts = {
         status.value: sum(leg.status is status for leg in report.legs)
@@ -204,6 +269,12 @@ def microstructure_forensics_main() -> None:
         "certified_execution_coverage_ok": certified_coverage_ok,
         "market_data_quality_ok": quality_ok,
         "code_provenance_ok": provenance_ok,
+        "contract_terms": asdict(contract_coverage) if contract_coverage is not None else None,
+        "contract_terms_ok": contract_terms_ok,
+        "fill_calibration": asdict(fill_calibration) if fill_calibration is not None else None,
+        "fill_model_trust": asdict(fill_trust) if fill_trust is not None else None,
+        "fill_model_trust_ok": fill_model_trust_ok,
+        "execution_attribution": asdict(attribution),
         "completed_certified_trades": len(certified_completed),
         "leg_status_counts": status_counts,
         "segment_rankings": [asdict(item) for item in rankings],
@@ -229,6 +300,16 @@ def microstructure_forensics_main() -> None:
             "Too many actionable legs have queue/depth uncertainty; sizing is withheld instead "
             "of treating possible resting fills as realized fills."
         )
+    if not contract_terms_ok:
+        warnings.append(
+            "Point-in-time option contract terms are missing, ambiguous, adjusted, or use a "
+            "nonstandard multiplier; authoritative sizing is withheld rather than assuming x100."
+        )
+    if not fill_model_trust_ok:
+        warnings.append(
+            "The execution fill model is not empirically trusted by shadow/paper calibration; "
+            "authoritative sizing is withheld."
+        )
 
     if sizing_gate_ok:
         payload["sizing_envelopes"] = [
@@ -250,13 +331,14 @@ def microstructure_forensics_main() -> None:
             )
         if not payload["sizing_envelopes"]:
             warnings.append(
-                "No segment survived certified execution evidence plus existing statistical "
-                "selection and out-of-sample gates."
+                "No segment survived contract truth, calibrated execution evidence, statistical "
+                "selection, and purged out-of-sample gates."
             )
 
     if args.full:
         payload["completed_trades"] = [asdict(item) for item in report.completed_trades]
         payload["legs"] = [asdict(item) for item in report.legs]
+        payload["execution_attribution_legs"] = [asdict(item) for item in attribution_legs]
 
     rendered = json.dumps(payload, indent=2, sort_keys=True, default=_json_default)
     if args.output is not None:
