@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .eligibility import StrategyBucket
 from .execution_forensics import CompletedTrade
+from .hac_edge import HACEdgeReport, evaluate_selected_hac
 from .heavy_tail_edge import HeavyTailEdgeReport, evaluate_selected_heavy_tail
 from .hierarchical_shrinkage import (
     HierarchicalReport,
@@ -38,6 +39,7 @@ class QuantAuditReport:
     channel_hierarchy: HierarchicalReport
     selection_adjusted: tuple[SelectionAdjustedPerformance, ...]
     heavy_tail: tuple[HeavyTailEdgeReport, ...]
+    hac_edge: tuple[HACEdgeReport, ...]
     qualified_segments: tuple[str, ...]
     failures: tuple[str, ...]
 
@@ -65,13 +67,16 @@ def run_quant_audit(trades: tuple[CompletedTrade, ...]) -> QuantAuditReport:
     channel_hierarchy = evaluate_hierarchical_shrinkage(channel_groups(trades))
     selection_adjusted = evaluate_selected_segments(segments, selected_set)
     heavy_tail = evaluate_selected_heavy_tail(segments, selected_set)
+    hac_edge = evaluate_selected_hac(segments, selected_set)
     adjusted_by_segment = {item.segment: item for item in selection_adjusted}
     heavy_by_segment = {item.segment: item for item in heavy_tail}
+    hac_by_segment = {item.segment: item for item in hac_edge}
     qualified = tuple(
         name
         for name in selected
         if (name not in adjusted_by_segment or adjusted_by_segment[name].qualified)
         and (name not in heavy_by_segment or heavy_by_segment[name].qualified)
+        and (name not in hac_by_segment or hac_by_segment[name].qualified)
     )
     failures: list[str] = []
     if not portfolio.passed:
@@ -90,6 +95,12 @@ def run_quant_audit(trades: tuple[CompletedTrade, ...]) -> QuantAuditReport:
         if not item.qualified
         for failure in item.failures
     )
+    failures.extend(
+        f"hac_edge:{item.segment}:{failure}"
+        for item in hac_edge
+        if not item.qualified
+        for failure in item.failures
+    )
     return QuantAuditReport(
         trades=len(trades),
         selected_segments=selected,
@@ -100,6 +111,7 @@ def run_quant_audit(trades: tuple[CompletedTrade, ...]) -> QuantAuditReport:
         channel_hierarchy=channel_hierarchy,
         selection_adjusted=selection_adjusted,
         heavy_tail=heavy_tail,
+        hac_edge=hac_edge,
         qualified_segments=qualified,
         failures=tuple(failures),
     )
@@ -145,9 +157,9 @@ def _trade_from_row(row: dict[str, object]) -> CompletedTrade:
 def quant_audit_main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Run portfolio clustering, latent stress risk, hierarchical shrinkage, heavy-tail "
-            "robustness, and selection-adjusted diagnostics on certified CompletedTrade JSONL. "
-            "Research-only."
+            "Run portfolio/tail clustering, heavy-tail and serial-correlation robustness, "
+            "hierarchical shrinkage, and selection-adjusted diagnostics on certified "
+            "CompletedTrade JSONL. Research-only."
         )
     )
     parser.add_argument("trades", type=Path)
