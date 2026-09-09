@@ -85,7 +85,7 @@ def _prediction(index: int, *, leaked: bool = False) -> TemporalPrediction:
         trained_through_ts_utc=(
             event_ts if leaked else event_ts - timedelta(days=1)
         ),
-        probability=0.85 if truth else 0.15,
+        probability=0.95 if truth else 0.05,
         truth=truth,
     )
 
