@@ -11,6 +11,7 @@ from .incremental_oof_value import IncrementalOOFReport
 from .label_consensus import LabelConsensusReport
 from .label_noise_audit import LabelNoiseReport
 from .mondrian_conformal import MondrianEvaluation
+from .nested_temporal_selection import NestedSelectionReport
 from .oof_stacking import CrossFittedStackingReport
 from .regime_mixture import RegimeMixtureReport
 from .safe_policy_improvement import SafePolicyImprovementReport
@@ -51,6 +52,7 @@ class PromotionEvidence:
     temporal_crossfit: TemporalCrossFitReport | None = None
     stacking: CrossFittedStackingReport | None = None
     incremental_oof: IncrementalOOFReport | None = None
+    nested_selection: NestedSelectionReport | None = None
     adaptive_ensemble: AdaptiveEnsembleSnapshot | None = None
     feature_stability: FeatureStabilityReport | None = None
     regime_mixture: RegimeMixtureReport | None = None
@@ -157,6 +159,11 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         failures.append("incremental_oof_value_not_qualified")
         failures.extend(
             f"incremental_oof:{item}" for item in evidence.incremental_oof.failures
+        )
+    if evidence.nested_selection is not None and not evidence.nested_selection.qualified:
+        failures.append("nested_temporal_selection_not_qualified")
+        failures.extend(
+            f"nested_selection:{item}" for item in evidence.nested_selection.failures
         )
     if evidence.adaptive_ensemble is not None and not evidence.adaptive_ensemble.trusted:
         failures.append("adaptive_ensemble_not_trusted")
