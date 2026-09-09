@@ -178,6 +178,28 @@ def _packet_bound_fields(
     return result
 
 
+def _process_seq_bound_field(
+    db: sqlite3.Connection,
+    payload: dict[str, object],
+    *,
+    event_id: str,
+    failures: list[str],
+) -> dict[str, Scalar] | None:
+    if "process_seq" not in payload:
+        return {}
+    if not _table_exists(db, "event_processing_order"):
+        failures.append(f"missing_processing_order_table:{event_id}")
+        return None
+    row = db.execute(
+        "SELECT process_seq FROM event_processing_order WHERE event_id=?",
+        (event_id,),
+    ).fetchone()
+    if row is None:
+        failures.append(f"missing_processing_order:{event_id}")
+        return None
+    return {"process_seq": int(row["process_seq"])}
+
+
 def _extended_expected_payload(
     db: sqlite3.Connection,
     *,
@@ -187,6 +209,15 @@ def _extended_expected_payload(
     effects: Sequence[sqlite3.Row],
     failures: list[str],
 ) -> dict[str, Scalar] | None:
+    process_fields = _process_seq_bound_field(
+        db,
+        payload,
+        event_id=event_id,
+        failures=failures,
+    )
+    if process_fields is None:
+        return None
+    base = {**base, **process_fields}
     if "decision_packet_id" not in payload:
         return base
     if not _table_exists(db, "operator_decision_packets"):
