@@ -4,7 +4,17 @@ import math
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import StrEnum
+
+from .domain import EventKind
+from .microstructure import (
+    MarketEventKind,
+    OptionMicrostructureTape,
+    ns_from_datetime,
+    timedelta_to_ns,
+)
+from .microstructure_forensics import MicrostructureForensicsReport
 
 
 class OpportunitySurvivalStatus(StrEnum):
@@ -42,6 +52,19 @@ class OpportunitySurvivalPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class OpportunityExtractionPolicy:
+    observation_horizon: timedelta = timedelta(seconds=5)
+    market_quote_max_age: timedelta = timedelta(seconds=1)
+    include_adds: bool = True
+
+    def __post_init__(self) -> None:
+        if self.observation_horizon <= timedelta(0):
+            raise ValueError("observation_horizon must be positive")
+        if self.market_quote_max_age < timedelta(0):
+            raise ValueError("market_quote_max_age cannot be negative")
+
+
+@dataclass(frozen=True, slots=True)
 class SurvivalPoint:
     time_ms: float
     at_risk: int
@@ -73,6 +96,67 @@ class OpportunitySurvivalReport:
     groups: tuple[GroupOpportunitySurvival, ...]
     shortest_median_group: str | None
     shortest_median_ms: float | None
+
+
+def extract_opportunity_observations(
+    report: MicrostructureForensicsReport,
+    tape: OptionMicrostructureTape,
+    *,
+    policy: OpportunityExtractionPolicy | None = None,
+) -> tuple[OpportunityObservation, ...]:
+    """Measure first loss of immediate marketability from the real forensic limit path."""
+    policy = policy or OpportunityExtractionPolicy()
+    allowed_kinds = {EventKind.ENTRY}
+    if policy.include_adds:
+        allowed_kinds.add(EventKind.ADD)
+    horizon_ns = timedelta_to_ns(policy.observation_horizon)
+    observations: list[OpportunityObservation] = []
+    for leg in report.legs:
+        if leg.event_kind not in allowed_kinds:
+            continue
+        if leg.contract_key is None or leg.limit_price is None or leg.order_arrival_ts_utc is None:
+            continue
+        arrival_ns = ns_from_datetime(leg.order_arrival_ts_utc)
+        market = tape.market_quote_at(
+            leg.contract_key,
+            arrival_ns,
+            max_age=policy.market_quote_max_age,
+        )
+        if market is None or market.ask is None:
+            continue
+        group = leg.bucket.value
+        if market.ask > leg.limit_price:
+            observations.append(OpportunityObservation(leg.event_id, group, 0.0, True))
+            continue
+        deadline_ns = arrival_ns + horizon_ns
+        loss_ns: int | None = None
+        for event in tape.events_between(leg.contract_key, arrival_ns, deadline_ns):
+            if (
+                event.kind is MarketEventKind.QUOTE
+                and event.ask is not None
+                and event.ask > leg.limit_price
+            ):
+                loss_ns = event.ts_event_ns
+                break
+        if loss_ns is None:
+            observations.append(
+                OpportunityObservation(
+                    leg.event_id,
+                    group,
+                    horizon_ns / 1_000_000.0,
+                    False,
+                )
+            )
+        else:
+            observations.append(
+                OpportunityObservation(
+                    leg.event_id,
+                    group,
+                    max(0.0, (loss_ns - arrival_ns) / 1_000_000.0),
+                    True,
+                )
+            )
+    return tuple(observations)
 
 
 def _kaplan_meier(rows: Sequence[OpportunityObservation]) -> tuple[SurvivalPoint, ...]:
