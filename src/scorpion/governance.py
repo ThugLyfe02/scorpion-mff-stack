@@ -7,13 +7,16 @@ from .adaptive_ensemble import AdaptiveEnsembleSnapshot
 from .canary import CanaryReport, CanaryStatus
 from .conformal import ConformalEvaluation
 from .feature_stability import FeatureStabilityReport
+from .label_consensus import LabelConsensusReport
 from .mondrian_conformal import MondrianEvaluation
 from .oof_stacking import CrossFittedStackingReport
 from .regime_mixture import RegimeMixtureReport
+from .safe_policy_improvement import SafePolicyImprovementReport
 from .selective import SelectivePolicy
 from .sequential_evidence import ExecutionEvidenceMonitorSnapshot, SequentialEvidenceStatus
 from .temporal_crossfit import TemporalCrossFitReport
 from .tournament import CandidateScore
+from .uncertainty_decomposition import UncertaintyHealthReport
 from .uncertainty_envelope import ExecutionUncertaintyEnvelope
 from .walk_forward import WalkForwardReport
 
@@ -46,6 +49,10 @@ class PromotionEvidence:
     adaptive_ensemble: AdaptiveEnsembleSnapshot | None = None
     feature_stability: FeatureStabilityReport | None = None
     regime_mixture: RegimeMixtureReport | None = None
+    label_consensus: LabelConsensusReport | None = None
+    minimum_label_consensus_rate: float = 0.90
+    uncertainty_health: UncertaintyHealthReport | None = None
+    safe_policy_improvement: SafePolicyImprovementReport | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +75,8 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         0.0 <= evidence.anytime_accuracy_lower_bound <= 1.0
     ):
         raise ValueError("anytime_accuracy_lower_bound must be between 0 and 1")
+    if not 0.0 <= evidence.minimum_label_consensus_rate <= 1.0:
+        raise ValueError("minimum_label_consensus_rate must be between 0 and 1")
 
     failures: list[str] = []
     if not evidence.candidate.qualified:
@@ -144,6 +153,28 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
     if evidence.regime_mixture is not None and not evidence.regime_mixture.qualified:
         failures.append("regime_conditioned_mixture_not_qualified")
         failures.extend(f"regime_mixture:{item}" for item in evidence.regime_mixture.failures)
+    if evidence.label_consensus is not None:
+        total = evidence.label_consensus.events
+        acceptance_rate = evidence.label_consensus.accepted_events / total if total else 0.0
+        if acceptance_rate < evidence.minimum_label_consensus_rate:
+            failures.append(
+                "label_consensus_rate_below_requirement:"
+                f"{acceptance_rate:.6f}<{evidence.minimum_label_consensus_rate:.6f}"
+            )
+    if evidence.uncertainty_health is not None and not evidence.uncertainty_health.qualified:
+        failures.append("ensemble_uncertainty_health_not_qualified")
+        failures.extend(
+            f"uncertainty_health:{item}" for item in evidence.uncertainty_health.failures
+        )
+    if (
+        evidence.safe_policy_improvement is not None
+        and not evidence.safe_policy_improvement.qualified
+    ):
+        failures.append("safe_policy_improvement_not_qualified")
+        failures.extend(
+            f"policy_improvement:{item}"
+            for item in evidence.safe_policy_improvement.failures
+        )
 
     if failures:
         return PromotionDecision(
