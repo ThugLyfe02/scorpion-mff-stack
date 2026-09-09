@@ -8,7 +8,6 @@ import pytest
 
 from scorpion.causal_trace import trace_event
 from scorpion.certification import certify_runtime
-from scorpion.governance import PromotionDecision, PromotionStatus
 from scorpion.history_archive import ArchivedDiscordMessage, HistoryArchive
 from scorpion.pipeline import Pipeline
 from scorpion.processing_order import load_signals_in_processing_order
@@ -76,7 +75,9 @@ def test_runtime_certification_rejects_signals_outside_integrity_ledger(tmp_path
         db.commit()
 
     report = certify_runtime(store.path)
-    evidence_check = next(item for item in report.checks if item.name == "database_evidence_integrity")
+    evidence_check = next(
+        item for item in report.checks if item.name == "database_evidence_integrity"
+    )
     assert evidence_check.passed is False
     assert report.passed is False
     assert "signals_outside_integrity_ledger" in evidence_check.detail

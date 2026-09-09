@@ -340,7 +340,11 @@ def evaluate_targeted_regression_firewall(
             f"{latency_delta:.6f}>{policy.maximum_mean_latency_delta_ms:.6f}"
         )
 
-    if any("insufficient_" in item or item.startswith("target_slice_missing") for item in top_failures):
+    insufficient = any(
+        "insufficient_" in item or item.startswith("target_slice_missing")
+        for item in top_failures
+    )
+    if insufficient:
         status = RegressionFirewallStatus.INSUFFICIENT
     elif top_failures:
         status = RegressionFirewallStatus.FAILED

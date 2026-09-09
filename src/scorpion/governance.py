@@ -165,7 +165,9 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         and not evidence.shift_weighted_conformal.qualified
     ):
         failures.append("shift_weighted_conformal_not_qualified")
-        failures.extend(f"shift_conformal:{item}" for item in evidence.shift_weighted_conformal.failures)
+        failures.extend(
+            f"shift_conformal:{item}" for item in evidence.shift_weighted_conformal.failures
+        )
     if (
         evidence.sequential_evidence is not None
         and evidence.sequential_evidence.status is SequentialEvidenceStatus.ALARM
@@ -257,7 +259,9 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         and not evidence.safe_policy_improvement.qualified
     ):
         failures.append("safe_policy_improvement_not_qualified")
-        failures.extend(f"policy_improvement:{item}" for item in evidence.safe_policy_improvement.failures)
+        failures.extend(
+            f"policy_improvement:{item}" for item in evidence.safe_policy_improvement.failures
+        )
     if evidence.require_economic_safety_gates:
         if evidence.conditional_policy_safety is None:
             failures.append("conditional_policy_safety_required_but_missing")
@@ -283,7 +287,9 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         )
     if evidence.return_distribution is not None and not evidence.return_distribution.qualified:
         failures.append("return_distribution_dominance_not_qualified")
-        failures.extend(f"return_distribution:{item}" for item in evidence.return_distribution.failures)
+        failures.extend(
+            f"return_distribution:{item}" for item in evidence.return_distribution.failures
+        )
 
     if failures:
         return PromotionDecision(
