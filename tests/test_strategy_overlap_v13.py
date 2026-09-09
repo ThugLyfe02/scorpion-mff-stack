@@ -8,7 +8,6 @@ from scorpion.strategy_overlap import (
     deduplicate_strategy_universe,
 )
 
-
 BASE = datetime(2026, 9, 8, 14, 0, tzinfo=UTC)
 CHANNEL = "968352649437126676"
 AUTHOR = "author"
