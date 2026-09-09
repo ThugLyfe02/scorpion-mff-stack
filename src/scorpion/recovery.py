@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .integrity import IntegrityLedger
+from .policy_bundle import RuntimePolicyBundle
 from .provenance import FileFingerprint, fingerprint_file
 from .replay import replay, state_fingerprint
 from .store import Store
@@ -16,6 +17,7 @@ class RecoverySnapshot:
     state_fingerprint: str
     integrity_head: str
     database_evidence_ok: bool
+    policy_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,10 +31,14 @@ class BackupVerification:
     failures: tuple[str, ...]
 
 
-def _snapshot(path: str | Path) -> RecoverySnapshot:
+def _snapshot(
+    path: str | Path,
+    *,
+    runtime_policy: RuntimePolicyBundle,
+) -> RecoverySnapshot:
     store = Store(path)
     signals = store.load_signals()
-    state, _ = replay(signals)
+    state, _ = replay(signals, runtime_policy.base)
     ledger = IntegrityLedger(path)
     evidence = ledger.verify_database()
     return RecoverySnapshot(
@@ -40,6 +46,7 @@ def _snapshot(path: str | Path) -> RecoverySnapshot:
         state_fingerprint=state_fingerprint(state),
         integrity_head=ledger.head_hash(),
         database_evidence_ok=evidence.ok,
+        policy_fingerprint=runtime_policy.fingerprint,
     )
 
 
@@ -51,9 +58,15 @@ def _database_checks(path: str | Path) -> tuple[str, int]:
     return integrity, violations
 
 
-def verify_backup(source_path: str | Path, backup_path: str | Path) -> BackupVerification:
-    source = _snapshot(source_path)
-    backup = _snapshot(backup_path)
+def verify_backup(
+    source_path: str | Path,
+    backup_path: str | Path,
+    *,
+    runtime_policy: RuntimePolicyBundle | None = None,
+) -> BackupVerification:
+    policy = runtime_policy or RuntimePolicyBundle()
+    source = _snapshot(source_path, runtime_policy=policy)
+    backup = _snapshot(backup_path, runtime_policy=policy)
     sqlite_integrity, foreign_key_violations = _database_checks(backup_path)
     failures: list[str] = []
     if sqlite_integrity.lower() != "ok":
@@ -70,6 +83,8 @@ def verify_backup(source_path: str | Path, backup_path: str | Path) -> BackupVer
         failures.append("state_fingerprint_mismatch")
     if source.integrity_head != backup.integrity_head:
         failures.append("integrity_head_mismatch")
+    if source.policy_fingerprint != backup.policy_fingerprint:
+        failures.append("policy_fingerprint_mismatch")
     return BackupVerification(
         source=source,
         backup=backup,
@@ -86,6 +101,7 @@ def create_verified_backup(
     backup_path: str | Path,
     *,
     overwrite: bool = False,
+    runtime_policy: RuntimePolicyBundle | None = None,
 ) -> BackupVerification:
     source = Path(source_path)
     backup = Path(backup_path)
@@ -106,7 +122,7 @@ def create_verified_backup(
         source_db.backup(backup_db)
         backup_db.commit()
 
-    verification = verify_backup(source, backup)
+    verification = verify_backup(source, backup, runtime_policy=runtime_policy)
     if not verification.verified:
         raise RuntimeError("backup verification failed: " + ",".join(verification.failures))
     return verification
