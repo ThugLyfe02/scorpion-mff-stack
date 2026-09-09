@@ -243,7 +243,12 @@ def evaluate_regime_stability(
     axes = (
         _axis_report("spread", spread_assignments, total_samples=effective_samples, policy=policy),
         _axis_report("quote_age", age_assignments, total_samples=effective_samples, policy=policy),
-        _axis_report("decision_latency", latency_assignments, total_samples=effective_samples, policy=policy),
+        _axis_report(
+            "decision_latency",
+            latency_assignments,
+            total_samples=effective_samples,
+            policy=policy,
+        ),
         _axis_report("session", session_assignments, total_samples=effective_samples, policy=policy),
     )
     failures = tuple(
