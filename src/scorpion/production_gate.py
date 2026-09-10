@@ -438,7 +438,8 @@ class ProductionGateRegistry:
             ).fetchone()
             if dossier is None:
                 raise KeyError(dossier_id)
-            if ProductionGateStatus(str(dossier["status"])) is not ProductionGateStatus.READY_FOR_APPROVAL:
+            dossier_status = ProductionGateStatus(str(dossier["status"]))
+            if dossier_status is not ProductionGateStatus.READY_FOR_APPROVAL:
                 raise ValueError("blocked production dossier cannot be approved")
             expires = datetime.fromisoformat(str(dossier["expires_ts_utc"])).astimezone(UTC)
             if timestamp > expires:
