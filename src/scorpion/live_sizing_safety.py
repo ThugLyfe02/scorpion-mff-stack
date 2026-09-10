@@ -28,6 +28,7 @@ class LiveSizingSafetyPolicy:
     maximum_quote_age_ms: float
     maximum_decision_latency_ms: float
     decision_ttl: timedelta = timedelta(seconds=2)
+    require_release_identity: bool = True
 
     def __post_init__(self) -> None:
         for name in (
@@ -89,6 +90,7 @@ class LiveRiskState:
     runtime_certified: bool
     canary_healthy: bool
     drift_active: bool
+    active_release_id: str = ""
 
     def __post_init__(self) -> None:
         if self.observed_ts_utc.tzinfo is None or self.observed_ts_utc.utcoffset() is None:
@@ -118,6 +120,7 @@ class LiveSizingDecision:
     capacity_implied_ceiling_fraction: float
     valid_until_ts_utc: datetime
     failures: tuple[str, ...]
+    portfolio_headroom_ceiling_fraction: float = 0.0
 
     @property
     def permitted(self) -> bool:
@@ -147,7 +150,12 @@ def evaluate_live_sizing_request(
 
     if request.component != state.safety_state.component:
         failures.append("safety_latch_component_mismatch")
-    if state.safety_state.mode is not SafetyMode.NORMAL:
+    if policy.require_release_identity:
+        if not state.active_release_id.strip():
+            failures.append("active_release_identity_missing")
+        elif request.release_id != state.active_release_id:
+            failures.append("sizing_request_release_mismatch")
+    if state.safety_state.mode is not SafetyMode.NORMAL or not state.safety_state.initialized:
         failures.append("component_fail_closed_no_trade")
     if state.research_sizing.readiness is not SizingReadiness.READY_FOR_RESEARCH:
         failures.append("research_sizing_not_ready")
@@ -208,10 +216,17 @@ def evaluate_live_sizing_request(
         if state.capacity.robust
         else 0.0
     )
+    gross_headroom = max(0.0, policy.maximum_gross_exposure_fraction - state.gross_exposure_fraction)
+    cluster_headroom = max(
+        0.0,
+        policy.maximum_cluster_exposure_fraction - state.cluster_exposure_fraction,
+    )
+    portfolio_headroom = min(gross_headroom, cluster_headroom)
     hard_ceiling = min(
         policy.maximum_risk_fraction,
         state.research_sizing.max_research_risk_fraction,
         capacity_ceiling,
+        portfolio_headroom,
     )
     if hard_ceiling <= 0:
         failures.append("no_positive_live_risk_ceiling")
@@ -225,12 +240,13 @@ def evaluate_live_sizing_request(
     status = LiveSizingStatus.WITHIN_OPERATOR_LIMITS if not failures else LiveSizingStatus.BLOCKED
     decision_id = _hash_payload(
         {
-            "version": "live-sizing-safety-v1",
+            "version": "live-sizing-safety-v2",
             "request": asdict(request),
             "state": asdict(state),
             "policy": asdict(policy),
             "hard_ceiling_fraction": hard_ceiling,
             "capacity_implied_ceiling_fraction": capacity_ceiling,
+            "portfolio_headroom_ceiling_fraction": portfolio_headroom,
             "status": status.value,
             "failures": failures,
         }
@@ -244,4 +260,5 @@ def evaluate_live_sizing_request(
         capacity_implied_ceiling_fraction=capacity_ceiling,
         valid_until_ts_utc=valid_until,
         failures=tuple(failures),
+        portfolio_headroom_ceiling_fraction=portfolio_headroom,
     )
