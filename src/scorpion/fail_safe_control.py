@@ -37,6 +37,7 @@ class SafetyLedgerIntegrityReport:
     events: int
     event_id_mismatches: int
     state_matches_latest_event: bool
+    checkpoint_matches_history: bool
     valid: bool
     failures: tuple[str, ...]
 
@@ -66,9 +67,50 @@ CREATE TABLE IF NOT EXISTS component_safety_events (
     created_ts_utc TEXT NOT NULL,
     actor TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS component_safety_integrity_state (
+    component TEXT PRIMARY KEY,
+    event_count INTEGER NOT NULL,
+    head_event_id TEXT NOT NULL,
+    head_chain_hash TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_component_safety_events_component_created
 ON component_safety_events(component,created_ts_utc,event_id);
 """
+
+
+def _normalize_reason(reason: str) -> str:
+    return reason[:1000]
+
+
+def _chain_hash(previous: str, event_id: str) -> str:
+    return hashlib.sha256(f"{previous}|{event_id}".encode("utf-8")).hexdigest()
+
+
+def _rebuild_integrity_checkpoint(db: sqlite3.Connection, component: str) -> None:
+    rows = db.execute(
+        """
+        SELECT event_id FROM component_safety_events
+        WHERE component=? ORDER BY created_ts_utc,event_id
+        """,
+        (component,),
+    ).fetchall()
+    chain = ""
+    head = ""
+    for row in rows:
+        head = str(row[0])
+        chain = _chain_hash(chain, head)
+    db.execute(
+        """
+        INSERT INTO component_safety_integrity_state
+        (component,event_count,head_event_id,head_chain_hash)
+        VALUES (?,?,?,?)
+        ON CONFLICT(component) DO UPDATE SET
+            event_count=excluded.event_count,
+            head_event_id=excluded.head_event_id,
+            head_chain_hash=excluded.head_chain_hash
+        """,
+        (component, len(rows), head, chain),
+    )
 
 
 class NoTradeSafetyLatch:
@@ -112,11 +154,12 @@ class NoTradeSafetyLatch:
         if not component.strip() or not reason.strip() or not actor.strip():
             raise ValueError("component, reason and actor are required")
         timestamp = (now or datetime.now(UTC)).astimezone(UTC)
+        normalized_reason = _normalize_reason(reason)
         event_id = _event_id(
             component=component,
             mode=SafetyMode.NO_TRADE,
             source_release_id=source_release_id,
-            reason=reason,
+            reason=normalized_reason,
             timestamp=timestamp,
             actor=actor,
         )
@@ -134,7 +177,7 @@ class NoTradeSafetyLatch:
                     component,
                     SafetyMode.NO_TRADE.value,
                     source_release_id,
-                    reason[:1000],
+                    normalized_reason,
                     timestamp.isoformat(),
                     actor,
                 ),
@@ -155,11 +198,12 @@ class NoTradeSafetyLatch:
                     component,
                     SafetyMode.NO_TRADE.value,
                     source_release_id,
-                    reason[:1000],
+                    normalized_reason,
                     timestamp.isoformat(),
                     actor,
                 ),
             )
+            _rebuild_integrity_checkpoint(db, component)
             db.commit()
         return self.state(component)
 
@@ -175,11 +219,12 @@ class NoTradeSafetyLatch:
             raise ValueError("operator identity and clear reason are required")
         current = self.state(component)
         timestamp = (now or datetime.now(UTC)).astimezone(UTC)
+        normalized_reason = _normalize_reason(reason)
         event_id = _event_id(
             component=component,
             mode=SafetyMode.NORMAL,
             source_release_id=current.source_release_id,
-            reason=reason,
+            reason=normalized_reason,
             timestamp=timestamp,
             actor=operator,
         )
@@ -197,7 +242,7 @@ class NoTradeSafetyLatch:
                     component,
                     SafetyMode.NORMAL.value,
                     current.source_release_id,
-                    reason[:1000],
+                    normalized_reason,
                     timestamp.isoformat(),
                     operator,
                 ),
@@ -218,11 +263,12 @@ class NoTradeSafetyLatch:
                     component,
                     SafetyMode.NORMAL.value,
                     current.source_release_id,
-                    reason[:1000],
+                    normalized_reason,
                     timestamp.isoformat(),
                     operator,
                 ),
             )
+            _rebuild_integrity_checkpoint(db, component)
             db.commit()
         return self.state(component)
 
@@ -241,7 +287,16 @@ class NoTradeSafetyLatch:
                 """,
                 (component,),
             ).fetchall()
+            checkpoint = db.execute(
+                """
+                SELECT event_count,head_event_id,head_chain_hash
+                FROM component_safety_integrity_state WHERE component=?
+                """,
+                (component,),
+            ).fetchone()
+
         mismatches = 0
+        chain = ""
         for row in rows:
             timestamp = datetime.fromisoformat(str(row["created_ts_utc"])).astimezone(UTC)
             expected = _event_id(
@@ -252,7 +307,9 @@ class NoTradeSafetyLatch:
                 timestamp=timestamp,
                 actor=str(row["actor"]),
             )
-            mismatches += int(expected != str(row["event_id"]))
+            event_id = str(row["event_id"])
+            mismatches += int(expected != event_id)
+            chain = _chain_hash(chain, event_id)
         if mismatches:
             failures.append(f"safety_event_id_mismatches:{mismatches}")
 
@@ -271,12 +328,25 @@ class NoTradeSafetyLatch:
             failures.append("initialized_safety_state_has_no_event_history")
         elif rows and not state_matches:
             failures.append("safety_state_does_not_match_latest_event")
+
+        checkpoint_matches = False
+        if checkpoint is not None:
+            expected_head = str(rows[-1]["event_id"]) if rows else ""
+            checkpoint_matches = (
+                int(checkpoint["event_count"]) == len(rows)
+                and str(checkpoint["head_event_id"]) == expected_head
+                and str(checkpoint["head_chain_hash"]) == chain
+            )
+        if current.initialized and not checkpoint_matches:
+            failures.append("safety_integrity_checkpoint_mismatch")
+
         return SafetyLedgerIntegrityReport(
             component=component,
             initialized=current.initialized,
             events=len(rows),
             event_id_mismatches=mismatches,
             state_matches_latest_event=state_matches,
+            checkpoint_matches_history=checkpoint_matches,
             valid=not failures,
             failures=tuple(failures),
         )
