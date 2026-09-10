@@ -23,10 +23,22 @@ class SafetyLatchState:
     reason: str
     updated_ts_utc: datetime
     updated_by: str
+    initialized: bool = True
 
     @property
     def execution_allowed(self) -> bool:
-        return self.mode is SafetyMode.NORMAL
+        return self.initialized and self.mode is SafetyMode.NORMAL
+
+
+@dataclass(frozen=True, slots=True)
+class SafetyLedgerIntegrityReport:
+    component: str
+    initialized: bool
+    events: int
+    event_id_mismatches: int
+    state_matches_latest_event: bool
+    valid: bool
+    failures: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,11 +91,12 @@ class NoTradeSafetyLatch:
         if row is None:
             return SafetyLatchState(
                 component=component,
-                mode=SafetyMode.NORMAL,
+                mode=SafetyMode.NO_TRADE,
                 source_release_id="",
-                reason="default_normal_state",
+                reason="uninitialized_component_fail_closed",
                 updated_ts_utc=datetime.fromtimestamp(0, tz=UTC),
                 updated_by="system-default",
+                initialized=False,
             )
         return _row_to_state(row)
 
@@ -196,6 +209,7 @@ class NoTradeSafetyLatch:
                 VALUES (?,?,?,?,?,?)
                 ON CONFLICT(component) DO UPDATE SET
                     mode=excluded.mode,
+                    source_release_id=excluded.source_release_id,
                     reason=excluded.reason,
                     updated_ts_utc=excluded.updated_ts_utc,
                     updated_by=excluded.updated_by
@@ -211,6 +225,61 @@ class NoTradeSafetyLatch:
             )
             db.commit()
         return self.state(component)
+
+    def verify_integrity(self, component: str) -> SafetyLedgerIntegrityReport:
+        current = self.state(component)
+        failures: list[str] = []
+        if not current.initialized:
+            failures.append("safety_component_uninitialized")
+        with sqlite3.connect(self.path) as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute(
+                """
+                SELECT event_id,component,mode,source_release_id,reason,created_ts_utc,actor
+                FROM component_safety_events
+                WHERE component=? ORDER BY created_ts_utc,event_id
+                """,
+                (component,),
+            ).fetchall()
+        mismatches = 0
+        for row in rows:
+            timestamp = datetime.fromisoformat(str(row["created_ts_utc"])).astimezone(UTC)
+            expected = _event_id(
+                component=str(row["component"]),
+                mode=SafetyMode(str(row["mode"])),
+                source_release_id=str(row["source_release_id"]),
+                reason=str(row["reason"]),
+                timestamp=timestamp,
+                actor=str(row["actor"]),
+            )
+            mismatches += int(expected != str(row["event_id"]))
+        if mismatches:
+            failures.append(f"safety_event_id_mismatches:{mismatches}")
+
+        state_matches = False
+        if rows and current.initialized:
+            latest = rows[-1]
+            state_matches = (
+                current.mode.value == str(latest["mode"])
+                and current.source_release_id == str(latest["source_release_id"])
+                and current.reason == str(latest["reason"])
+                and current.updated_ts_utc
+                == datetime.fromisoformat(str(latest["created_ts_utc"])).astimezone(UTC)
+                and current.updated_by == str(latest["actor"])
+            )
+        if current.initialized and not rows:
+            failures.append("initialized_safety_state_has_no_event_history")
+        elif rows and not state_matches:
+            failures.append("safety_state_does_not_match_latest_event")
+        return SafetyLedgerIntegrityReport(
+            component=component,
+            initialized=current.initialized,
+            events=len(rows),
+            event_id_mismatches=mismatches,
+            state_matches_latest_event=state_matches,
+            valid=not failures,
+            failures=tuple(failures),
+        )
 
     def assert_execution_allowed(self, component: str) -> None:
         current = self.state(component)
@@ -279,4 +348,5 @@ def _row_to_state(row: sqlite3.Row) -> SafetyLatchState:
         reason=str(row["reason"]),
         updated_ts_utc=datetime.fromisoformat(str(row["updated_ts_utc"])).astimezone(UTC),
         updated_by=str(row["updated_by"]),
+        initialized=True,
     )
