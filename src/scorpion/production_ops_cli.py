@@ -4,14 +4,39 @@ import argparse
 import json
 from dataclasses import asdict
 
-from .hot_path_benchmark import HotPathBenchmarkPolicy, benchmark_hot_path
-from .operator_observability import build_operator_observability_snapshot
-from .production_bottleneck_audit import audit_production_bottlenecks
-from .production_chaos_drills import run_isolated_partial_outage_chaos_drills
-from .production_readiness import ProductionReadinessPolicy, evaluate_production_readiness
+from .hot_path_benchmark import (
+    HotPathBenchmarkPolicy,
+    HotPathBenchmarkReport,
+    benchmark_hot_path,
+)
+from .operator_observability import (
+    OperatorObservabilitySnapshot,
+    build_operator_observability_snapshot,
+)
+from .production_bottleneck_audit import (
+    ProductionBottleneckAuditReport,
+    audit_production_bottlenecks,
+)
+from .production_chaos_drills import (
+    PartialOutageChaosReport,
+    run_isolated_partial_outage_chaos_drills,
+)
+from .production_readiness import (
+    ProductionReadinessCertificate,
+    ProductionReadinessPolicy,
+    evaluate_production_readiness,
+)
+
+OperatorPayload = (
+    HotPathBenchmarkReport
+    | OperatorObservabilitySnapshot
+    | ProductionBottleneckAuditReport
+    | PartialOutageChaosReport
+    | ProductionReadinessCertificate
+)
 
 
-def _emit(payload: object) -> None:
+def _emit(payload: OperatorPayload) -> None:
     print(json.dumps(asdict(payload), sort_keys=True, indent=2, default=str))
 
 
