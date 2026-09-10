@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from sqlite3 import connect
 
 from .domain import RawDiscordMessage
 
@@ -21,7 +21,7 @@ ON raw_receipt_order(raw_event_id);
 def append_raw_with_receipt(path: str | Path, raw: RawDiscordMessage) -> bool:
     """Persist raw evidence, pending state and receipt order in one FULL-sync transaction."""
     now = datetime.now(UTC).isoformat()
-    with sqlite3.connect(str(path), timeout=5.0, isolation_level=None) as db:
+    with connect(str(path), timeout=5.0, isolation_level=None) as db:
         db.execute("PRAGMA foreign_keys=ON")
         db.execute("PRAGMA busy_timeout=5000")
         db.execute("PRAGMA synchronous=FULL")
