@@ -413,13 +413,17 @@ class NoTradeSafetyLatch:
         )
 
     def verify_integrity(self, component: str) -> SafetyLedgerIntegrityReport:
-        current = self.state(component)
+        effective = self.state(component)
+        sentinel = _read_sentinel(self.path, component)
         failures: list[str] = []
-        sentinel_active = self.emergency_sentinel_active(component)
-        if not current.initialized:
+        if not effective.initialized:
             failures.append("safety_component_uninitialized")
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
+            state_row = db.execute(
+                "SELECT * FROM component_safety_state WHERE component=?",
+                (component,),
+            ).fetchone()
             rows = db.execute(
                 """
                 SELECT event_id,component,mode,source_release_id,reason,created_ts_utc,actor
@@ -455,17 +459,18 @@ class NoTradeSafetyLatch:
             failures.append(f"safety_event_id_mismatches:{mismatches}")
 
         state_matches = False
-        if rows and current.initialized:
+        materialized = _row_to_state(state_row) if state_row is not None else None
+        if rows and materialized is not None:
             latest = rows[-1]
             state_matches = (
-                current.mode.value == str(latest["mode"])
-                and current.source_release_id == str(latest["source_release_id"])
-                and current.reason == str(latest["reason"])
-                and current.updated_ts_utc
+                materialized.mode.value == str(latest["mode"])
+                and materialized.source_release_id == str(latest["source_release_id"])
+                and materialized.reason == str(latest["reason"])
+                and materialized.updated_ts_utc
                 == datetime.fromisoformat(str(latest["created_ts_utc"])).astimezone(UTC)
-                and current.updated_by == str(latest["actor"])
+                and materialized.updated_by == str(latest["actor"])
             )
-        if current.initialized and not rows:
+        if state_row is not None and not rows:
             failures.append("initialized_safety_state_has_no_event_history")
         elif rows and not state_matches:
             failures.append("safety_state_does_not_match_latest_event")
@@ -478,19 +483,30 @@ class NoTradeSafetyLatch:
                 and str(checkpoint["head_event_id"]) == expected_head
                 and str(checkpoint["head_chain_hash"]) == chain
             )
-        if current.initialized and not checkpoint_matches:
+        if state_row is not None and not checkpoint_matches:
             failures.append("safety_integrity_checkpoint_mismatch")
 
         if rows:
-            latest_mode = SafetyMode(str(rows[-1]["mode"]))
-            if latest_mode is SafetyMode.NO_TRADE and not sentinel_active:
+            latest = rows[-1]
+            latest_mode = SafetyMode(str(latest["mode"]))
+            if latest_mode is SafetyMode.NO_TRADE and sentinel is None:
                 failures.append("no_trade_emergency_sentinel_missing")
-            if latest_mode is SafetyMode.NORMAL and sentinel_active:
+            if latest_mode is SafetyMode.NORMAL and sentinel is not None:
                 failures.append("unexpected_no_trade_emergency_sentinel")
+            if latest_mode is SafetyMode.NO_TRADE and sentinel is not None:
+                sentinel_matches = (
+                    sentinel.source_release_id == str(latest["source_release_id"])
+                    and sentinel.reason == str(latest["reason"])
+                    and sentinel.updated_ts_utc
+                    == datetime.fromisoformat(str(latest["created_ts_utc"])).astimezone(UTC)
+                    and sentinel.updated_by == str(latest["actor"])
+                )
+                if not sentinel_matches:
+                    failures.append("no_trade_emergency_sentinel_payload_mismatch")
 
         return SafetyLedgerIntegrityReport(
             component=component,
-            initialized=current.initialized,
+            initialized=materialized is not None,
             events=len(rows),
             event_id_mismatches=mismatches,
             state_matches_latest_event=state_matches,
