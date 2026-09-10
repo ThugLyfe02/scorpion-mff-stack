@@ -276,7 +276,7 @@ def build_operator_observability_snapshot(
         state = OperatorSystemState.READY
 
     actions: list[str] = []
-    if any("normalized_ingress_consumer_unhealthy" in item for item in blockers):
+    if any("ingress_consumer_not_alive" in item for item in blockers):
         actions.append("RECOVER_NORMALIZED_CONSUMER")
     if bottleneck.snapshot.pending_raw:
         actions.append("DRAIN_DURABLE_RAW_BACKLOG")
