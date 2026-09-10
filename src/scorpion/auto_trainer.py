@@ -13,7 +13,6 @@ from typing import Protocol
 from .drift_retraining import ChallengerRetrainingPlan
 from .trainable_model import (
     DeterminismLevel,
-    FeatureVector,
     FittedModel,
     ModelArtifact,
     ModelPrediction,
@@ -204,8 +203,17 @@ def build_training_split(
         for item in pre_validation_post
         if item.sample_id not in used_post_ids and item.sample_id not in purged_ids
     )
-    anchor = pre_drift[-plan.pre_drift_anchor_samples :] if plan.pre_drift_anchor_samples else ()
-    train = tuple(sorted((*anchor, *post_train), key=lambda item: (item.observed_ts_utc, item.sample_id)))
+    anchor = (
+        pre_drift[-plan.pre_drift_anchor_samples :]
+        if plan.pre_drift_anchor_samples
+        else ()
+    )
+    train = tuple(
+        sorted(
+            (*anchor, *post_train),
+            key=lambda item: (item.observed_ts_utc, item.sample_id),
+        )
+    )
 
     if train and max(item.observed_ts_utc for item in train) > cutoff:
         raise ValueError("training split violates purge boundary")
@@ -308,6 +316,38 @@ def _report_id(
     )
 
 
+def _empty_report(
+    *,
+    run_id: str,
+    model: TrainableModel,
+    split: TrainingSplitManifest,
+    training_samples: int,
+    validation_samples: int,
+    status: TrainingRunStatus,
+    failures: tuple[str, ...],
+    created: datetime,
+) -> TrainingRunReport:
+    return TrainingRunReport(
+        run_id=run_id,
+        model_id=model.model_id,
+        trainer_version=model.trainer_version,
+        task=model.task.value,
+        dataset_fingerprint=split.dataset_fingerprint,
+        split_hash=split.split_hash,
+        feature_schema_hash=split.feature_schema_hash,
+        training_samples=training_samples,
+        validation_samples=validation_samples,
+        artifact_sha256="",
+        artifact_loader_key="",
+        artifact_model_version="",
+        metrics=(),
+        exact_reproducibility_verified=False,
+        status=status,
+        failures=failures,
+        created_ts_utc=created,
+    )
+
+
 def run_auto_training(
     path: str | Path,
     *,
@@ -343,11 +383,15 @@ def run_auto_training(
             f"validation_samples:{len(validation)}<{policy.minimum_validation_samples}"
         )
     if failures:
-        report = TrainingRunReport(
-            run_id, model.model_id, model.trainer_version, model.task.value,
-            split.dataset_fingerprint, split.split_hash, split.feature_schema_hash,
-            len(train), len(validation), "", "", "", (), False,
-            TrainingRunStatus.REJECTED_DATA, tuple(failures), created,
+        report = _empty_report(
+            run_id=run_id,
+            model=model,
+            split=split,
+            training_samples=len(train),
+            validation_samples=len(validation),
+            status=TrainingRunStatus.REJECTED_DATA,
+            failures=tuple(failures),
+            created=created,
         )
         _persist_report(path, report)
         return AutoTrainingOutcome(report, None, split)
@@ -362,11 +406,15 @@ def run_auto_training(
         )
     except Exception as exc:
         failures.append(f"fit_or_artifact_failed:{type(exc).__name__}")
-        report = TrainingRunReport(
-            run_id, model.model_id, model.trainer_version, model.task.value,
-            split.dataset_fingerprint, split.split_hash, split.feature_schema_hash,
-            len(train), len(validation), "", "", "", (), False,
-            TrainingRunStatus.FIT_FAILED, tuple(failures), created,
+        report = _empty_report(
+            run_id=run_id,
+            model=model,
+            split=split,
+            training_samples=len(train),
+            validation_samples=len(validation),
+            status=TrainingRunStatus.FIT_FAILED,
+            failures=tuple(failures),
+            created=created,
         )
         _persist_report(path, report)
         return AutoTrainingOutcome(report, None, split)
@@ -393,7 +441,11 @@ def run_auto_training(
         for item in metric_results
         if not item.passed
     )
-    status = TrainingRunStatus.SHADOW_READY if not failures else TrainingRunStatus.VALIDATION_FAILED
+    status = (
+        TrainingRunStatus.SHADOW_READY
+        if not failures
+        else TrainingRunStatus.VALIDATION_FAILED
+    )
     report = TrainingRunReport(
         run_id=run_id,
         model_id=model.model_id,

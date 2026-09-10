@@ -7,11 +7,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Protocol, TypeAlias, runtime_checkable
+from typing import Protocol, runtime_checkable
 
-ScalarValue: TypeAlias = str | int | float | bool
-TargetValue: TypeAlias = str | int | float | bool
-FeatureVector: TypeAlias = tuple[tuple[str, ScalarValue], ...]
+type ScalarValue = str | int | float | bool
+type TargetValue = str | int | float | bool
+type FeatureVector = tuple[tuple[str, ScalarValue], ...]
 
 
 class TaskKind(StrEnum):
@@ -116,9 +116,10 @@ class ModelPrediction:
 
     def __post_init__(self) -> None:
         _validate_scalar(self.value, "prediction")
-        if self.confidence is not None:
-            if not math.isfinite(self.confidence) or not 0 <= self.confidence <= 1:
-                raise ValueError("confidence must be finite and in [0,1]")
+        if self.confidence is not None and (
+            not math.isfinite(self.confidence) or not 0 <= self.confidence <= 1
+        ):
+            raise ValueError("confidence must be finite and in [0,1]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,7 +174,7 @@ class TrainableModel(Protocol):
     def fit(self, examples: Sequence[TrainingExample], *, seed: int) -> FittedModel: ...
 
 
-FitCallable: TypeAlias = Callable[[Sequence[TrainingExample], int], FittedModel]
+type FitCallable = Callable[[Sequence[TrainingExample], int], FittedModel]
 
 
 @dataclass(frozen=True, slots=True)
