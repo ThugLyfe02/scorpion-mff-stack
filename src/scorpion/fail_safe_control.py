@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -86,6 +88,93 @@ def _chain_hash(previous: str, event_id: str) -> str:
     return hashlib.sha256(f"{previous}|{event_id}".encode()).hexdigest()
 
 
+def _sentinel_path(database_path: str | Path, component: str) -> Path:
+    suffix = hashlib.sha256(component.encode()).hexdigest()[:20]
+    return Path(f"{database_path}.{suffix}.NO_TRADE")
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, os.O_RDONLY | flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_sentinel(
+    database_path: str | Path,
+    *,
+    component: str,
+    source_release_id: str,
+    reason: str,
+    actor: str,
+    timestamp: datetime,
+) -> None:
+    target = _sentinel_path(database_path, component)
+    payload = json.dumps(
+        {
+            "version": "no-trade-sentinel-v1",
+            "component": component,
+            "source_release_id": source_release_id,
+            "reason": reason,
+            "actor": actor,
+            "timestamp": timestamp.astimezone(UTC).isoformat(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, target)
+    _fsync_directory(target.parent)
+
+
+def _remove_sentinel(database_path: str | Path, component: str) -> None:
+    target = _sentinel_path(database_path, component)
+    if not target.exists():
+        return
+    target.unlink()
+    _fsync_directory(target.parent)
+
+
+def _read_sentinel(database_path: str | Path, component: str) -> SafetyLatchState | None:
+    target = _sentinel_path(database_path, component)
+    if not target.exists():
+        return None
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("component") != component:
+            raise ValueError("sentinel component mismatch")
+        timestamp = datetime.fromisoformat(str(payload["timestamp"])).astimezone(UTC)
+        return SafetyLatchState(
+            component=component,
+            mode=SafetyMode.NO_TRADE,
+            source_release_id=str(payload.get("source_release_id", "")),
+            reason=str(payload.get("reason", "external_no_trade_sentinel")),
+            updated_ts_utc=timestamp,
+            updated_by=str(payload.get("actor", "external-no-trade-sentinel")),
+            initialized=True,
+        )
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        return SafetyLatchState(
+            component=component,
+            mode=SafetyMode.NO_TRADE,
+            source_release_id="",
+            reason="external_no_trade_sentinel_unreadable",
+            updated_ts_utc=datetime.fromtimestamp(0, tz=UTC),
+            updated_by="external-no-trade-sentinel",
+            initialized=True,
+        )
+
+
 def _rebuild_integrity_checkpoint(db: sqlite3.Connection, component: str) -> None:
     rows = db.execute(
         """
@@ -114,16 +203,27 @@ def _rebuild_integrity_checkpoint(db: sqlite3.Connection, component: str) -> Non
 
 
 class NoTradeSafetyLatch:
-    """Durable fail-closed latch. Automation may trip it; only an operator may clear it."""
+    """Durable fail-closed latch with an independent emergency sentinel.
+
+    Risk-decreasing trips write the fsync'd sentinel before touching SQLite. Risk-increasing clears
+    commit the audited SQLite NORMAL transition first and remove the sentinel last. A crash or DB
+    outage at either boundary therefore leaves execution blocked rather than accidentally enabled.
+    """
 
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
         with sqlite3.connect(self.path) as db:
             db.executescript(_SCHEMA)
 
+    def emergency_sentinel_active(self, component: str) -> bool:
+        return _sentinel_path(self.path, component).exists()
+
     def state(self, component: str) -> SafetyLatchState:
         if not component.strip():
             raise ValueError("component is required")
+        sentinel = _read_sentinel(self.path, component)
+        if sentinel is not None:
+            return sentinel
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
             row = db.execute(
@@ -155,6 +255,14 @@ class NoTradeSafetyLatch:
             raise ValueError("component, reason and actor are required")
         timestamp = (now or datetime.now(UTC)).astimezone(UTC)
         normalized_reason = _normalize_reason(reason)
+        _write_sentinel(
+            self.path,
+            component=component,
+            source_release_id=source_release_id,
+            reason=normalized_reason,
+            actor=actor,
+            timestamp=timestamp,
+        )
         event_id = _event_id(
             component=component,
             mode=SafetyMode.NO_TRADE,
@@ -276,11 +384,38 @@ class NoTradeSafetyLatch:
             )
             _rebuild_integrity_checkpoint(db, component)
             db.commit()
+        _remove_sentinel(self.path, component)
         return self.state(component)
+
+    def rebind_normal_release(
+        self,
+        component: str,
+        *,
+        expected_source_release_id: str,
+        new_source_release_id: str,
+        operator: str,
+        reason: str,
+        now: datetime | None = None,
+    ) -> SafetyLatchState:
+        if not new_source_release_id.strip():
+            raise ValueError("new_source_release_id is required")
+        current = self.state(component)
+        if not current.execution_allowed:
+            raise ValueError("safety latch must be verified NORMAL before release rebind")
+        if current.source_release_id != expected_source_release_id:
+            raise ValueError("safety latch source release changed before rebind")
+        return self.clear_no_trade(
+            component,
+            operator=operator,
+            reason=reason,
+            source_release_id=new_source_release_id,
+            now=now,
+        )
 
     def verify_integrity(self, component: str) -> SafetyLedgerIntegrityReport:
         current = self.state(component)
         failures: list[str] = []
+        sentinel_active = self.emergency_sentinel_active(component)
         if not current.initialized:
             failures.append("safety_component_uninitialized")
         with sqlite3.connect(self.path) as db:
@@ -345,6 +480,13 @@ class NoTradeSafetyLatch:
             )
         if current.initialized and not checkpoint_matches:
             failures.append("safety_integrity_checkpoint_mismatch")
+
+        if rows:
+            latest_mode = SafetyMode(str(rows[-1]["mode"]))
+            if latest_mode is SafetyMode.NO_TRADE and not sentinel_active:
+                failures.append("no_trade_emergency_sentinel_missing")
+            if latest_mode is SafetyMode.NORMAL and sentinel_active:
+                failures.append("unexpected_no_trade_emergency_sentinel")
 
         return SafetyLedgerIntegrityReport(
             component=component,
@@ -413,7 +555,7 @@ def _event_id(
             actor,
         )
     )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return hashlib.sha256(material.encode()).hexdigest()
 
 
 def _row_to_state(row: sqlite3.Row) -> SafetyLatchState:
