@@ -88,6 +88,7 @@ class ProductionBottleneckSnapshot:
     active_rollout_conflicts: int
     safety_state_conflicts: int
     expired_ready_dossiers: int
+    ingress_consumer_alive: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,22 +150,31 @@ def _pending_raw(db: sqlite3.Connection, *, now: datetime) -> tuple[int, float]:
     return count, max(0.0, (now - oldest_ts).total_seconds())
 
 
-def _queue_utilization(db: sqlite3.Connection) -> float:
+def _ingress_metadata(db: sqlite3.Connection) -> dict[str, object]:
     if not _table_exists(db, "heartbeats"):
-        return 0.0
+        return {}
     row = db.execute(
         "SELECT metadata_json FROM heartbeats WHERE component='discord-ingress-queue'"
     ).fetchone()
     if row is None:
-        return 0.0
+        return {}
     try:
-        metadata = json.loads(str(row[0]))
+        payload = json.loads(str(row[0]))
     except json.JSONDecodeError:
-        return 1.0
+        return {"utilization": 1.0, "consumer_alive": False}
+    return payload if isinstance(payload, dict) else {"utilization": 1.0, "consumer_alive": False}
+
+
+def _queue_utilization(metadata: dict[str, object]) -> float:
     value = metadata.get("utilization", 0.0)
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return 1.0
     return max(0.0, float(value))
+
+
+def _consumer_alive(metadata: dict[str, object]) -> bool:
+    value = metadata.get("consumer_alive")
+    return value is True
 
 
 def _latency_p95(db: sqlite3.Connection, *, column: str, limit: int) -> float:
@@ -250,7 +260,12 @@ def _safety_conflicts(db: sqlite3.Connection) -> int:
         SELECT COUNT(*)
         FROM component_releases r
         LEFT JOIN component_safety_state s ON s.component=r.component
-        WHERE r.state='ACTIVE' AND (s.component IS NULL OR s.mode<>'NORMAL')
+        WHERE r.state='ACTIVE'
+          AND (
+              s.component IS NULL
+              OR s.mode<>'NORMAL'
+              OR s.source_release_id<>r.release_id
+          )
         """
     ).fetchone()
     return int(row[0]) if row is not None else 0
@@ -351,7 +366,9 @@ def audit_production_bottlenecks(
             if _table_exists(db, "execution_delivery_ledger")
             else 0
         )
-        queue_utilization = _queue_utilization(db)
+        ingress_metadata = _ingress_metadata(db)
+        queue_utilization = _queue_utilization(ingress_metadata)
+        ingress_consumer_alive = _consumer_alive(ingress_metadata)
         pipeline_p95 = _pipeline_p95(db, limit=policy.sample_limit)
         db_precommit_p95 = _latency_p95(
             db,
@@ -387,6 +404,7 @@ def audit_production_bottlenecks(
                 "ROLLBACK_PENDING",
                 "ROLLBACK_VERIFYING",
                 "RECOVERED_GUARDED",
+                "RESUME_PENDING",
             ),
         )
         safety_conflicts = _safety_conflicts(db)
@@ -411,6 +429,7 @@ def audit_production_bottlenecks(
         active_rollout_conflicts=rollout_conflicts,
         safety_state_conflicts=safety_conflicts,
         expired_ready_dossiers=expired_dossiers,
+        ingress_consumer_alive=ingress_consumer_alive,
     )
     findings: list[BottleneckFinding] = []
 
@@ -423,6 +442,16 @@ def audit_production_bottlenecks(
         observed=queue_utilization,
         threshold=policy.maximum_queue_utilization,
         detail="durable ingress queue pressure risks callback backpressure",
+    )
+    _find(
+        findings,
+        condition=not ingress_consumer_alive,
+        code="ingress_consumer_not_alive",
+        surface="ingress",
+        severity=BottleneckSeverity.CRITICAL,
+        observed=0.0,
+        threshold=1.0,
+        detail="ingress is capture-only or consumer liveness metadata is absent",
     )
     _find(
         findings,
@@ -570,7 +599,7 @@ def audit_production_bottlenecks(
         ).code
     ready = not any(item.blocks_rollout for item in findings)
     material = {
-        "version": "production-bottleneck-audit-v2",
+        "version": "production-bottleneck-audit-v3",
         "generated_ts_utc": timestamp.isoformat(),
         "snapshot": asdict(snapshot),
         "findings": [asdict(item) for item in findings],
