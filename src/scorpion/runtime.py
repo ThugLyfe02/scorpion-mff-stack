@@ -8,6 +8,7 @@ import time
 
 from .config import RuntimeSettings
 from .domain import RawDiscordMessage
+from .durable_ingress import append_raw_with_receipt
 from .ingest.discord import DiscordSignalClient
 from .pipeline import Pipeline
 from .resilience_watch import ResilienceController
@@ -82,9 +83,10 @@ async def run_discord() -> None:
     shutdown_started = asyncio.Event()
 
     async def sink(raw: RawDiscordMessage) -> None:
-        # Keep the gateway loop responsive while preserving serialized durable receipt writes.
+        # Raw evidence, PENDING state and receipt sequence cross one serialized FULL-sync
+        # transaction before any normalized work is scheduled.
         async with durable_write_lock:
-            inserted = await asyncio.to_thread(store.append_raw, raw)
+            inserted = await asyncio.to_thread(append_raw_with_receipt, store.path, raw)
         if not inserted:
             await heartbeats.publish(
                 "discord-ingress-queue",
@@ -96,8 +98,6 @@ async def run_discord() -> None:
             )
             return
 
-        # If normalized processing has halted, continue lossless capture without filling a dead
-        # in-memory queue. Startup recovery will rebuild receipt order and process the durable tail.
         if consumer_task is not None and consumer_task.done():
             await heartbeats.publish(
                 "discord-ingress-queue",
@@ -126,7 +126,13 @@ async def run_discord() -> None:
             raw = await ingress.get()
             try:
                 pipeline.resilience_assessment = controller.current()
-                await pipeline.handle_persisted(raw)
+                # Receipt order was atomically bound in sink; avoid a second SQLite transaction.
+                await asyncio.to_thread(
+                    pipeline._process_serialized,
+                    raw,
+                    persist_raw=False,
+                    register_receipt=False,
+                )
                 await heartbeats.publish(
                     "discord-ingress-queue",
                     status="processed",
@@ -139,8 +145,6 @@ async def run_discord() -> None:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                # The raw revision is already durable. Stop normalized mutation and leave all
-                # remaining receipts recoverable while the gateway continues capture-only mode.
                 await asyncio.to_thread(
                     store.set_halt,
                     True,
@@ -196,8 +200,6 @@ async def run_discord() -> None:
             queue_depth=ingress.qsize(),
         )
         await client.close()
-        # Already-durable messages get a short drain window. Anything left remains in
-        # raw_processing and is deterministically recovered at the next startup.
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(ingress.join(), timeout=5.0)
         consumer_task.cancel()

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scorpion-mff"
-version = "0.23.0"
-description = "Deterministic MFF control plane with evidence-bound rollout/rollback state machines, production bottleneck and conflict auditing, partial-outage chaos drills, nonblocking deterministic ingestion, formal promotion evidence DAGs, fail-closed kill-switch recovery, release-bound exposure-aware live sizing, compound sizing stress, adaptive control audits, leakage-safe auto-training, shadow lifecycle, impact-adjusted liquidity capacity, purged walk-forward validation, and corroborated drift retraining."
+version = "0.24.0"
+description = "Deterministic MFF control plane with production operator observability, short-lived readiness certificates, isolated hot-path latency budgets, atomic durable receipt ordering, evidence-bound rollout/rollback state machines, production bottleneck auditing, partial-outage chaos drills, dual-channel NO_TRADE persistence, formal promotion evidence, leakage-safe adaptive training, and verified recovery."
 requires-python = ">=3.13"
 dependencies = [
   "discord.py>=2.4,<3",
@@ -51,6 +51,9 @@ scorpion-evolution = "scorpion.evolution_cli:evolution_main"
 scorpion-opra-normalize = "scorpion.opra_bridge:opra_normalize_main"
 scorpion-ingest = "scorpion.runtime:ingest_main"
 scorpion-prod-audit = "scorpion.production_ops_cli:bottleneck_audit_main"
+scorpion-prod-status = "scorpion.production_ops_cli:operator_status_main"
+scorpion-hot-benchmark = "scorpion.production_ops_cli:hot_path_benchmark_main"
+scorpion-prod-ready = "scorpion.production_ops_cli:production_readiness_main"
 scorpion-chaos-drill = "scorpion.production_ops_cli:partial_outage_drill_main"
 
 [tool.hatch.build.targets.wheel]
