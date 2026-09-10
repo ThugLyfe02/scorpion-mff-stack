@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import sqlite3
@@ -73,6 +74,21 @@ class RolloutHealthEvidence:
     @property
     def rollout_ready(self) -> bool:
         return self._base_healthy() and self.bottleneck_audit.ready_for_rollout
+
+    @property
+    def rollback_authorization_ready(self) -> bool:
+        tolerated = {
+            "active_release_safety_conflict",
+            "ingress_consumer_not_alive",
+            "pending_raw_backlog",
+            "pending_raw_age",
+        }
+        blocking = tuple(
+            item
+            for item in self.bottleneck_audit.findings
+            if item.blocks_rollout and item.code not in tolerated
+        )
+        return self.state_replay_verified and self.safety_integrity_valid and not blocking
 
     @property
     def recovery_ready(self) -> bool:
@@ -480,12 +496,15 @@ class DeploymentStateMachine:
                 db.execute("ROLLBACK")
                 raise ValueError("candidate release is not rollout-eligible")
             safety = db.execute(
-                "SELECT mode FROM component_safety_state WHERE component=?",
+                "SELECT mode,source_release_id FROM component_safety_state WHERE component=?",
                 (component,),
             ).fetchone()
             if safety is None or SafetyMode(str(safety["mode"])) is not SafetyMode.NORMAL:
                 db.execute("ROLLBACK")
                 raise ValueError("component safety latch is not initialized NORMAL")
+            if previous_release_id and str(safety["source_release_id"]) != previous_release_id:
+                db.execute("ROLLBACK")
+                raise ValueError("component safety latch is not bound to predecessor release")
             self._expire_prepared(db, component, timestamp)
             placeholders = ",".join("?" for _ in _NONTERMINAL)
             existing = db.execute(
@@ -621,9 +640,13 @@ class DeploymentStateMachine:
             raise ValueError("current bottleneck audit is stale or future-dated")
 
         current = self.get(rollout_id)
-        safety_integrity = NoTradeSafetyLatch(self.path).verify_integrity(current.component)
+        latch = NoTradeSafetyLatch(self.path)
+        safety_integrity = latch.verify_integrity(current.component)
         if not safety_integrity.valid:
             raise ValueError("component safety ledger integrity is invalid")
+        component = current.component
+        candidate = current.candidate_release_id
+        previous = current.previous_release_id
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
@@ -657,16 +680,16 @@ class DeploymentStateMachine:
                 )
                 db.execute("COMMIT")
                 raise ValueError("production authorization expired before activation")
-            component = str(row["component"])
-            candidate = str(row["candidate_release_id"])
-            previous = str(row["previous_release_id"])
             safety = db.execute(
-                "SELECT mode FROM component_safety_state WHERE component=?",
+                "SELECT mode,source_release_id FROM component_safety_state WHERE component=?",
                 (component,),
             ).fetchone()
             if safety is None or SafetyMode(str(safety["mode"])) is not SafetyMode.NORMAL:
                 db.execute("ROLLBACK")
                 raise ValueError("component safety latch is not NORMAL")
+            if str(safety["source_release_id"]) != previous:
+                db.execute("ROLLBACK")
+                raise ValueError("safety latch predecessor changed after rollout preparation")
             active = db.execute(
                 "SELECT release_id FROM component_releases WHERE component=? AND state='ACTIVE'",
                 (component,),
@@ -745,6 +768,35 @@ class DeploymentStateMachine:
                 now=timestamp,
             )
             db.execute("COMMIT")
+
+        try:
+            rebound = latch.rebind_normal_release(
+                component,
+                expected_source_release_id=previous,
+                new_source_release_id=candidate,
+                operator=operator,
+                reason="bind safety state to newly active guarded rollout release",
+                now=timestamp,
+            )
+            if not rebound.execution_allowed or rebound.source_release_id != candidate:
+                raise RuntimeError("safety latch did not bind activated release")
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                self.halt(
+                    rollout_id,
+                    reason=f"activation_safety_rebind_failed:{type(exc).__name__}",
+                    actor="deployment-state-machine",
+                    now=timestamp,
+                )
+            with contextlib.suppress(Exception):
+                latch.trip_no_trade(
+                    component,
+                    reason="activation_safety_rebind_failed",
+                    source_release_id=candidate,
+                    actor="deployment-state-machine",
+                    now=timestamp,
+                )
+            raise RuntimeError("failed to bind safety latch to activated release") from exc
         return self.get(rollout_id)
 
     def mark_stable(
@@ -769,8 +821,13 @@ class DeploymentStateMachine:
         current = self.get(rollout_id)
         latch = NoTradeSafetyLatch(self.path)
         safety_integrity = latch.verify_integrity(current.component)
-        if not safety_integrity.valid or not latch.state(current.component).execution_allowed:
-            raise ValueError("component safety state is not verified NORMAL")
+        safety_state = latch.state(current.component)
+        if (
+            not safety_integrity.valid
+            or not safety_state.execution_allowed
+            or safety_state.source_release_id != current.active_release_id
+        ):
+            raise ValueError("component safety state is not bound to active release")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
@@ -948,8 +1005,8 @@ class DeploymentStateMachine:
         timestamp = (now or datetime.now(UTC)).astimezone(UTC)
         if not operator.strip():
             raise ValueError("operator identity is required")
-        if not health.recovery_ready:
-            raise ValueError("rollback readiness evidence is not healthy")
+        if not health.rollback_authorization_ready:
+            raise ValueError("rollback authorization evidence is not safe")
         if not _health_fresh(
             health,
             now=timestamp,
@@ -1244,7 +1301,11 @@ class DeploymentStateMachine:
                 source_release_id=rollback.target_release_id,
                 now=timestamp,
             )
-            if not cleared.execution_allowed or cleared.source_release_id != rollback.target_release_id:
+            binding_ok = (
+                cleared.execution_allowed
+                and cleared.source_release_id == rollback.target_release_id
+            )
+            if not binding_ok:
                 raise RuntimeError("safety latch did not bind recovered release")
             with self._connect() as db:
                 db.execute("BEGIN IMMEDIATE")
