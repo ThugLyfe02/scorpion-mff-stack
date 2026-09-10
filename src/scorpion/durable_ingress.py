@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from .domain import RawDiscordMessage
 
 
@@ -16,7 +14,7 @@ ON raw_receipt_order(raw_event_id);
 """
 
 
-def append_raw_with_receipt(path: str | Path, raw: RawDiscordMessage) -> bool:
+def append_raw_with_receipt(path: object, raw: RawDiscordMessage) -> bool:
     """Persist raw evidence, pending state and receipt order in one FULL-sync transaction."""
     import sqlite3
 
