@@ -152,7 +152,8 @@ def test_operator_observability_exposes_exact_release_safety_and_consumer_health
     _seed_liveness(path, status="capture_only", consumer_alive=False)
     capture_only = build_operator_observability_snapshot(path, now=NOW)
     assert capture_only.system_state is OperatorSystemState.FAIL_CLOSED
-    assert any("normalized_ingress_consumer_unhealthy" in item for item in capture_only.blockers)
+    assert any("ingress_consumer_not_alive" in item for item in capture_only.blockers)
+    assert "RECOVER_NORMALIZED_CONSUMER" in capture_only.next_actions
 
 
 def test_operator_observability_detects_release_safety_split_brain(tmp_path):
