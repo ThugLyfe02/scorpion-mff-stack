@@ -31,7 +31,12 @@ class SizingStressScenario:
     def __post_init__(self) -> None:
         if not self.name.strip():
             raise ValueError("scenario name is required")
-        for name in ("quote_age_multiplier", "decision_latency_multiplier", "capacity_multiplier"):
+        multipliers = (
+            "quote_age_multiplier",
+            "decision_latency_multiplier",
+            "capacity_multiplier",
+        )
+        for name in multipliers:
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} cannot be negative")
 
@@ -133,7 +138,11 @@ def stress_test_live_sizing_envelope(
         more_permissive = decision.hard_ceiling_fraction > baseline.hard_ceiling_fraction + 1e-15
         if more_permissive:
             monotonicity.append(scenario.name)
-        if baseline.status is LiveSizingStatus.BLOCKED and decision.status is LiveSizingStatus.WITHIN_OPERATOR_LIMITS:
+        blocked_to_allowed = (
+            baseline.status is LiveSizingStatus.BLOCKED
+            and decision.status is LiveSizingStatus.WITHIN_OPERATOR_LIMITS
+        )
+        if blocked_to_allowed:
             unsafe_permits.append(scenario.name)
         points.append(
             SizingStressPoint(
