@@ -1,22 +1,40 @@
+from datetime import datetime
 from typing import Protocol
 
 
-class _IsoTimestamp(Protocol):
-    def isoformat(self) -> str: ...
-
-
 class DurableRawMessage(Protocol):
-    revision_id: str
-    message_id: str
-    guild_id: str
-    channel_id: str
-    author_id: str
-    source_ts_utc: _IsoTimestamp
-    received_ts_utc: _IsoTimestamp
-    edited_ts_utc: _IsoTimestamp | None
-    referenced_message_id: str | None
-    content: str
-    content_sha256: str
+    @property
+    def revision_id(self) -> str: ...
+
+    @property
+    def message_id(self) -> str: ...
+
+    @property
+    def guild_id(self) -> str: ...
+
+    @property
+    def channel_id(self) -> str: ...
+
+    @property
+    def author_id(self) -> str: ...
+
+    @property
+    def source_ts_utc(self) -> datetime: ...
+
+    @property
+    def received_ts_utc(self) -> datetime: ...
+
+    @property
+    def edited_ts_utc(self) -> datetime | None: ...
+
+    @property
+    def referenced_message_id(self) -> str | None: ...
+
+    @property
+    def content(self) -> str: ...
+
+    @property
+    def content_sha256(self) -> str: ...
 
 
 _RECEIPT_SCHEMA = """
