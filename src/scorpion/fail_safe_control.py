@@ -83,7 +83,7 @@ def _normalize_reason(reason: str) -> str:
 
 
 def _chain_hash(previous: str, event_id: str) -> str:
-    return hashlib.sha256(f"{previous}|{event_id}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{previous}|{event_id}".encode()).hexdigest()
 
 
 def _rebuild_integrity_checkpoint(db: sqlite3.Connection, component: str) -> None:
