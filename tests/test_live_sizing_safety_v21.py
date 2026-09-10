@@ -84,6 +84,7 @@ def _state() -> LiveRiskState:
         runtime_certified=True,
         canary_healthy=True,
         drift_active=False,
+        active_release_id="release-v21",
     )
 
 
@@ -157,3 +158,22 @@ def test_sizing_decision_identity_changes_when_risk_state_changes():
         policy=_policy(),
     )
     assert first.decision_id != second.decision_id
+
+
+def test_live_sizing_rejects_stale_release_identity_and_reserves_exposure_headroom():
+    mismatched = evaluate_live_sizing_request(
+        _request(),
+        replace(_state(), active_release_id="release-new"),
+        policy=_policy(),
+    )
+    assert mismatched.status is LiveSizingStatus.BLOCKED
+    assert "sizing_request_release_mismatch" in mismatched.failures
+
+    tight = evaluate_live_sizing_request(
+        _request(0.01),
+        replace(_state(), gross_exposure_fraction=0.495),
+        policy=_policy(),
+    )
+    assert tight.hard_ceiling_fraction == 0.0050000000000000044
+    assert tight.portfolio_headroom_ceiling_fraction == 0.0050000000000000044
+    assert tight.status is LiveSizingStatus.BLOCKED
