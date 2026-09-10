@@ -9,10 +9,7 @@ from pathlib import Path
 from . import _deployment_state_machine_core as _core
 from ._deployment_state_machine_core import (
     DeploymentStateMachinePolicy,
-    RollbackRecord,
     RollbackState,
-    RolloutHealthEvidence,
-    RolloutIntegrityReport,
     RolloutRecord,
     RolloutState,
 )
@@ -470,4 +467,5 @@ def __getattr__(name: str) -> object:
     return getattr(_core, name)
 
 
-setattr(_core, "DeploymentStateMachine", DeploymentStateMachine)
+_CORE_DEPLOYMENT_CLASS = "DeploymentStateMachine"
+setattr(_core, _CORE_DEPLOYMENT_CLASS, DeploymentStateMachine)
