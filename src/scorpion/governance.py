@@ -16,6 +16,7 @@ from .hyperparameter_plateau import HyperparameterPlateauReport
 from .incremental_oof_value import IncrementalOOFReport
 from .label_consensus import LabelConsensusReport
 from .label_noise_audit import LabelNoiseReport
+from .liquidity_capacity import LiquidityCapacityReport
 from .mondrian_conformal import MondrianEvaluation
 from .nested_temporal_selection import NestedSelectionReport
 from .oof_stacking import CrossFittedStackingReport
@@ -80,7 +81,9 @@ class PromotionEvidence:
     safe_policy_improvement: SafePolicyImprovementReport | None = None
     conditional_policy_safety: ConditionalPolicySafetyReport | None = None
     cost_adjusted_policy_value: CostAdjustedPolicyValueReport | None = None
+    liquidity_capacity: LiquidityCapacityReport | None = None
     require_economic_safety_gates: bool = False
+    require_capacity_gate: bool = False
     return_distribution: DistributionDominanceReport | None = None
     bayesian_changepoint: BayesianChangePointReport | None = None
 
@@ -284,6 +287,14 @@ def evaluate_promotion(evidence: PromotionEvidence) -> PromotionDecision:
         failures.extend(
             f"cost_adjusted_value:{item}"
             for item in evidence.cost_adjusted_policy_value.failures
+        )
+    if evidence.require_capacity_gate and evidence.liquidity_capacity is None:
+        failures.append("liquidity_capacity_required_but_missing")
+    if evidence.liquidity_capacity is not None and not evidence.liquidity_capacity.robust:
+        failures.append("liquidity_capacity_not_robust")
+        failures.append(
+            "liquidity_capacity:max_robust_clip_multiplier="
+            f"{evidence.liquidity_capacity.max_robust_clip_multiplier:.6f}"
         )
     if evidence.return_distribution is not None and not evidence.return_distribution.qualified:
         failures.append("return_distribution_dominance_not_qualified")
