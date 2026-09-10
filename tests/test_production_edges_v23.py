@@ -553,7 +553,7 @@ def test_partial_outage_chaos_drills_fail_closed(tmp_path):
         now=NOW,
     )
     assert report.passed is True
-    assert len(report.cases) == 4
+    assert len(report.cases) == 6
     assert all(case.fail_closed_observed for case in report.cases)
 
 
