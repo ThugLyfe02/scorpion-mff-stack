@@ -59,9 +59,13 @@ class LiveSizingRequest:
     created_ts_utc: datetime
 
     def __post_init__(self) -> None:
-        if not all(
-            value.strip() for value in (self.request_id, self.component, self.release_id, self.operator)
-        ):
+        identities = (
+            self.request_id,
+            self.component,
+            self.release_id,
+            self.operator,
+        )
+        if not all(value.strip() for value in identities):
             raise ValueError("request, component, release and operator identities are required")
         if not math.isfinite(self.requested_risk_fraction) or self.requested_risk_fraction <= 0:
             raise ValueError("requested_risk_fraction must be finite and positive")
