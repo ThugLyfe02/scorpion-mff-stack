@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -53,10 +55,12 @@ class Pipeline:
     maximum_raw_attempts: int = 3
     state: BookState = field(init=False)
     recent_events: list[SignalEvent] = field(init=False)
+    _transition_lock: threading.Lock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.maximum_raw_attempts <= 0:
             raise ValueError("maximum_raw_attempts must be positive")
+        self._transition_lock = threading.Lock()
         with self.store.connect() as db:
             ensure_processing_order_schema(db)
         historical_signals = load_signals_in_processing_order(self.store.path)
@@ -243,13 +247,34 @@ class Pipeline:
                 ) from exc
             raise
 
+    def _process_serialized(
+        self,
+        raw: RawDiscordMessage,
+        *,
+        persist_raw: bool,
+        register_receipt: bool,
+    ) -> tuple[SignalEvent, tuple[Effect, ...]]:
+        with self._transition_lock:
+            if register_receipt:
+                register_raw_receipt(self.store.path, raw.revision_id)
+            return self._process(raw, persist_raw=persist_raw)
+
     async def handle(self, raw: RawDiscordMessage) -> tuple[SignalEvent, tuple[Effect, ...]]:
-        return self._process(raw, persist_raw=True)
+        return await asyncio.to_thread(
+            self._process_serialized,
+            raw,
+            persist_raw=True,
+            register_receipt=False,
+        )
 
     async def handle_persisted(
         self,
         raw: RawDiscordMessage,
     ) -> tuple[SignalEvent, tuple[Effect, ...]]:
-        """Process a raw revision that has already crossed the durable receipt boundary."""
-        register_raw_receipt(self.store.path, raw.revision_id)
-        return self._process(raw, persist_raw=False)
+        """Process a durable raw revision on a worker thread under one transition lock."""
+        return await asyncio.to_thread(
+            self._process_serialized,
+            raw,
+            persist_raw=False,
+            register_receipt=True,
+        )

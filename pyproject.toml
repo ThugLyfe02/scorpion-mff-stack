@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scorpion-mff"
-version = "0.22.0"
-description = "Deterministic MFF control plane with formal promotion evidence DAGs, fail-closed kill-switch recovery drills, release-bound exposure-aware live sizing, compound sizing stress tests, end-to-end adaptive control audits, a universal trainable-model contract, leakage-safe auto-training, automatic shadow lifecycle, impact-adjusted liquidity capacity, purged walk-forward validation, corroborated drift-triggered retraining, and verified recovery."
+version = "0.23.0"
+description = "Deterministic MFF control plane with evidence-bound rollout/rollback state machines, production bottleneck and conflict auditing, partial-outage chaos drills, nonblocking deterministic ingestion, formal promotion evidence DAGs, fail-closed kill-switch recovery, release-bound exposure-aware live sizing, compound sizing stress, adaptive control audits, leakage-safe auto-training, shadow lifecycle, impact-adjusted liquidity capacity, purged walk-forward validation, and corroborated drift retraining."
 requires-python = ">=3.13"
 dependencies = [
   "discord.py>=2.4,<3",
@@ -50,6 +50,8 @@ scorpion-quant-audit = "scorpion.quant_audit:quant_audit_main"
 scorpion-evolution = "scorpion.evolution_cli:evolution_main"
 scorpion-opra-normalize = "scorpion.opra_bridge:opra_normalize_main"
 scorpion-ingest = "scorpion.runtime:ingest_main"
+scorpion-prod-audit = "scorpion.production_ops_cli:bottleneck_audit_main"
+scorpion-chaos-drill = "scorpion.production_ops_cli:partial_outage_drill_main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/scorpion"]

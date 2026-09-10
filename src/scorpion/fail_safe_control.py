@@ -213,17 +213,23 @@ class NoTradeSafetyLatch:
         *,
         operator: str,
         reason: str,
+        source_release_id: str | None = None,
         now: datetime | None = None,
     ) -> SafetyLatchState:
         if not operator.strip() or not reason.strip():
             raise ValueError("operator identity and clear reason are required")
+        if source_release_id is not None and not source_release_id.strip():
+            raise ValueError("explicit source_release_id cannot be blank")
         current = self.state(component)
+        resolved_release_id = (
+            current.source_release_id if source_release_id is None else source_release_id
+        )
         timestamp = (now or datetime.now(UTC)).astimezone(UTC)
         normalized_reason = _normalize_reason(reason)
         event_id = _event_id(
             component=component,
             mode=SafetyMode.NORMAL,
-            source_release_id=current.source_release_id,
+            source_release_id=resolved_release_id,
             reason=normalized_reason,
             timestamp=timestamp,
             actor=operator,
@@ -241,7 +247,7 @@ class NoTradeSafetyLatch:
                     event_id,
                     component,
                     SafetyMode.NORMAL.value,
-                    current.source_release_id,
+                    resolved_release_id,
                     normalized_reason,
                     timestamp.isoformat(),
                     operator,
@@ -262,7 +268,7 @@ class NoTradeSafetyLatch:
                 (
                     component,
                     SafetyMode.NORMAL.value,
-                    current.source_release_id,
+                    resolved_release_id,
                     normalized_reason,
                     timestamp.isoformat(),
                     operator,

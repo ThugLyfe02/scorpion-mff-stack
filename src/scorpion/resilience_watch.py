@@ -116,7 +116,9 @@ class ResilienceController:
             raise ValueError("interval_seconds must be positive")
         while True:
             try:
-                self.refresh()
+                # health_snapshot/source profiling perform synchronous SQLite work. Keep those
+                # scans off the Discord gateway event loop while preserving one watchdog refresh.
+                await asyncio.to_thread(self.refresh)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -132,7 +134,8 @@ class ResilienceController:
                     ("force actionable events through explicit review",),
                 )
                 self.assessment = self._apply_hysteresis(proposed)
-                self.store.heartbeat(
+                await asyncio.to_thread(
+                    self.store.heartbeat,
                     "resilience-watchdog",
                     status="error",
                     error=type(exc).__name__,
