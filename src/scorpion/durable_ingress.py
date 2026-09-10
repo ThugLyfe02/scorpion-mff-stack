@@ -1,3 +1,24 @@
+from typing import Protocol
+
+
+class _IsoTimestamp(Protocol):
+    def isoformat(self) -> str: ...
+
+
+class DurableRawMessage(Protocol):
+    revision_id: str
+    message_id: str
+    guild_id: str
+    channel_id: str
+    author_id: str
+    source_ts_utc: _IsoTimestamp
+    received_ts_utc: _IsoTimestamp
+    edited_ts_utc: _IsoTimestamp | None
+    referenced_message_id: str | None
+    content: str
+    content_sha256: str
+
+
 _RECEIPT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS raw_receipt_order (
     receipt_seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -9,18 +30,11 @@ ON raw_receipt_order(raw_event_id);
 """
 
 
-def _iso(value: object) -> str:
-    return str(getattr(value, "isoformat")())
-
-
-def append_raw_with_receipt(path: object, raw: object) -> bool:
+def append_raw_with_receipt(path: object, raw: DurableRawMessage) -> bool:
     """Persist raw evidence, pending state and receipt order in one FULL-sync transaction."""
     import sqlite3
 
-    revision_id = str(getattr(raw, "revision_id"))
-    received = getattr(raw, "received_ts_utc")
-    edited = getattr(raw, "edited_ts_utc")
-    now = _iso(received)
+    now = raw.received_ts_utc.isoformat()
     with sqlite3.connect(str(path), timeout=5.0, isolation_level=None) as db:
         db.execute("PRAGMA foreign_keys=ON")
         db.execute("PRAGMA busy_timeout=5000")
@@ -36,17 +50,17 @@ def append_raw_with_receipt(path: object, raw: object) -> bool:
                 VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    revision_id,
-                    str(getattr(raw, "message_id")),
-                    str(getattr(raw, "guild_id")),
-                    str(getattr(raw, "channel_id")),
-                    str(getattr(raw, "author_id")),
-                    _iso(getattr(raw, "source_ts_utc")),
+                    raw.revision_id,
+                    raw.message_id,
+                    raw.guild_id,
+                    raw.channel_id,
+                    raw.author_id,
+                    raw.source_ts_utc.isoformat(),
                     now,
-                    _iso(edited) if edited is not None else None,
-                    getattr(raw, "referenced_message_id"),
-                    str(getattr(raw, "content")),
-                    str(getattr(raw, "content_sha256")),
+                    raw.edited_ts_utc.isoformat() if raw.edited_ts_utc is not None else None,
+                    raw.referenced_message_id,
+                    raw.content,
+                    raw.content_sha256,
                 ),
             )
             db.execute(
@@ -54,11 +68,11 @@ def append_raw_with_receipt(path: object, raw: object) -> bool:
                 INSERT OR IGNORE INTO raw_processing(raw_event_id,status,updated_ts_utc,error)
                 VALUES (?, 'PENDING', ?, '')
                 """,
-                (revision_id, now),
+                (raw.revision_id, now),
             )
             db.execute(
                 "INSERT OR IGNORE INTO raw_receipt_order(raw_event_id) VALUES (?)",
-                (revision_id,),
+                (raw.revision_id,),
             )
             db.execute("COMMIT")
         except Exception:
