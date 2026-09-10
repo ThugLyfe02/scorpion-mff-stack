@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .delivery import DeliveryLedger
+from .fail_safe_control import NoTradeSafetyLatch, SafetyMode
 from .kill_switch_drills import run_isolated_kill_switch_recovery_drill
 from .production_bottleneck_audit import (
     ProductionBottleneckAuditPolicy,
@@ -36,7 +37,7 @@ class PartialOutageChaosReport:
 def _workspace(directory: str | Path, now: datetime) -> Path:
     root = Path(directory)
     root.mkdir(parents=True, exist_ok=True)
-    suffix = hashlib.sha256(f"partial-outage-v1|{now.isoformat()}".encode()).hexdigest()[:16]
+    suffix = hashlib.sha256(f"partial-outage-v2|{now.isoformat()}".encode()).hexdigest()[:16]
     workspace = root / f"scorpion-partial-outage-{suffix}"
     if workspace.exists():
         raise FileExistsError(workspace)
@@ -139,6 +140,26 @@ def run_isolated_partial_outage_chaos_drills(
     )
 
     _healthy_liveness(audit_path, timestamp)
+    _seed_heartbeat(
+        audit_path,
+        component="discord-ingress-queue",
+        timestamp=timestamp,
+        metadata={"status": "capture_only", "utilization": 0.02, "consumer_alive": False},
+    )
+    capture_only = audit_production_bottlenecks(audit_path, now=timestamp)
+    capture_detected = any(
+        item.code == "ingress_consumer_not_alive" for item in capture_only.findings
+    )
+    cases.append(
+        ChaosDrillCase(
+            name="fresh_capture_only_ingress",
+            passed=capture_detected and not capture_only.ready_for_rollout,
+            fail_closed_observed=not capture_only.ready_for_rollout,
+            detail="fresh heartbeat could not hide a dead normalized-ingress consumer",
+        )
+    )
+
+    _healthy_liveness(audit_path, timestamp)
     DeliveryLedger(audit_path)
     with sqlite3.connect(str(audit_path)) as db:
         db.execute(
@@ -173,6 +194,44 @@ def run_isolated_partial_outage_chaos_drills(
         )
     )
 
+    safety_path = workspace / "safety-split-brain.db"
+    Store(safety_path)
+    latch = NoTradeSafetyLatch(safety_path)
+    latch.clear_no_trade(
+        component,
+        operator=operator,
+        reason="chaos initialize normal",
+        source_release_id="chaos-release",
+        now=timestamp,
+    )
+    latch.trip_no_trade(
+        component,
+        reason="chaos emergency trip",
+        source_release_id="chaos-release",
+        actor="chaos-safety-monitor",
+        now=timestamp + timedelta(seconds=1),
+    )
+    with sqlite3.connect(str(safety_path)) as db:
+        db.execute(
+            "UPDATE component_safety_state SET mode='NORMAL',reason='tampered normal' "
+            "WHERE component=?",
+            (component,),
+        )
+    split_integrity = latch.verify_integrity(component)
+    sentinel_still_blocks = latch.state(component).mode is SafetyMode.NO_TRADE
+    split_detected = (
+        not split_integrity.valid
+        and "safety_state_does_not_match_latest_event" in split_integrity.failures
+    )
+    cases.append(
+        ChaosDrillCase(
+            name="safety_db_sentinel_split_brain",
+            passed=split_detected and sentinel_still_blocks,
+            fail_closed_observed=sentinel_still_blocks,
+            detail="external sentinel blocked execution while SQLite safety state was tampered",
+        )
+    )
+
     lock_path = workspace / "writer-contention.db"
     Store(lock_path)
     holder = sqlite3.connect(str(lock_path), timeout=0.1, isolation_level=None)
@@ -204,7 +263,7 @@ def run_isolated_partial_outage_chaos_drills(
             failures.append(case.name)
     drill_id = hashlib.sha256(
         (
-            "partial-outage-chaos-v1|"
+            "partial-outage-chaos-v2|"
             f"{component}|{timestamp.isoformat()}|"
             + "|".join(f"{case.name}:{case.passed}" for case in cases)
         ).encode()
