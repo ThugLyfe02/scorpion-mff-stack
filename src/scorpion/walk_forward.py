@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 import statistics
 from dataclasses import dataclass, replace
-from datetime import timedelta
+from datetime import date, timedelta
 
 from .execution_forensics import CompletedTrade
 from .sizing_lab import SizingConstraints, score_segment
@@ -93,7 +93,7 @@ def _ordered(trades: tuple[CompletedTrade, ...]) -> tuple[CompletedTrade, ...]:
 
 
 def _daily_oos_means(trades: list[CompletedTrade]) -> list[float]:
-    grouped: dict[object, list[float]] = {}
+    grouped: dict[date, list[float]] = {}
     for trade in trades:
         day = trade.opened_ts_utc.date()
         grouped.setdefault(day, []).append(float(trade.return_fraction))
