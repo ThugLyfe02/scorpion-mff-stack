@@ -72,11 +72,11 @@ def _examples(schema: FeatureSchema, *, count: int = 140) -> tuple[TrainingExamp
     )
 
 
-def _plan() -> ChallengerRetrainingPlan:
+def _plan(dataset_hash: str) -> ChallengerRetrainingPlan:
     return ChallengerRetrainingPlan(
         plan_id="plan-v1",
         parent_release_id="parent-v1",
-        dataset_fingerprint="prior-dataset",
+        dataset_fingerprint=dataset_hash,
         status=RetrainingPlanStatus.READY_RESEARCH_CHALLENGER,
         confirmations=("page_hinkley", "bayesian_changepoint"),
         samples_since_drift=120,
@@ -104,6 +104,22 @@ def _ready_promotion() -> PromotionDecision:
     )
 
 
+def _mean_model(schema: FeatureSchema, model_id: str = "mean-model") -> CallableTrainableModel:
+    def fit(rows, seed):
+        del seed
+        mean = sum(float(item.target) for item in rows) / len(rows)
+        return _MeanFitted(model_id, mean)
+
+    return CallableTrainableModel(
+        model_id=model_id,
+        trainer_version="trainer-v1",
+        task=TaskKind.REGRESSION,
+        feature_schema=schema,
+        fit_callable=fit,
+        determinism=DeterminismLevel.EXACT,
+    )
+
+
 def test_auto_trainer_never_exposes_validation_rows_to_arbitrary_fit(tmp_path):
     schema = _schema()
     examples = _examples(schema)
@@ -127,7 +143,7 @@ def test_auto_trainer_never_exposes_validation_rows_to_arbitrary_fit(tmp_path):
         tmp_path / "adaptive.db",
         model=model,
         examples=examples,
-        plan=_plan(),
+        plan=_plan(dataset_fingerprint(examples, schema)),
         metrics=(
             CallableValidationMetric("mae", MetricDirection.MINIMIZE, 0.01, _mae),
         ),
@@ -152,6 +168,7 @@ def test_auto_trainer_never_exposes_validation_rows_to_arbitrary_fit(tmp_path):
 
 def test_auto_trainer_blocks_failed_validation_even_when_fit_succeeds(tmp_path):
     schema = _schema()
+    examples = _examples(schema)
 
     def fit(rows, seed):
         del rows, seed
@@ -168,8 +185,8 @@ def test_auto_trainer_blocks_failed_validation_even_when_fit_succeeds(tmp_path):
     outcome = run_auto_training(
         tmp_path / "bad.db",
         model=model,
-        examples=_examples(schema),
-        plan=_plan(),
+        examples=examples,
+        plan=_plan(dataset_fingerprint(examples, schema)),
         metrics=(
             CallableValidationMetric("mae", MetricDirection.MINIMIZE, 0.10, _mae),
         ),
@@ -180,6 +197,63 @@ def test_auto_trainer_blocks_failed_validation_even_when_fit_succeeds(tmp_path):
     assert outcome.report.status is TrainingRunStatus.VALIDATION_FAILED
     assert outcome.report.shadow_ready is False
     assert any(item.startswith("validation_metric_failed:mae") for item in outcome.report.failures)
+
+
+def test_retraining_plan_is_bound_to_exact_dataset_fingerprint(tmp_path):
+    schema = _schema()
+    examples = _examples(schema)
+    model = _mean_model(schema)
+    with pytest.raises(ValueError, match="dataset fingerprint"):
+        run_auto_training(
+            tmp_path / "mismatch.db",
+            model=model,
+            examples=examples,
+            plan=_plan("0" * 64),
+            metrics=(
+                CallableValidationMetric("mae", MetricDirection.MINIMIZE, 0.01, _mae),
+            ),
+            code_revision="abc123",
+            policy_fingerprint="policy-sha",
+            now=NOW,
+        )
+
+
+def test_validation_evaluator_failure_is_durable_and_fail_closed(tmp_path):
+    schema = _schema()
+    examples = _examples(schema)
+    model = _mean_model(schema, "metric-failure-model")
+
+    def broken_metric(rows) -> float:
+        del rows
+        raise RuntimeError("fault-injected metric failure")
+
+    outcome = run_auto_training(
+        tmp_path / "metric-failure.db",
+        model=model,
+        examples=examples,
+        plan=_plan(dataset_fingerprint(examples, schema)),
+        metrics=(
+            CallableValidationMetric(
+                "broken_metric",
+                MetricDirection.MINIMIZE,
+                0.01,
+                broken_metric,
+            ),
+        ),
+        code_revision="abc123",
+        policy_fingerprint="policy-sha",
+        now=NOW,
+    )
+    assert outcome.report.status is TrainingRunStatus.VALIDATION_FAILED
+    assert outcome.artifact is not None
+    assert "validation_evaluation_failed:RuntimeError" in outcome.report.failures
+    persisted = load_training_run(tmp_path / "metric-failure.db", outcome.report.run_id)
+    assert persisted["status"] == TrainingRunStatus.VALIDATION_FAILED.value
+
+
+def test_non_finite_metric_threshold_is_rejected():
+    with pytest.raises(ValueError, match="finite"):
+        CallableValidationMetric("mae", MetricDirection.MINIMIZE, float("nan"), _mae)
 
 
 def test_dataset_fingerprint_binds_feature_values_and_schema():
@@ -200,6 +274,7 @@ def test_dataset_fingerprint_binds_feature_values_and_schema():
 
 def test_shadow_activation_is_automatic_but_isolated_from_live_release(tmp_path):
     schema = _schema()
+    examples = _examples(schema)
 
     def fit(rows, seed):
         del rows, seed
@@ -216,8 +291,8 @@ def test_shadow_activation_is_automatic_but_isolated_from_live_release(tmp_path)
     outcome = run_auto_training(
         tmp_path / "shadow.db",
         model=model,
-        examples=_examples(schema),
-        plan=_plan(),
+        examples=examples,
+        plan=_plan(dataset_fingerprint(examples, schema)),
         metrics=(
             CallableValidationMetric("mae", MetricDirection.MINIMIZE, 0.01, _mae),
         ),

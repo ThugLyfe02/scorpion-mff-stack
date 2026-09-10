@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
@@ -56,7 +57,7 @@ class ValidationMetric(Protocol):
     def evaluate(self, predictions: Sequence[PredictionRecord]) -> float: ...
 
 
-MetricCallable = Callable[[Sequence[PredictionRecord]], float]
+type MetricCallable = Callable[[Sequence[PredictionRecord]], float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +70,8 @@ class CallableValidationMetric:
     def __post_init__(self) -> None:
         if not self.name.strip():
             raise ValueError("metric name is required")
+        if not math.isfinite(self.threshold):
+            raise ValueError("metric threshold must be finite")
 
     def evaluate(self, predictions: Sequence[PredictionRecord]) -> float:
         return float(self.evaluator(predictions))
@@ -182,6 +185,9 @@ def build_training_split(
             key=lambda item: (item.observed_ts_utc, item.sample_id),
         )
     )
+    dataset_hash = dataset_fingerprint(rows, model.feature_schema)
+    if dataset_hash != plan.dataset_fingerprint:
+        raise ValueError("retraining plan dataset fingerprint does not match training examples")
     if plan.samples_since_drift <= 0 or plan.samples_since_drift > len(rows):
         raise ValueError("plan samples_since_drift is incompatible with dataset")
     if plan.validation_samples <= 0 or plan.validation_samples >= plan.samples_since_drift:
@@ -217,9 +223,8 @@ def build_training_split(
 
     if train and max(item.observed_ts_utc for item in train) > cutoff:
         raise ValueError("training split violates purge boundary")
-    dataset_hash = dataset_fingerprint(rows, model.feature_schema)
     material = {
-        "version": "training-split-v1",
+        "version": "training-split-v2",
         "plan_id": plan.plan_id,
         "dataset_fingerprint": dataset_hash,
         "feature_schema_hash": model.feature_schema.fingerprint,
@@ -249,13 +254,21 @@ def build_training_split(
 
 
 def _metric_result(metric: ValidationMetric, rows: Sequence[PredictionRecord]) -> MetricResult:
-    value = metric.evaluate(rows)
+    name = metric.name.strip()
+    if not name:
+        raise ValueError("validation metric name is blank")
+    threshold = float(metric.threshold)
+    if not math.isfinite(threshold):
+        raise ValueError(f"validation metric {name} has non-finite threshold")
+    value = float(metric.evaluate(rows))
+    if not math.isfinite(value):
+        raise ValueError(f"validation metric {name} produced non-finite value")
     passed = (
-        value <= metric.threshold
+        value <= threshold
         if metric.direction is MetricDirection.MINIMIZE
-        else value >= metric.threshold
+        else value >= threshold
     )
-    return MetricResult(metric.name, value, metric.direction, metric.threshold, passed)
+    return MetricResult(name, value, metric.direction, threshold, passed)
 
 
 def _fit_once(model: TrainableModel, train: Sequence[TrainingExample], seed: int) -> FittedModel:
@@ -301,7 +314,7 @@ def _report_id(
 ) -> str:
     return _hash_payload(
         {
-            "version": "auto-trainer-run-v1",
+            "version": "auto-trainer-run-v2",
             "model_id": model.model_id,
             "trainer_version": model.trainer_version,
             "task": model.task.value,
@@ -348,6 +361,39 @@ def _empty_report(
     )
 
 
+def _validation_failure_report(
+    *,
+    run_id: str,
+    model: TrainableModel,
+    split: TrainingSplitManifest,
+    artifact: ModelArtifact,
+    training_samples: int,
+    validation_samples: int,
+    exact_verified: bool,
+    failures: tuple[str, ...],
+    created: datetime,
+) -> TrainingRunReport:
+    return TrainingRunReport(
+        run_id=run_id,
+        model_id=model.model_id,
+        trainer_version=model.trainer_version,
+        task=model.task.value,
+        dataset_fingerprint=split.dataset_fingerprint,
+        split_hash=split.split_hash,
+        feature_schema_hash=split.feature_schema_hash,
+        training_samples=training_samples,
+        validation_samples=validation_samples,
+        artifact_sha256=artifact.sha256,
+        artifact_loader_key=artifact.loader_key,
+        artifact_model_version=artifact.model_version,
+        metrics=(),
+        exact_reproducibility_verified=exact_verified,
+        status=TrainingRunStatus.VALIDATION_FAILED,
+        failures=failures,
+        created_ts_utc=created,
+    )
+
+
 def run_auto_training(
     path: str | Path,
     *,
@@ -366,6 +412,12 @@ def run_auto_training(
         raise ValueError("code_revision and policy_fingerprint are required")
     if not metrics:
         raise ValueError("at least one validation metric is required")
+    metric_names = [metric.name.strip() for metric in metrics]
+    if any(not name for name in metric_names):
+        raise ValueError("validation metric names cannot be blank")
+    if len(metric_names) != len(set(metric_names)):
+        raise ValueError("validation metric names must be unique")
+
     created = (now or datetime.now(UTC)).astimezone(UTC)
     split, train, validation = build_training_split(examples, plan, model)
     run_id = _report_id(
@@ -434,8 +486,25 @@ def run_auto_training(
         except Exception as exc:
             failures.append(f"determinism_verification_failed:{type(exc).__name__}")
 
-    predictions = _predict(fitted, validation)
-    metric_results = tuple(_metric_result(metric, predictions) for metric in metrics)
+    try:
+        predictions = _predict(fitted, validation)
+        metric_results = tuple(_metric_result(metric, predictions) for metric in metrics)
+    except Exception as exc:
+        failures.append(f"validation_evaluation_failed:{type(exc).__name__}")
+        report = _validation_failure_report(
+            run_id=run_id,
+            model=model,
+            split=split,
+            artifact=artifact,
+            training_samples=len(train),
+            validation_samples=len(validation),
+            exact_verified=exact_verified,
+            failures=tuple(failures),
+            created=created,
+        )
+        _persist_report(path, report)
+        return AutoTrainingOutcome(report, artifact, split)
+
     failures.extend(
         f"validation_metric_failed:{item.name}:{item.value:.8f}"
         for item in metric_results
