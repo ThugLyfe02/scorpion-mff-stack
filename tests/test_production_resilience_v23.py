@@ -14,6 +14,7 @@ from scorpion.deployment_state_machine import (
 )
 from scorpion.fail_safe_control import NoTradeSafetyLatch, SafetyMode
 from scorpion.governance import PromotionDecision, PromotionStatus
+from scorpion.hot_path_benchmark import HotPathBenchmarkPolicy
 from scorpion.production_bottleneck_audit import (
     BottleneckFinding,
     BottleneckSeverity,
@@ -26,6 +27,10 @@ from scorpion.production_gate import (
     ProductionAuthorizationStatus,
     ProductionGateStatus,
     ProductionPromotionDossier,
+)
+from scorpion.production_readiness import (
+    ProductionReadinessPolicy,
+    issue_rollout_readiness_certificate,
 )
 from scorpion.promotion_evidence_schema import PromotionEvidenceValidationReport
 from scorpion.release_guard import ReleaseRegistry, ReleaseState
@@ -110,6 +115,18 @@ def _validation() -> PromotionEvidenceValidationReport:
         records=11,
         required_kinds=11,
         failures=(),
+    )
+
+
+def _wide_benchmark_policy() -> HotPathBenchmarkPolicy:
+    return HotPathBenchmarkPolicy(
+        minimum_samples=4,
+        maximum_core_p95_us=10_000_000,
+        maximum_core_p99_us=10_000_000,
+        maximum_receipt_p95_us=10_000_000,
+        maximum_full_path_p95_us=10_000_000,
+        maximum_full_path_p99_us=10_000_000,
+        maximum_db_precommit_p95_us=10_000_000,
     )
 
 
@@ -255,7 +272,6 @@ def test_activation_rebinds_normal_safety_to_exact_new_release(tmp_path):
     )
     _seed_liveness(path)
     dossier = _dossier("b" * 64, previous.release_id)
-    audit = audit_production_bottlenecks(path, now=NOW)
     machine = DeploymentStateMachine(
         path,
         policy=DeploymentStateMachinePolicy(
@@ -264,13 +280,34 @@ def test_activation_rebinds_normal_safety_to_exact_new_release(tmp_path):
             maximum_recovery_evidence_age=timedelta(seconds=30),
         ),
     )
+    authorization = _authorization(dossier)
+    validation = _validation()
+    bundle = "bundle-v23-resilience"
+    readiness = issue_rollout_readiness_certificate(
+        path,
+        workspace=tmp_path / "activation-readiness",
+        component=COMPONENT,
+        candidate_release_id=candidate.release_id,
+        dossier=dossier,
+        authorization=authorization,
+        evidence_validation=validation,
+        evidence_bundle_hash=bundle,
+        operator="operator-readiness",
+        now=NOW,
+        policy=ProductionReadinessPolicy(
+            certificate_ttl=timedelta(minutes=5),
+            benchmark_samples=4,
+            require_chaos_drills=False,
+        ),
+        benchmark_policy=_wide_benchmark_policy(),
+    )
     prepared = machine.prepare(
         candidate_release_id=candidate.release_id,
         dossier=dossier,
-        authorization=_authorization(dossier),
-        evidence_validation=_validation(),
-        evidence_bundle_hash="bundle-v23-resilience",
-        bottleneck_audit=audit,
+        authorization=authorization,
+        evidence_validation=validation,
+        evidence_bundle_hash=bundle,
+        readiness_certificate=readiness,
         now=NOW,
     )
     _seed_liveness(path)

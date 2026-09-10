@@ -14,6 +14,7 @@ from scorpion.deployment_state_machine import (
     RolloutState,
 )
 from scorpion.fail_safe_control import NoTradeSafetyLatch, SafetyMode
+from scorpion.hot_path_benchmark import HotPathBenchmarkPolicy
 from scorpion.production_bottleneck_audit import (
     ProductionBottleneckAuditPolicy,
     audit_production_bottlenecks,
@@ -24,6 +25,10 @@ from scorpion.production_gate import (
     ProductionAuthorizationStatus,
     ProductionGateStatus,
     ProductionPromotionDossier,
+)
+from scorpion.production_readiness import (
+    ProductionReadinessPolicy,
+    issue_rollout_readiness_certificate,
 )
 from scorpion.promotion_evidence_schema import PromotionEvidenceValidationReport
 from scorpion.release_guard import ReleaseRegistry, ReleaseState
@@ -140,6 +145,52 @@ def _validation() -> PromotionEvidenceValidationReport:
     )
 
 
+def _wide_benchmark_policy() -> HotPathBenchmarkPolicy:
+    return HotPathBenchmarkPolicy(
+        minimum_samples=4,
+        maximum_core_p95_us=10_000_000,
+        maximum_core_p99_us=10_000_000,
+        maximum_receipt_p95_us=10_000_000,
+        maximum_full_path_p95_us=10_000_000,
+        maximum_full_path_p99_us=10_000_000,
+        maximum_db_precommit_p95_us=10_000_000,
+    )
+
+
+def _readiness(
+    path: Path,
+    *,
+    candidate_release_id: str,
+    dossier: ProductionPromotionDossier,
+    authorization: ProductionAuthorization,
+    validation: PromotionEvidenceValidationReport,
+    evidence_bundle_hash: str,
+    when: datetime,
+):
+    _seed_liveness(path, when)
+    return issue_rollout_readiness_certificate(
+        path,
+        workspace=path.parent / f"{path.stem}-{candidate_release_id[:8]}-readiness",
+        component=COMPONENT,
+        candidate_release_id=candidate_release_id,
+        dossier=dossier,
+        authorization=authorization,
+        evidence_validation=validation,
+        evidence_bundle_hash=evidence_bundle_hash,
+        operator="operator-readiness",
+        now=when,
+        policy=ProductionReadinessPolicy(
+            certificate_ttl=timedelta(minutes=10),
+            benchmark_samples=4,
+            require_chaos_drills=False,
+        ),
+        benchmark_policy=_wide_benchmark_policy(),
+        bottleneck_policy=ProductionBottleneckAuditPolicy(
+            maximum_heartbeat_age_seconds=5.0
+        ),
+    )
+
+
 def _bootstrap_releases(path: Path):
     Store(path)
     registry = ReleaseRegistry(path)
@@ -209,13 +260,25 @@ def _prepare_first(path: Path):
         suffix="v23-b",
         created=NOW,
     )
+    authorization = _authorization(dossier)
+    validation = _validation()
+    evidence_bundle_hash = "bundle-b"
+    readiness = _readiness(
+        path,
+        candidate_release_id=candidate.release_id,
+        dossier=dossier,
+        authorization=authorization,
+        validation=validation,
+        evidence_bundle_hash=evidence_bundle_hash,
+        when=NOW,
+    )
     prepared = machine.prepare(
         candidate_release_id=candidate.release_id,
         dossier=dossier,
-        authorization=_authorization(dossier),
-        evidence_validation=_validation(),
-        evidence_bundle_hash="bundle-b",
-        bottleneck_audit=_audit(path, NOW),
+        authorization=authorization,
+        evidence_validation=validation,
+        evidence_bundle_hash=evidence_bundle_hash,
+        readiness_certificate=readiness,
         now=NOW,
     )
     return registry, latch, previous, candidate, machine, dossier, prepared
@@ -393,13 +456,25 @@ def test_successor_rollout_supersedes_stable_rollout_only_on_activation(tmp_path
         suffix="v23-c",
         created=NOW + timedelta(minutes=3),
     )
+    authorization = _authorization(dossier)
+    validation = _validation()
+    bundle = "bundle-c"
+    readiness = _readiness(
+        path,
+        candidate_release_id=next_release.release_id,
+        dossier=dossier,
+        authorization=authorization,
+        validation=validation,
+        evidence_bundle_hash=bundle,
+        when=NOW + timedelta(minutes=3),
+    )
     prepared = machine.prepare(
         candidate_release_id=next_release.release_id,
         dossier=dossier,
-        authorization=_authorization(dossier),
-        evidence_validation=_validation(),
-        evidence_bundle_hash="bundle-c",
-        bottleneck_audit=_audit(path, NOW + timedelta(minutes=3)),
+        authorization=authorization,
+        evidence_validation=validation,
+        evidence_bundle_hash=bundle,
+        readiness_certificate=readiness,
         now=NOW + timedelta(minutes=3),
     )
     assert prepared.state is RolloutState.PREPARED
@@ -429,13 +504,25 @@ def test_expired_or_cancelled_prepared_rollout_releases_deployment_lane(tmp_path
         created=NOW,
         ttl=timedelta(seconds=5),
     )
+    short_authorization = _authorization(short)
+    short_validation = _validation()
+    short_bundle = "bundle-short"
+    short_readiness = _readiness(
+        path,
+        candidate_release_id=candidate.release_id,
+        dossier=short,
+        authorization=short_authorization,
+        validation=short_validation,
+        evidence_bundle_hash=short_bundle,
+        when=NOW,
+    )
     prepared = machine.prepare(
         candidate_release_id=candidate.release_id,
         dossier=short,
-        authorization=_authorization(short),
-        evidence_validation=_validation(),
-        evidence_bundle_hash="bundle-short",
-        bottleneck_audit=_audit(path, NOW),
+        authorization=short_authorization,
+        evidence_validation=short_validation,
+        evidence_bundle_hash=short_bundle,
+        readiness_certificate=short_readiness,
         now=NOW,
     )
     with pytest.raises(ValueError, match="expired before activation"):
@@ -461,13 +548,25 @@ def test_expired_or_cancelled_prepared_rollout_releases_deployment_lane(tmp_path
         suffix="replacement",
         created=NOW + timedelta(seconds=7),
     )
+    authorization = _authorization(dossier)
+    validation = _validation()
+    bundle = "bundle-replacement"
+    readiness = _readiness(
+        path,
+        candidate_release_id=replacement.release_id,
+        dossier=dossier,
+        authorization=authorization,
+        validation=validation,
+        evidence_bundle_hash=bundle,
+        when=NOW + timedelta(seconds=7),
+    )
     replacement_rollout = machine.prepare(
         candidate_release_id=replacement.release_id,
         dossier=dossier,
-        authorization=_authorization(dossier),
-        evidence_validation=_validation(),
-        evidence_bundle_hash="bundle-replacement",
-        bottleneck_audit=_audit(path, NOW + timedelta(seconds=7)),
+        authorization=authorization,
+        evidence_validation=validation,
+        evidence_bundle_hash=bundle,
+        readiness_certificate=readiness,
         now=NOW + timedelta(seconds=7),
     )
     cancelled = machine.cancel(

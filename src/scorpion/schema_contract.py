@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_CONTRACT_VERSION = "2026.09.v7"
+SCHEMA_CONTRACT_VERSION = "2026.09.v8"
 
 _REQUIRED: dict[str, frozenset[str]] = {
     "raw_discord_events": frozenset(
@@ -137,11 +137,30 @@ _OPTIONAL_ADVANCED: dict[str, frozenset[str]] = {
             "authorization_expires_ts_utc",
             "evidence_bundle_hash",
             "preparation_audit_hash",
+            "readiness_certificate_id",
+            "readiness_expires_ts_utc",
+            "readiness_operator_state_hash",
+            "readiness_bottleneck_state_hash",
+            "readiness_control_state_hash",
             "state",
             "rollback_state",
             "generation",
             "created_ts_utc",
             "updated_ts_utc",
+        }
+    ),
+    "production_readiness_consumptions": frozenset(
+        {
+            "certificate_id",
+            "component",
+            "candidate_release_id",
+            "dossier_id",
+            "authorization_id",
+            "evidence_bundle_hash",
+            "control_state_hash",
+            "certificate_expires_ts_utc",
+            "consumed_rollout_id",
+            "consumed_ts_utc",
         }
     ),
     "deployment_rollbacks": frozenset(
@@ -276,6 +295,7 @@ _ADVANCED_GROUPS: dict[str, frozenset[str]] = {
     "deployment_rollout": frozenset(
         {
             "deployment_rollouts",
+            "production_readiness_consumptions",
             "deployment_rollbacks",
             "deployment_rollout_events",
             "deployment_rollout_integrity_state",

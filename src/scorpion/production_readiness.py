@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -68,7 +68,7 @@ class ControlStateBinding:
     safety_chain_hash: str
     runtime_halt_value: str
     runtime_halt_updated_ts_utc: str
-    heartbeat_rows: tuple[tuple[str, str, str], ...]
+    heartbeat_metadata: tuple[tuple[str, str], ...]
     pending_raw: int
     pending_deliveries: int
     rollout_rows: tuple[tuple[str, str, int], ...]
@@ -107,6 +107,8 @@ class ProductionReadinessCertificate:
 class RolloutReadinessCertificate:
     certificate_id: str
     production_readiness_certificate_id: str
+    production_readiness_policy_hash: str
+    schema_contract_version: str
     component: str
     candidate_release_id: str
     expected_predecessor_release_id: str
@@ -126,6 +128,8 @@ class RolloutReadinessCertificate:
     operator_state_hash: str
     bottleneck_report_hash: str
     bottleneck_state_hash: str
+    hot_path_benchmark_id: str
+    chaos_drill_id: str
     control_state_hash: str
     safety_event_count: int
     safety_head_event_id: str
@@ -262,22 +266,21 @@ def capture_control_state_binding(
             runtime_halt_value = str(row["value"])
             runtime_halt_updated_ts_utc = str(row["updated_ts_utc"])
 
-    heartbeat_rows: list[tuple[str, str, str]] = []
+    heartbeat_metadata: list[tuple[str, str]] = []
     if _table_exists(db, "heartbeats"):
         for heartbeat in required_heartbeats:
             row = db.execute(
-                "SELECT last_seen_ts_utc,metadata_json FROM heartbeats WHERE component=?",
+                "SELECT metadata_json FROM heartbeats WHERE component=?",
                 (heartbeat,),
             ).fetchone()
-            heartbeat_rows.append(
+            heartbeat_metadata.append(
                 (
                     heartbeat,
-                    str(row["last_seen_ts_utc"]) if row is not None else "",
                     str(row["metadata_json"]) if row is not None else "",
                 )
             )
     else:
-        heartbeat_rows.extend((heartbeat, "", "") for heartbeat in required_heartbeats)
+        heartbeat_metadata.extend((heartbeat, "") for heartbeat in required_heartbeats)
 
     pending_raw = 0
     if _table_exists(db, "raw_processing"):
@@ -323,7 +326,7 @@ def capture_control_state_binding(
         "safety_chain_hash": safety_chain_hash,
         "runtime_halt_value": runtime_halt_value,
         "runtime_halt_updated_ts_utc": runtime_halt_updated_ts_utc,
-        "heartbeat_rows": heartbeat_rows,
+        "heartbeat_metadata": heartbeat_metadata,
         "pending_raw": pending_raw,
         "pending_deliveries": pending_deliveries,
         "rollout_rows": rollout_rows,
@@ -338,7 +341,7 @@ def capture_control_state_binding(
         safety_chain_hash=safety_chain_hash,
         runtime_halt_value=runtime_halt_value,
         runtime_halt_updated_ts_utc=runtime_halt_updated_ts_utc,
-        heartbeat_rows=tuple(heartbeat_rows),
+        heartbeat_metadata=tuple(heartbeat_metadata),
         pending_raw=pending_raw,
         pending_deliveries=pending_deliveries,
         rollout_rows=rollout_rows,
@@ -562,11 +565,9 @@ def evaluate_production_readiness(
         checks=tuple(checks),
         failures=failures,
     )
-    return ProductionReadinessCertificate(
-        **{
-            **asdict(provisional),
-            "certificate_id": _hash_payload(_production_certificate_material(provisional)),
-        }
+    return replace(
+        provisional,
+        certificate_id=_hash_payload(_production_certificate_material(provisional)),
     )
 
 
@@ -590,6 +591,8 @@ def _rollout_certificate_material(
         "production_readiness_certificate_id": (
             certificate.production_readiness_certificate_id
         ),
+        "production_readiness_policy_hash": certificate.production_readiness_policy_hash,
+        "schema_contract_version": certificate.schema_contract_version,
         "component": certificate.component,
         "candidate_release_id": certificate.candidate_release_id,
         "expected_predecessor_release_id": certificate.expected_predecessor_release_id,
@@ -611,6 +614,8 @@ def _rollout_certificate_material(
         "operator_state_hash": certificate.operator_state_hash,
         "bottleneck_report_hash": certificate.bottleneck_report_hash,
         "bottleneck_state_hash": certificate.bottleneck_state_hash,
+        "hot_path_benchmark_id": certificate.hot_path_benchmark_id,
+        "chaos_drill_id": certificate.chaos_drill_id,
         "control_state_hash": certificate.control_state_hash,
         "safety_event_count": certificate.safety_event_count,
         "safety_head_event_id": certificate.safety_head_event_id,
@@ -729,6 +734,8 @@ def issue_rollout_readiness_certificate(
     provisional = RolloutReadinessCertificate(
         certificate_id="",
         production_readiness_certificate_id=host.certificate_id,
+        production_readiness_policy_hash=host.policy_hash,
+        schema_contract_version=host.schema_contract_version,
         component=component,
         candidate_release_id=candidate_release_id,
         expected_predecessor_release_id=predecessor,
@@ -748,6 +755,8 @@ def issue_rollout_readiness_certificate(
         operator_state_hash=host.operator_state_hash,
         bottleneck_report_hash=host.bottleneck_report_hash,
         bottleneck_state_hash=host.bottleneck_state_hash,
+        hot_path_benchmark_id=host.hot_path_benchmark_id,
+        chaos_drill_id=host.chaos_drill_id,
         control_state_hash=control.state_hash,
         safety_event_count=control.safety_event_count,
         safety_head_event_id=control.safety_head_event_id,
@@ -756,12 +765,9 @@ def issue_rollout_readiness_certificate(
         status=status,
         failures=tuple(failures),
     )
-    return RolloutReadinessCertificate(
-        **{
-            **asdict(provisional),
-            "certificate_id": _hash_payload(_rollout_certificate_material(provisional)),
-            "bottleneck_policy": effective_bottleneck_policy,
-        }
+    return replace(
+        provisional,
+        certificate_id=_hash_payload(_rollout_certificate_material(provisional)),
     )
 
 
@@ -788,6 +794,8 @@ def verify_rollout_readiness_certificate(
         failures.append("readiness_certificate_future_dated")
     if timestamp > expires:
         failures.append("readiness_certificate_expired")
+    if certificate.schema_contract_version != SCHEMA_CONTRACT_VERSION:
+        failures.append("readiness_schema_contract_changed")
     if certificate.candidate_release_id != candidate_release_id:
         failures.append("readiness_candidate_mismatch")
     if certificate.component != dossier.component:
