@@ -13,10 +13,10 @@ from scorpion.liquidity_capacity import LiquidityCapacityReport
 from scorpion.production_gate import (
     ProductionApprovalRole,
     ProductionAuthorizationStatus,
+    ProductionGateEvidence,
     ProductionGateRegistry,
     ProductionGateStatus,
     ProductionPromotionPolicy,
-    ProductionGateEvidence,
     build_production_promotion_dossier,
 )
 from scorpion.shadow_lifecycle import ShadowReleaseRecord, ShadowReleaseState
