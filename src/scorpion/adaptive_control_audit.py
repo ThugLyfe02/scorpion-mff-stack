@@ -80,7 +80,9 @@ def audit_adaptive_control_path(
         temporal.append("risk_snapshot_predates_sizing_request")
     if risk_state.observed_ts_utc.astimezone(UTC) > now_utc:
         temporal.append("risk_snapshot_timestamp_in_future")
-    if sizing_decision.valid_until_ts_utc.astimezone(UTC) < risk_state.observed_ts_utc.astimezone(UTC):
+    decision_expiry = sizing_decision.valid_until_ts_utc.astimezone(UTC)
+    risk_observed = risk_state.observed_ts_utc.astimezone(UTC)
+    if decision_expiry < risk_observed:
         temporal.append("sizing_decision_expired_before_risk_snapshot")
 
     if authorization.status is not ProductionAuthorizationStatus.AUTHORIZED_FOR_OPERATOR_ACTIVATION:
