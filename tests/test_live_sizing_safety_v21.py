@@ -1,6 +1,8 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from scorpion.fail_safe_control import SafetyLatchState, SafetyMode
 from scorpion.liquidity_capacity import LiquidityCapacityReport
 from scorpion.live_sizing_safety import (
@@ -174,6 +176,6 @@ def test_live_sizing_rejects_stale_release_identity_and_reserves_exposure_headro
         replace(_state(), gross_exposure_fraction=0.495),
         policy=_policy(),
     )
-    assert tight.hard_ceiling_fraction == 0.0050000000000000044
-    assert tight.portfolio_headroom_ceiling_fraction == 0.0050000000000000044
+    assert tight.hard_ceiling_fraction == pytest.approx(0.005)
+    assert tight.portfolio_headroom_ceiling_fraction == pytest.approx(0.005)
     assert tight.status is LiveSizingStatus.BLOCKED
