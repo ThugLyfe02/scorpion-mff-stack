@@ -121,9 +121,11 @@ class RealizedLearningOutcome:
             not self.accepted_truth_revision_id.strip() or not self.truth_snapshot_hash.strip()
         ):
             raise ValueError("usable labels must bind accepted truth revision and snapshot")
-        if self.attribution_method is not YieldAttributionMethod.LABEL_ONLY:
-            if not self.evaluation_id.strip() or not self.curriculum_fingerprint.strip():
-                raise ValueError("OOF attribution requires evaluation and curriculum identities")
+        if (
+            self.attribution_method is not YieldAttributionMethod.LABEL_ONLY
+            and (not self.evaluation_id.strip() or not self.curriculum_fingerprint.strip())
+        ):
+            raise ValueError("OOF attribution requires evaluation and curriculum identities")
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,7 +444,7 @@ def verify_realized_learning_yield_ledger(
         if str(row["record_hash"]) != expected_hash:
             failures.append("realized_learning_record_hash_mismatch")
         previous = str(row["record_hash"])
-        chain = hashlib.sha256(f"{chain}|{row['record_hash']}".encode()).hexdigest()
+        chain = hashlib.sha256(f"{chain}|{row['event_hash']}".encode()).hexdigest()
     checkpoint_valid = checkpoint is not None and (
         int(checkpoint["event_count"]) == len(rows)
         and str(checkpoint["head_record_hash"]) == previous
