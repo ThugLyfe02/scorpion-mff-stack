@@ -7,7 +7,18 @@ from pathlib import Path
 
 from . import _deployment_state_machine_core as _core
 from ._deployment_core_alias import CoreDeploymentStateMachine
-from . import _deployment_state_machine_v26 as _legacy
+from ._deployment_state_machine_v26 import (
+    DeploymentStateMachine as LegacyDeploymentStateMachine,
+    DeploymentStateMachinePolicy,
+    RollbackRecord,
+    RollbackState,
+    RolloutHealthEvidence,
+    RolloutIntegrityReport,
+    RolloutRecord,
+    RolloutState,
+    _ActivationReadinessInvalid,
+    _ensure_readiness_enforcement,
+)
 from .activation_snapshot import certify_activation_snapshot
 from .production_bottleneck_audit import ProductionBottleneckAuditReport
 from .production_gate import ProductionAuthorization, ProductionPromotionDossier
@@ -28,14 +39,6 @@ from .readiness_capability_journal import (
 )
 from .schema_migrations import apply_schema_migrations
 
-DeploymentStateMachinePolicy = _legacy.DeploymentStateMachinePolicy
-RollbackRecord = _legacy.RollbackRecord
-RollbackState = _legacy.RollbackState
-RolloutHealthEvidence = _legacy.RolloutHealthEvidence
-RolloutIntegrityReport = _legacy.RolloutIntegrityReport
-RolloutRecord = _legacy.RolloutRecord
-RolloutState = _legacy.RolloutState
-
 __all__ = [
     "DeploymentStateMachine",
     "DeploymentStateMachinePolicy",
@@ -47,20 +50,11 @@ __all__ = [
     "RolloutState",
 ]
 
-
-def _deployment_event_hash(db: sqlite3.Connection, rollout_id: str, to_state: str) -> str:
-    row = db.execute(
-        "SELECT event_hash FROM deployment_rollout_events "
-        "WHERE rollout_id=? AND to_state=? ORDER BY seq DESC LIMIT 1",
-        (rollout_id, to_state),
-    ).fetchone()
-    if row is None:
-        raise RuntimeError(f"deployment event missing:{rollout_id}:{to_state}")
-    return str(row[0])
+_APPLICATION_ID = "scorpion-mff/0.27.0"
 
 
-class DeploymentStateMachine(_legacy.DeploymentStateMachine):
-    """Migration-managed, journaled, single-snapshot production deployment control."""
+class DeploymentStateMachine(LegacyDeploymentStateMachine):
+    """v0.27 production deployment gate with migration and capability provenance."""
 
     def __init__(
         self,
@@ -68,15 +62,30 @@ class DeploymentStateMachine(_legacy.DeploymentStateMachine):
         *,
         policy: DeploymentStateMachinePolicy | None = None,
     ) -> None:
+        # Bootstrap only the stable core schema, then migrate every production extension
+        # through the checksummed migration ledger before installing runtime triggers.
         CoreDeploymentStateMachine.__init__(self, path, policy=policy)
-        report = apply_schema_migrations(
-            path,
-            application_id="deployment-state-machine/0.27.0",
-        )
-        if not report.valid:
-            raise RuntimeError("production schema migration provenance is invalid")
+        apply_schema_migrations(self.path, application_id=_APPLICATION_ID)
         with self._connect() as db:
-            _legacy._ensure_readiness_enforcement(db)
+            _ensure_readiness_enforcement(db)
+
+    @staticmethod
+    def _deployment_event_hash(
+        db: sqlite3.Connection,
+        *,
+        rollout_id: str,
+        to_state: str,
+    ) -> str:
+        row = db.execute(
+            """
+            SELECT event_hash FROM deployment_rollout_events
+            WHERE rollout_id=? AND to_state=? ORDER BY seq DESC LIMIT 1
+            """,
+            (rollout_id, to_state),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"deployment event missing for {rollout_id}:{to_state}")
+        return str(row[0])
 
     def prepare(
         self,
@@ -91,8 +100,6 @@ class DeploymentStateMachine(_legacy.DeploymentStateMachine):
         readiness_certificate: RolloutReadinessCertificate | None = None,
     ) -> RolloutRecord:
         timestamp = (now or datetime.now(UTC)).astimezone(UTC)
-        if readiness_certificate is None:
-            raise ValueError("rollout readiness certificate is required")
         prepared = super().prepare(
             candidate_release_id=candidate_release_id,
             dossier=dossier,
@@ -103,37 +110,44 @@ class DeploymentStateMachine(_legacy.DeploymentStateMachine):
             now=timestamp,
             readiness_certificate=readiness_certificate,
         )
+        if readiness_certificate is None:
+            # Super already rejects this. Keep type narrowing explicit for strict mypy.
+            raise RuntimeError("rollout readiness certificate unexpectedly missing")
+
+        payload_hash = capability_payload_sha256(
+            certificate_id=readiness_certificate.certificate_id,
+            component=prepared.component,
+            candidate_release_id=prepared.candidate_release_id,
+            expires_ts_utc=readiness_certificate.expires_ts_utc,
+        )
         try:
             with self._connect() as db:
                 db.execute("BEGIN IMMEDIATE")
-                payload_hash = capability_payload_sha256(
-                    certificate_id=readiness_certificate.certificate_id,
-                    component=readiness_certificate.component,
-                    candidate_release_id=candidate_release_id,
-                    expires_ts_utc=readiness_certificate.expires_ts_utc,
-                )
                 ensure_readiness_capability_issued(
                     db,
                     certificate_id=readiness_certificate.certificate_id,
-                    component=readiness_certificate.component,
-                    candidate_release_id=candidate_release_id,
+                    component=prepared.component,
+                    candidate_release_id=prepared.candidate_release_id,
                     expires_ts_utc=readiness_certificate.expires_ts_utc,
                     actor="production-readiness-gate",
                     issued_ts_utc=readiness_certificate.generated_ts_utc,
+                )
+                prepared_event_hash = self._deployment_event_hash(
+                    db,
+                    rollout_id=prepared.rollout_id,
+                    to_state=RolloutState.PREPARED.value,
                 )
                 append_readiness_capability_event(
                     db,
                     certificate_id=readiness_certificate.certificate_id,
                     event_kind=ReadinessCapabilityEventKind.CONSUMED,
-                    component=readiness_certificate.component,
-                    candidate_release_id=candidate_release_id,
+                    component=prepared.component,
+                    candidate_release_id=prepared.candidate_release_id,
                     rollout_id=prepared.rollout_id,
                     actor="production-readiness-gate",
-                    reason="readiness capability atomically consumed by PREPARED rollout",
+                    reason="single-use readiness capability consumed by PREPARED rollout",
                     payload_sha256=payload_hash,
-                    deployment_event_hash=_deployment_event_hash(
-                        db, prepared.rollout_id, RolloutState.PREPARED.value
-                    ),
+                    deployment_event_hash=prepared_event_hash,
                     now=timestamp,
                 )
                 journal = verify_readiness_capability_journal_connection(
@@ -143,7 +157,8 @@ class DeploymentStateMachine(_legacy.DeploymentStateMachine):
                 )
                 if not journal.valid:
                     raise RuntimeError(
-                        "readiness capability journal invalid: " + ",".join(journal.failures)
+                        "readiness capability journal invalid after consumption: "
+                        + ",".join(journal.failures)
                     )
                 snapshot = certify_activation_snapshot(
                     db,
@@ -158,7 +173,8 @@ class DeploymentStateMachine(_legacy.DeploymentStateMachine):
                 )
                 if not snapshot.passed:
                     raise RuntimeError(
-                        "activation snapshot certification failed: " + ",".join(snapshot.failures)
+                        "single-snapshot activation certification failed after PREPARED: "
+                        + ",".join(snapshot.failures)
                     )
                 db.execute(
                     "UPDATE production_readiness_consumptions SET activation_snapshot_hash=? "
@@ -177,11 +193,10 @@ class DeploymentStateMachine(_legacy.DeploymentStateMachine):
                 db.execute("COMMIT")
         except Exception:
             with contextlib.suppress(Exception):
-                _legacy.DeploymentStateMachine.cancel(
-                    self,
+                super().cancel(
                     prepared.rollout_id,
                     operator="production-readiness-gate",
-                    reason="post-PREPARED provenance certification failed",
+                    reason="v0.27 post-prepare provenance certification failed",
                     now=timestamp,
                 )
             raise
@@ -195,52 +210,137 @@ class DeploymentStateMachine(_legacy.DeploymentStateMachine):
         current_audit: ProductionBottleneckAuditReport,
         now: datetime,
     ) -> None:
-        try:
-            rollout_id = str(rollout["rollout_id"])
+        rollout_id = str(rollout["rollout_id"])
+        component = str(rollout["component"])
+        capability = db.execute(
+            "SELECT * FROM production_readiness_consumptions WHERE consumed_rollout_id=?",
+            (rollout_id,),
+        ).fetchone()
+        if capability is None:
+            raise _ActivationReadinessInvalid("consumed readiness capability is missing")
+        certificate_id = str(capability["certificate_id"])
+        if certificate_id != str(rollout["readiness_certificate_id"]):
+            raise _ActivationReadinessInvalid(
+                "rollout readiness certificate identity changed"
+            )
+        for column in (
+            "component",
+            "candidate_release_id",
+            "dossier_id",
+            "authorization_id",
+            "evidence_bundle_hash",
+        ):
+            if str(capability[column]) != str(rollout[column]):
+                raise _ActivationReadinessInvalid(
+                    f"readiness capability binding changed:{column}"
+                )
+        expiry = datetime.fromisoformat(str(capability["certificate_expires_ts_utc"])).astimezone(
+            UTC
+        )
+        if now > expiry:
+            raise _ActivationReadinessInvalid("readiness capability expired")
+
+        encoded_policy = str(capability["bottleneck_policy_json"])
+        policy = parse_bottleneck_policy_json(encoded_policy)
+        policy_hash = bottleneck_policy_fingerprint(policy)
+        if policy_hash != str(capability["bottleneck_policy_sha256"]):
+            raise _ActivationReadinessInvalid(
+                "readiness bottleneck policy integrity mismatch"
+            )
+        if policy_hash != str(rollout["readiness_bottleneck_policy_hash"]):
+            raise _ActivationReadinessInvalid("rollout bottleneck policy binding changed")
+        if bottleneck_policy_json(policy) != encoded_policy:
+            raise _ActivationReadinessInvalid("readiness bottleneck policy is noncanonical")
+
+        snapshot = certify_activation_snapshot(
+            db,
+            self.path,
+            component=component,
+            rollout_id=rollout_id,
+            certificate_id=certificate_id,
+            candidate_release_id=str(rollout["candidate_release_id"]),
+            previous_release_id=str(rollout["previous_release_id"]),
+            policy=policy,
+            now=now,
+        )
+        if not snapshot.passed:
+            raise _ActivationReadinessInvalid(
+                "single-snapshot activation certification failed:" + ",".join(snapshot.failures)
+            )
+        expected_snapshot = str(capability["activation_snapshot_hash"])
+        if not expected_snapshot:
+            raise _ActivationReadinessInvalid("activation snapshot binding is missing")
+        if expected_snapshot != str(rollout["readiness_activation_snapshot_hash"]):
+            raise _ActivationReadinessInvalid("rollout activation snapshot binding changed")
+        if snapshot.snapshot_hash != expected_snapshot:
+            raise _ActivationReadinessInvalid("activation snapshot changed after PREPARED")
+        if snapshot.control_hash != str(capability["activation_control_hash"]):
+            raise _ActivationReadinessInvalid("activation control epoch changed")
+        if snapshot.bottleneck_hash != str(capability["activation_bottleneck_hash"]):
+            raise _ActivationReadinessInvalid("activation bottleneck epoch changed")
+        if activation_bottleneck_fingerprint(current_audit) != snapshot.bottleneck_hash:
+            raise _ActivationReadinessInvalid(
+                "caller audit does not match authoritative activation snapshot"
+            )
+
+    def _append_terminal_capability_event(
+        self,
+        rollout_id: str,
+        *,
+        kind: ReadinessCapabilityEventKind,
+        deployment_state: str,
+        actor: str,
+        reason: str,
+        now: datetime,
+    ) -> None:
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rollout = db.execute(
+                "SELECT * FROM deployment_rollouts WHERE rollout_id=?",
+                (rollout_id,),
+            ).fetchone()
+            if rollout is None:
+                db.execute("ROLLBACK")
+                raise KeyError(rollout_id)
             certificate_id = str(rollout["readiness_certificate_id"])
-            capability = db.execute(
-                "SELECT * FROM production_readiness_consumptions WHERE certificate_id=?",
+            report = verify_readiness_capability_journal_connection(
+                db,
+                certificate_id=certificate_id,
+            )
+            if report.latest_kind in {
+                ReadinessCapabilityEventKind.ACTIVATED.value,
+                ReadinessCapabilityEventKind.INVALIDATED.value,
+                ReadinessCapabilityEventKind.EXPIRED.value,
+            }:
+                db.execute("COMMIT")
+                return
+            first = db.execute(
+                "SELECT payload_sha256 FROM readiness_capability_events "
+                "WHERE certificate_id=? ORDER BY seq LIMIT 1",
                 (certificate_id,),
             ).fetchone()
-            if capability is None or str(capability["consumed_rollout_id"]) != rollout_id:
-                raise ValueError("consumed readiness capability is missing")
-            encoded = str(capability["bottleneck_policy_json"])
-            policy = parse_bottleneck_policy_json(encoded)
-            policy_hash = bottleneck_policy_fingerprint(policy)
-            if policy_hash != str(capability["bottleneck_policy_sha256"]):
-                raise ValueError("readiness bottleneck policy integrity mismatch")
-            if policy_hash != str(rollout["readiness_bottleneck_policy_hash"]):
-                raise ValueError("rollout bottleneck policy binding changed")
-            if bottleneck_policy_json(policy) != encoded:
-                raise ValueError("readiness bottleneck policy is noncanonical")
-            snapshot = certify_activation_snapshot(
+            if first is None:
+                db.execute("ROLLBACK")
+                raise RuntimeError("readiness capability ISSUED event is missing")
+            deployment_hash = self._deployment_event_hash(
                 db,
-                self.path,
-                component=str(rollout["component"]),
                 rollout_id=rollout_id,
+                to_state=deployment_state,
+            )
+            append_readiness_capability_event(
+                db,
                 certificate_id=certificate_id,
+                event_kind=kind,
+                component=str(rollout["component"]),
                 candidate_release_id=str(rollout["candidate_release_id"]),
-                previous_release_id=str(rollout["previous_release_id"]),
-                policy=policy,
+                rollout_id=rollout_id,
+                actor=actor,
+                reason=reason,
+                payload_sha256=str(first["payload_sha256"]),
+                deployment_event_hash=deployment_hash,
                 now=now,
             )
-            if not snapshot.passed:
-                raise ValueError(";".join(snapshot.failures))
-            stored = str(capability["activation_snapshot_hash"])
-            if not stored or stored != str(rollout["readiness_activation_snapshot_hash"]):
-                raise ValueError("activation snapshot binding changed")
-            if snapshot.snapshot_hash != stored:
-                raise ValueError("activation snapshot changed after PREPARED")
-            if snapshot.control_hash != str(capability["activation_control_hash"]):
-                raise ValueError("activation control epoch changed after PREPARED")
-            if snapshot.bottleneck_hash != str(capability["activation_bottleneck_hash"]):
-                raise ValueError("bottleneck epoch changed after PREPARED")
-            if activation_bottleneck_fingerprint(current_audit) != snapshot.bottleneck_hash:
-                raise ValueError("caller audit does not match single-snapshot activation epoch")
-        except _legacy._ActivationReadinessInvalid:
-            raise
-        except Exception as exc:
-            raise _legacy._ActivationReadinessInvalid(str(exc)) from exc
+            db.execute("COMMIT")
 
     def cancel(
         self,
@@ -251,37 +351,21 @@ class DeploymentStateMachine(_legacy.DeploymentStateMachine):
         now: datetime | None = None,
     ) -> RolloutRecord:
         timestamp = (now or datetime.now(UTC)).astimezone(UTC)
-        record = super().cancel(rollout_id, operator=operator, reason=reason, now=timestamp)
-        with self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute(
-                "SELECT readiness_certificate_id FROM deployment_rollouts WHERE rollout_id=?",
-                (rollout_id,),
-            ).fetchone()
-            certificate_id = str(row[0]) if row is not None else ""
-            journal_row = db.execute(
-                "SELECT payload_sha256 FROM readiness_capability_events "
-                "WHERE certificate_id=? ORDER BY seq DESC LIMIT 1",
-                (certificate_id,),
-            ).fetchone()
-            if certificate_id and journal_row is not None:
-                append_readiness_capability_event(
-                    db,
-                    certificate_id=certificate_id,
-                    event_kind=ReadinessCapabilityEventKind.INVALIDATED,
-                    component=record.component,
-                    candidate_release_id=record.candidate_release_id,
-                    rollout_id=rollout_id,
-                    actor=operator,
-                    reason=reason,
-                    payload_sha256=str(journal_row[0]),
-                    deployment_event_hash=_deployment_event_hash(
-                        db, rollout_id, RolloutState.CANCELLED.value
-                    ),
-                    now=timestamp,
-                )
-            db.execute("COMMIT")
-        return record
+        result = super().cancel(
+            rollout_id,
+            operator=operator,
+            reason=reason,
+            now=timestamp,
+        )
+        self._append_terminal_capability_event(
+            rollout_id,
+            kind=ReadinessCapabilityEventKind.INVALIDATED,
+            deployment_state=RolloutState.CANCELLED.value,
+            actor=operator,
+            reason=reason,
+            now=timestamp,
+        )
+        return result
 
     def activate(
         self,
@@ -293,28 +377,32 @@ class DeploymentStateMachine(_legacy.DeploymentStateMachine):
     ) -> RolloutRecord:
         timestamp = (now or datetime.now(UTC)).astimezone(UTC)
         try:
-            activated = super().activate(
+            result = super().activate(
                 rollout_id,
                 operator=operator,
                 current_audit=current_audit,
                 now=timestamp,
             )
-        except ValueError as exc:
-            if "readiness capability expired before activation" in str(exc):
-                self._journal_terminal(
-                    rollout_id,
-                    ReadinessCapabilityEventKind.EXPIRED,
-                    actor="production-readiness-gate",
-                    reason="readiness capability expired before guarded activation",
-                    now=timestamp,
-                )
+        except Exception:
+            with contextlib.suppress(Exception):
+                state = self.get(rollout_id).state
+                if state is RolloutState.EXPIRED:
+                    self._append_terminal_capability_event(
+                        rollout_id,
+                        kind=ReadinessCapabilityEventKind.EXPIRED,
+                        deployment_state=RolloutState.EXPIRED.value,
+                        actor="production-readiness-gate",
+                        reason="readiness capability expired before activation",
+                        now=timestamp,
+                    )
             raise
         try:
-            self._journal_terminal(
+            self._append_terminal_capability_event(
                 rollout_id,
-                ReadinessCapabilityEventKind.ACTIVATED,
+                kind=ReadinessCapabilityEventKind.ACTIVATED,
+                deployment_state=RolloutState.ACTIVE_GUARDED.value,
                 actor=operator,
-                reason="operator activated single-snapshot-certified guarded rollout",
+                reason="operator activated single-snapshot-certified rollout",
                 now=timestamp,
             )
         except Exception as exc:
@@ -322,66 +410,13 @@ class DeploymentStateMachine(_legacy.DeploymentStateMachine):
                 self.halt(
                     rollout_id,
                     reason="readiness_capability_activation_journal_failed",
-                    actor="deployment-state-machine",
+                    actor="production-readiness-gate",
                     now=timestamp,
                 )
-            raise RuntimeError("activation provenance journal failed; rollout halted") from exc
-        return activated
-
-    def _journal_terminal(
-        self,
-        rollout_id: str,
-        kind: ReadinessCapabilityEventKind,
-        *,
-        actor: str,
-        reason: str,
-        now: datetime,
-    ) -> None:
-        with self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute(
-                "SELECT readiness_certificate_id,component,candidate_release_id "
-                "FROM deployment_rollouts WHERE rollout_id=?",
-                (rollout_id,),
-            ).fetchone()
-            if row is None:
-                db.execute("ROLLBACK")
-                raise KeyError(rollout_id)
-            certificate_id = str(row["readiness_certificate_id"])
-            latest = db.execute(
-                "SELECT payload_sha256 FROM readiness_capability_events "
-                "WHERE certificate_id=? ORDER BY seq DESC LIMIT 1",
-                (certificate_id,),
-            ).fetchone()
-            if latest is None:
-                db.execute("ROLLBACK")
-                raise RuntimeError("readiness capability journal is missing")
-            state = {
-                ReadinessCapabilityEventKind.ACTIVATED: RolloutState.ACTIVE_GUARDED.value,
-                ReadinessCapabilityEventKind.EXPIRED: RolloutState.EXPIRED.value,
-            }[kind]
-            append_readiness_capability_event(
-                db,
-                certificate_id=certificate_id,
-                event_kind=kind,
-                component=str(row["component"]),
-                candidate_release_id=str(row["candidate_release_id"]),
-                rollout_id=rollout_id,
-                actor=actor,
-                reason=reason,
-                payload_sha256=str(latest[0]),
-                deployment_event_hash=_deployment_event_hash(db, rollout_id, state),
-                now=now,
-            )
-            report = verify_readiness_capability_journal_connection(
-                db,
-                certificate_id=certificate_id,
-                expected_latest_kind=kind,
-            )
-            if not report.valid:
-                db.execute("ROLLBACK")
-                raise RuntimeError("readiness capability journal verification failed")
-            db.execute("COMMIT")
+            raise RuntimeError(
+                "activation succeeded but readiness journal failed; rollout failed closed"
+            ) from exc
+        return result
 
 
 _CORE_DEPLOYMENT_CLASS = "DeploymentStateMachine"

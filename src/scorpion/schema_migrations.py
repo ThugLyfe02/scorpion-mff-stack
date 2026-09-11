@@ -92,9 +92,10 @@ def _hash(payload: object) -> str:
 
 
 def _table(db: sqlite3.Connection, name: str) -> bool:
-    return db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
-    ).fetchone() is not None
+    return (
+        db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
+        is not None
+    )
 
 
 def _columns(db: sqlite3.Connection, table: str) -> frozenset[str]:
@@ -115,16 +116,19 @@ def _ensure_ledger_schema(db: sqlite3.Connection) -> None:
             last_migration_hash TEXT NOT NULL,updated_ts_utc TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS schema_migration_attempts (
-            attempt_id TEXT PRIMARY KEY,migration_id TEXT NOT NULL,from_version TEXT NOT NULL,
-            to_version TEXT NOT NULL,migration_sha256 TEXT NOT NULL,application_id TEXT NOT NULL,
-            status TEXT NOT NULL,started_ts_utc TEXT NOT NULL,finished_ts_utc TEXT NOT NULL DEFAULT '',
-            error_class TEXT NOT NULL DEFAULT ''
+            attempt_id TEXT PRIMARY KEY,migration_id TEXT NOT NULL,
+            from_version TEXT NOT NULL,to_version TEXT NOT NULL,
+            migration_sha256 TEXT NOT NULL,application_id TEXT NOT NULL,
+            status TEXT NOT NULL,started_ts_utc TEXT NOT NULL,
+            finished_ts_utc TEXT NOT NULL DEFAULT '',error_class TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS schema_migration_events (
-            event_id TEXT PRIMARY KEY,seq INTEGER NOT NULL UNIQUE,attempt_id TEXT NOT NULL,
-            migration_id TEXT NOT NULL,event_kind TEXT NOT NULL,from_version TEXT NOT NULL,
-            to_version TEXT NOT NULL,migration_sha256 TEXT NOT NULL,application_id TEXT NOT NULL,
-            created_ts_utc TEXT NOT NULL,previous_event_hash TEXT NOT NULL,event_hash TEXT NOT NULL
+            event_id TEXT PRIMARY KEY,seq INTEGER NOT NULL UNIQUE,
+            attempt_id TEXT NOT NULL,migration_id TEXT NOT NULL,event_kind TEXT NOT NULL,
+            from_version TEXT NOT NULL,to_version TEXT NOT NULL,
+            migration_sha256 TEXT NOT NULL,application_id TEXT NOT NULL,
+            created_ts_utc TEXT NOT NULL,previous_event_hash TEXT NOT NULL,
+            event_hash TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS schema_migration_integrity_state (
             singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1),event_count INTEGER NOT NULL,
@@ -141,8 +145,14 @@ def _ensure_ledger_schema(db: sqlite3.Connection) -> None:
 
 
 def _event_hash(
-    *, seq: int, attempt_id: str, kind: str, from_version: str,
-    application_id: str, when: datetime, previous_hash: str,
+    *,
+    seq: int,
+    attempt_id: str,
+    kind: str,
+    from_version: str,
+    application_id: str,
+    when: datetime,
+    previous_hash: str,
 ) -> str:
     return _hash(
         {
@@ -162,8 +172,13 @@ def _event_hash(
 
 
 def _append(
-    db: sqlite3.Connection, *, attempt_id: str, kind: str, from_version: str,
-    application_id: str, when: datetime,
+    db: sqlite3.Connection,
+    *,
+    attempt_id: str,
+    kind: str,
+    from_version: str,
+    application_id: str,
+    when: datetime,
 ) -> str:
     db.row_factory = sqlite3.Row
     last = db.execute(
@@ -172,10 +187,17 @@ def _append(
     seq = int(last["seq"]) + 1 if last is not None else 1
     previous = str(last["event_hash"]) if last is not None else ""
     digest = _event_hash(
-        seq=seq, attempt_id=attempt_id, kind=kind, from_version=from_version,
-        application_id=application_id, when=when, previous_hash=previous,
+        seq=seq,
+        attempt_id=attempt_id,
+        kind=kind,
+        from_version=from_version,
+        application_id=application_id,
+        when=when,
+        previous_hash=previous,
     )
-    event_id = _hash({"version": "schema-migration-event-id-v1", "seq": seq, "hash": digest})
+    event_id = _hash(
+        {"version": "schema-migration-event-id-v1", "seq": seq, "hash": digest}
+    )
     db.execute(
         """
         INSERT INTO schema_migration_events
@@ -184,9 +206,18 @@ def _append(
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
-            event_id, seq, attempt_id, MIGRATION_ID, kind, from_version,
-            TARGET_SCHEMA_VERSION, MIGRATION_SHA256, application_id,
-            when.astimezone(UTC).isoformat(), previous, digest,
+            event_id,
+            seq,
+            attempt_id,
+            MIGRATION_ID,
+            kind,
+            from_version,
+            TARGET_SCHEMA_VERSION,
+            MIGRATION_SHA256,
+            application_id,
+            when.astimezone(UTC).isoformat(),
+            previous,
+            digest,
         ),
     )
     checkpoint = db.execute(
@@ -213,14 +244,19 @@ def _apply_v10(db: sqlite3.Connection) -> None:
     db.executescript(
         """
         CREATE TABLE IF NOT EXISTS production_readiness_consumptions (
-            certificate_id TEXT PRIMARY KEY,component TEXT NOT NULL,candidate_release_id TEXT NOT NULL,
-            dossier_id TEXT NOT NULL,authorization_id TEXT NOT NULL,evidence_bundle_hash TEXT NOT NULL,
+            certificate_id TEXT PRIMARY KEY,component TEXT NOT NULL,
+            candidate_release_id TEXT NOT NULL,dossier_id TEXT NOT NULL,
+            authorization_id TEXT NOT NULL,evidence_bundle_hash TEXT NOT NULL,
             control_state_hash TEXT NOT NULL,activation_control_hash TEXT NOT NULL DEFAULT '',
-            activation_snapshot_hash TEXT NOT NULL DEFAULT '',operator_state_hash TEXT NOT NULL DEFAULT '',
+            activation_snapshot_hash TEXT NOT NULL DEFAULT '',
+            operator_state_hash TEXT NOT NULL DEFAULT '',
             activation_operator_state_hash TEXT NOT NULL DEFAULT '',
-            bottleneck_state_hash TEXT NOT NULL DEFAULT '',activation_bottleneck_hash TEXT NOT NULL DEFAULT '',
-            bottleneck_policy_json TEXT NOT NULL DEFAULT '',bottleneck_policy_sha256 TEXT NOT NULL DEFAULT '',
-            safety_event_count INTEGER NOT NULL DEFAULT 0,safety_head_event_id TEXT NOT NULL DEFAULT '',
+            bottleneck_state_hash TEXT NOT NULL DEFAULT '',
+            activation_bottleneck_hash TEXT NOT NULL DEFAULT '',
+            bottleneck_policy_json TEXT NOT NULL DEFAULT '',
+            bottleneck_policy_sha256 TEXT NOT NULL DEFAULT '',
+            safety_event_count INTEGER NOT NULL DEFAULT 0,
+            safety_head_event_id TEXT NOT NULL DEFAULT '',
             safety_chain_hash TEXT NOT NULL DEFAULT '',certificate_expires_ts_utc TEXT NOT NULL,
             consumed_rollout_id TEXT NOT NULL DEFAULT '',consumed_ts_utc TEXT NOT NULL DEFAULT ''
         );
@@ -231,8 +267,8 @@ def _apply_v10(db: sqlite3.Connection) -> None:
             event_kind TEXT NOT NULL,component TEXT NOT NULL,candidate_release_id TEXT NOT NULL,
             rollout_id TEXT NOT NULL DEFAULT '',actor TEXT NOT NULL,reason TEXT NOT NULL,
             payload_sha256 TEXT NOT NULL,deployment_event_hash TEXT NOT NULL DEFAULT '',
-            created_ts_utc TEXT NOT NULL,previous_event_hash TEXT NOT NULL,event_hash TEXT NOT NULL,
-            UNIQUE(certificate_id,seq)
+            created_ts_utc TEXT NOT NULL,previous_event_hash TEXT NOT NULL,
+            event_hash TEXT NOT NULL,UNIQUE(certificate_id,seq)
         );
         CREATE INDEX IF NOT EXISTS idx_readiness_capability_certificate_seq
         ON readiness_capability_events(certificate_id,seq);
@@ -257,27 +293,36 @@ def _apply_v10(db: sqlite3.Connection) -> None:
 def _postconditions(db: sqlite3.Connection) -> tuple[str, ...]:
     failures: list[str] = []
     for table in (
-        "deployment_rollouts", "production_readiness_consumptions",
-        "readiness_capability_events", "readiness_capability_integrity_state",
+        "deployment_rollouts",
+        "production_readiness_consumptions",
+        "readiness_capability_events",
+        "readiness_capability_integrity_state",
     ):
         if not _table(db, table):
             failures.append(f"migration_table_missing:{table}")
     if _table(db, "deployment_rollouts"):
-        for name, _ in _DEPLOYMENT_COLUMNS:
-            if name not in _columns(db, "deployment_rollouts"):
-                failures.append(f"migration_column_missing:deployment_rollouts.{name}")
+        failures.extend(
+            f"migration_column_missing:deployment_rollouts.{name}"
+            for name, _ in _DEPLOYMENT_COLUMNS
+            if name not in _columns(db, "deployment_rollouts")
+        )
     if _table(db, "production_readiness_consumptions"):
-        for name, _ in _CONSUMPTION_COLUMNS:
-            if name not in _columns(db, "production_readiness_consumptions"):
-                failures.append(f"migration_column_missing:production_readiness_consumptions.{name}")
+        failures.extend(
+            f"migration_column_missing:production_readiness_consumptions.{name}"
+            for name, _ in _CONSUMPTION_COLUMNS
+            if name not in _columns(db, "production_readiness_consumptions")
+        )
     return tuple(failures)
 
 
 def verify_schema_migration_ledger_connection(db: sqlite3.Connection) -> MigrationLedgerReport:
     db.row_factory = sqlite3.Row
-    if not all(_table(db, table) for table in (
-        "schema_migration_state", "schema_migration_events", "schema_migration_integrity_state"
-    )):
+    required = (
+        "schema_migration_state",
+        "schema_migration_events",
+        "schema_migration_integrity_state",
+    )
+    if not all(_table(db, table) for table in required):
         return MigrationLedgerReport("", 0, "", "", False, ("schema_migration_ledger_missing",))
     state = db.execute("SELECT * FROM schema_migration_state WHERE singleton_id=1").fetchone()
     current = str(state["schema_version"]) if state is not None else ""
@@ -290,19 +335,31 @@ def verify_schema_migration_ledger_connection(db: sqlite3.Connection) -> Migrati
     for index, row in enumerate(rows, start=1):
         created = datetime.fromisoformat(str(row["created_ts_utc"])).astimezone(UTC)
         expected = _event_hash(
-            seq=int(row["seq"]), attempt_id=str(row["attempt_id"]),
-            kind=str(row["event_kind"]), from_version=str(row["from_version"]),
-            application_id=str(row["application_id"]), when=created,
+            seq=int(row["seq"]),
+            attempt_id=str(row["attempt_id"]),
+            kind=str(row["event_kind"]),
+            from_version=str(row["from_version"]),
+            application_id=str(row["application_id"]),
+            when=created,
             previous_hash=str(row["previous_event_hash"]),
         )
         if int(row["seq"]) != index:
             failures.append("schema_migration_event_sequence_gap")
         if str(row["previous_event_hash"]) != previous or str(row["event_hash"]) != expected:
             failures.append("schema_migration_event_hash_mismatch")
-        if str(row["migration_sha256"]) != MIGRATION_SHA256:
-            failures.append("schema_migration_checksum_mismatch")
+        identity_valid = (
+            str(row["migration_id"]) == MIGRATION_ID
+            and str(row["to_version"]) == TARGET_SCHEMA_VERSION
+            and str(row["migration_sha256"]) == MIGRATION_SHA256
+        )
+        if not identity_valid:
+            failures.append("schema_migration_identity_or_checksum_mismatch")
         expected_id = _hash(
-            {"version": "schema-migration-event-id-v1", "seq": int(row["seq"]), "hash": str(row["event_hash"])}
+            {
+                "version": "schema-migration-event-id-v1",
+                "seq": int(row["seq"]),
+                "hash": str(row["event_hash"]),
+            }
         )
         if str(row["event_id"]) != expected_id:
             failures.append("schema_migration_event_id_mismatch")
@@ -311,21 +368,33 @@ def verify_schema_migration_ledger_connection(db: sqlite3.Connection) -> Migrati
     checkpoint = db.execute(
         "SELECT * FROM schema_migration_integrity_state WHERE singleton_id=1"
     ).fetchone()
-    if checkpoint is None or (
-        int(checkpoint["event_count"]) != len(rows)
-        or str(checkpoint["head_event_hash"]) != previous
-        or str(checkpoint["chain_hash"]) != chain
-    ):
+    checkpoint_valid = checkpoint is not None and (
+        int(checkpoint["event_count"]) == len(rows)
+        and str(checkpoint["head_event_hash"]) == previous
+        and str(checkpoint["chain_hash"]) == chain
+    )
+    if not checkpoint_valid:
         failures.append("schema_migration_integrity_checkpoint_mismatch")
     if current == TARGET_SCHEMA_VERSION:
         applied = [row for row in rows if str(row["event_kind"]) == "APPLIED"]
         applied_hash = str(applied[-1]["event_hash"]) if applied else ""
-        if state is None or str(state["last_migration_id"]) != MIGRATION_ID:
-            failures.append("schema_migration_state_mismatch")
-        elif str(state["last_migration_hash"]) != applied_hash:
+        state_invalid = (
+            state is None
+            or str(state["last_migration_id"]) != MIGRATION_ID
+            or str(state["last_migration_hash"]) != applied_hash
+        )
+        if state_invalid:
             failures.append("schema_migration_state_mismatch")
         failures.extend(_postconditions(db))
-    return MigrationLedgerReport(current, len(rows), previous, chain, not failures, tuple(dict.fromkeys(failures)))
+    unique_failures = tuple(dict.fromkeys(failures))
+    return MigrationLedgerReport(
+        current_version=current,
+        events=len(rows),
+        head_event_hash=previous,
+        chain_hash=chain,
+        valid=not unique_failures,
+        failures=unique_failures,
+    )
 
 
 def verify_schema_migration_ledger(path: str | Path) -> MigrationLedgerReport:
@@ -338,7 +407,10 @@ def verify_schema_migration_ledger(path: str | Path) -> MigrationLedgerReport:
 
 
 def apply_schema_migrations(
-    path: str | Path, *, application_id: str, now: datetime | None = None
+    path: str | Path,
+    *,
+    application_id: str,
+    now: datetime | None = None,
 ) -> MigrationLedgerReport:
     database = Path(path)
     if not database.is_file():
@@ -359,17 +431,21 @@ def apply_schema_migrations(
                 "INSERT INTO schema_migration_state VALUES (1,?,'','',?)",
                 (LEGACY_SCHEMA_VERSION, timestamp.isoformat()),
             )
-        for row in db.execute(
+        stale = db.execute(
             "SELECT * FROM schema_migration_attempts WHERE status='STARTED' ORDER BY started_ts_utc"
-        ).fetchall():
+        ).fetchall()
+        for row in stale:
             db.execute(
                 "UPDATE schema_migration_attempts SET status='INTERRUPTED',finished_ts_utc=? "
                 "WHERE attempt_id=? AND status='STARTED'",
                 (timestamp.isoformat(), str(row["attempt_id"])),
             )
             _append(
-                db, attempt_id=str(row["attempt_id"]), kind="INTERRUPTED",
-                from_version=str(row["from_version"]), application_id=application_id,
+                db,
+                attempt_id=str(row["attempt_id"]),
+                kind="INTERRUPTED",
+                from_version=str(row["from_version"]),
+                application_id=application_id,
                 when=timestamp,
             )
         db.execute("COMMIT")
@@ -387,8 +463,10 @@ def apply_schema_migrations(
             )
         attempt_id = _hash(
             {
-                "version": "schema-migration-attempt-v1", "migration_id": MIGRATION_ID,
-                "application_id": application_id, "started_ts_utc": timestamp.isoformat(),
+                "version": "schema-migration-attempt-v1",
+                "migration_id": MIGRATION_ID,
+                "application_id": application_id,
+                "started_ts_utc": timestamp.isoformat(),
             }
         )
         db.execute("BEGIN IMMEDIATE")
@@ -399,13 +477,22 @@ def apply_schema_migrations(
              status,started_ts_utc) VALUES (?,?,?,?,?,?,'STARTED',?)
             """,
             (
-                attempt_id, MIGRATION_ID, current, TARGET_SCHEMA_VERSION,
-                MIGRATION_SHA256, application_id, timestamp.isoformat(),
+                attempt_id,
+                MIGRATION_ID,
+                current,
+                TARGET_SCHEMA_VERSION,
+                MIGRATION_SHA256,
+                application_id,
+                timestamp.isoformat(),
             ),
         )
         _append(
-            db, attempt_id=attempt_id, kind="STARTED", from_version=current,
-            application_id=application_id, when=timestamp,
+            db,
+            attempt_id=attempt_id,
+            kind="STARTED",
+            from_version=current,
+            application_id=application_id,
+            when=timestamp,
         )
         db.execute("COMMIT")
         try:
@@ -415,11 +502,16 @@ def apply_schema_migrations(
             if post:
                 raise RuntimeError(";".join(post))
             applied_hash = _append(
-                db, attempt_id=attempt_id, kind="APPLIED", from_version=current,
-                application_id=application_id, when=timestamp,
+                db,
+                attempt_id=attempt_id,
+                kind="APPLIED",
+                from_version=current,
+                application_id=application_id,
+                when=timestamp,
             )
             db.execute(
-                "UPDATE schema_migration_attempts SET status='APPLIED',finished_ts_utc=? WHERE attempt_id=?",
+                "UPDATE schema_migration_attempts SET status='APPLIED',finished_ts_utc=? "
+                "WHERE attempt_id=?",
                 (timestamp.isoformat(), attempt_id),
             )
             db.execute(
@@ -434,13 +526,17 @@ def apply_schema_migrations(
             db.execute("ROLLBACK")
             db.execute("BEGIN IMMEDIATE")
             db.execute(
-                "UPDATE schema_migration_attempts SET status='FAILED',finished_ts_utc=?,error_class=? "
-                "WHERE attempt_id=?",
+                "UPDATE schema_migration_attempts SET status='FAILED',finished_ts_utc=?,"
+                "error_class=? WHERE attempt_id=?",
                 (timestamp.isoformat(), type(exc).__name__, attempt_id),
             )
             _append(
-                db, attempt_id=attempt_id, kind="FAILED", from_version=current,
-                application_id=application_id, when=timestamp,
+                db,
+                attempt_id=attempt_id,
+                kind="FAILED",
+                from_version=current,
+                application_id=application_id,
+                when=timestamp,
             )
             db.execute("COMMIT")
             raise RuntimeError("schema migration failed") from exc
