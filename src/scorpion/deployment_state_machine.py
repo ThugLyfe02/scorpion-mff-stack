@@ -220,7 +220,11 @@ class DeploymentStateMachine(_core.DeploymentStateMachine):
                 component=readiness_certificate.component,
                 required_heartbeats=readiness_certificate.bottleneck_policy.required_heartbeats,
             )
-        if preflight_control.state_hash != readiness_certificate.control_state_hash:
+        if (
+            preflight_control.safety_event_count != readiness_certificate.safety_event_count
+            or preflight_control.safety_head_event_id != readiness_certificate.safety_head_event_id
+            or preflight_control.safety_chain_hash != readiness_certificate.safety_chain_hash
+        ):
             raise ValueError("control-state epoch changed after readiness certification")
 
         current_snapshot = build_operator_observability_snapshot(
