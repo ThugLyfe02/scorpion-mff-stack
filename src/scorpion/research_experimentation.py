@@ -652,53 +652,63 @@ def verify_research_experiment_ledger(
     assignments: dict[str, ResearchAssignment] = {}
     for row in assignment_rows:
         try:
-            item = _decode_assignment(row)
-            payload = _assignment_payload(item)
+            assignment_item = _decode_assignment(row)
+            assignment_payload = _assignment_payload(assignment_item)
         except (ValueError, TypeError, json.JSONDecodeError):
             failures.append("research_assignment_decode_failure")
             continue
-        if item.record_hash != _hash(payload):
+        if assignment_item.record_hash != _hash(assignment_payload):
             failures.append("research_assignment_record_hash_mismatch")
-        expected_id = _hash({"version": "research-assignment-id-v1", "payload": payload})
-        if item.assignment_id != expected_id:
+        expected_assignment_id = _hash(
+            {"version": "research-assignment-id-v1", "payload": assignment_payload}
+        )
+        if assignment_item.assignment_id != expected_assignment_id:
             failures.append("research_assignment_id_mismatch")
-        assignments[item.assignment_id] = item
+        assignments[assignment_item.assignment_id] = assignment_item
     by_episode: dict[str, list[ResearchAssignment]] = {}
-    for item in assignments.values():
-        by_episode.setdefault(item.episode_id, []).append(item)
-    for rows in by_episode.values():
-        ordered = sorted(rows, key=lambda item: item.step_index)
-        for expected_step, item in enumerate(ordered):
-            if item.step_index != expected_step:
+    for assignment_item in assignments.values():
+        by_episode.setdefault(assignment_item.episode_id, []).append(assignment_item)
+    for episode_rows in by_episode.values():
+        ordered = sorted(episode_rows, key=lambda value: value.step_index)
+        for expected_step, assignment_item in enumerate(ordered):
+            if assignment_item.step_index != expected_step:
                 failures.append("research_assignment_step_gap")
             expected_previous = ordered[expected_step - 1].assignment_id if expected_step else ""
-            if item.previous_assignment_id != expected_previous:
+            if assignment_item.previous_assignment_id != expected_previous:
                 failures.append("research_assignment_previous_mismatch")
     outcomes: dict[str, ResearchExperimentOutcome] = {}
     for row in outcome_rows:
         try:
-            item = _decode_outcome(row)
-            payload = _outcome_payload(item)
+            outcome_item = _decode_outcome(row)
+            outcome_payload = _outcome_payload(outcome_item)
         except (ValueError, TypeError):
             failures.append("research_outcome_decode_failure")
             continue
-        assignment = assignments.get(item.assignment_id)
-        if assignment is None:
+        assignment_item = assignments.get(outcome_item.assignment_id)
+        if assignment_item is None:
             failures.append("research_outcome_assignment_missing")
             continue
-        if item.reward_contract_hash != assignment.reward_contract_hash:
+        if outcome_item.reward_contract_hash != assignment_item.reward_contract_hash:
             failures.append("research_outcome_reward_contract_mismatch")
-        if item.realized_ts_utc < assignment.maturity_ts_utc:
+        if outcome_item.realized_ts_utc < assignment_item.maturity_ts_utc:
             failures.append("research_outcome_before_maturity")
-        if item.record_hash != _hash(payload):
+        if outcome_item.record_hash != _hash(outcome_payload):
             failures.append("research_outcome_record_hash_mismatch")
-        expected_id = _hash({"version": "research-outcome-id-v1", "payload": payload})
-        if item.outcome_id != expected_id:
+        expected_outcome_id = _hash(
+            {"version": "research-outcome-id-v1", "payload": outcome_payload}
+        )
+        if outcome_item.outcome_id != expected_outcome_id:
             failures.append("research_outcome_id_mismatch")
-        outcomes[item.outcome_id] = item
+        outcomes[outcome_item.outcome_id] = outcome_item
     records = {
-        **{item.assignment_id: item.record_hash for item in assignments.values()},
-        **{item.outcome_id: item.record_hash for item in outcomes.values()},
+        **{
+            assignment_item.assignment_id: assignment_item.record_hash
+            for assignment_item in assignments.values()
+        },
+        **{
+            outcome_item.outcome_id: outcome_item.record_hash
+            for outcome_item in outcomes.values()
+        },
     }
     previous = _GENESIS
     chain = _GENESIS
