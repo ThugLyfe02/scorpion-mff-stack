@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scorpion-mff"
-version = "0.5.0"
-description = "Deterministic MFF control plane with resilient Discord intelligence, exact-execution forensics, and evidence-gated risk research."
+version = "0.32.0"
+description = "Deterministic MFF control plane with internally attested cluster randomization, certified cross-fit provenance, treatment-specific censoring-aware causal learning, cluster-robust augmented inverse-probability attribution, sequential doubly robust research-policy evaluation, durable hypothesis-family memory, false-discovery budget accounting, breakthrough insight outboxing, causal research assignment, regime-aware research path planning, immutable accepted-label truth lineage, realized-learning-yield calibration, purged-OOF contextual ensemble specialization, information-efficient research allocation, holdout-safe hard-example curriculum construction, checksummed schema-migration provenance, tamper-evident readiness capability journaling, single-snapshot activation certification, activation-epoch-sealed rollout capabilities, production operator observability, isolated hot-path latency budgets, atomic durable receipt ordering, evidence-bound rollout/rollback state machines, production bottleneck auditing, partial-outage chaos drills, dual-channel NO_TRADE persistence, formal promotion evidence, leakage-safe adaptive training, and verified recovery."
 requires-python = ">=3.13"
 dependencies = [
   "discord.py>=2.4,<3",
@@ -25,10 +25,37 @@ scorpion-replay = "scorpion.cli:replay_main"
 scorpion-health = "scorpion.cli:health_main"
 scorpion-accuracy = "scorpion.cli:accuracy_main"
 scorpion-ops = "scorpion.cli:ops_main"
+scorpion-storage = "scorpion.cli:storage_main"
+scorpion-schema = "scorpion.cli:schema_main"
+scorpion-schema-migrate = "scorpion.schema_migration_cli:migration_main"
+scorpion-order = "scorpion.cli:order_main"
+scorpion-backup = "scorpion.cli:backup_main"
+scorpion-snapshot = "scorpion.cli:snapshot_main"
+scorpion-features = "scorpion.cli:features_main"
+scorpion-quarantine = "scorpion.cli:quarantine_main"
+scorpion-fault-certify = "scorpion.cli:fault_certify_main"
+scorpion-policy = "scorpion.cli:policy_main"
+scorpion-time = "scorpion.cli:temporal_main"
+scorpion-trace = "scorpion.cli:trace_main"
+scorpion-certify = "scorpion.cli:certify_main"
+scorpion-uncertainty = "scorpion.uncertainty_cli:uncertainty_main"
 scorpion-reconcile = "scorpion.cli:reconcile_main"
 scorpion-history-sync = "scorpion.history_sync:history_sync_main"
 scorpion-forensics = "scorpion.forensics_cli:forensics_main"
+scorpion-micro-forensics = "scorpion.microstructure_cli:microstructure_forensics_main"
+scorpion-micro-plan = "scorpion.microstructure_ops_cli:micro_plan_main"
+scorpion-micro-bars = "scorpion.microstructure_bars:micro_bars_main"
+scorpion-micro-latency-value = "scorpion.microstructure_ops_cli:latency_value_main"
+scorpion-fill-calibration = "scorpion.microstructure_ops_cli:fill_calibration_main"
+scorpion-quant-audit = "scorpion.quant_audit:quant_audit_main"
+scorpion-evolution = "scorpion.evolution_cli:evolution_main"
+scorpion-opra-normalize = "scorpion.opra_bridge:opra_normalize_main"
 scorpion-ingest = "scorpion.runtime:ingest_main"
+scorpion-prod-audit = "scorpion.production_ops_cli:bottleneck_audit_main"
+scorpion-prod-status = "scorpion.production_ops_cli:operator_status_main"
+scorpion-hot-benchmark = "scorpion.production_ops_cli:hot_path_benchmark_main"
+scorpion-prod-ready = "scorpion.production_ops_cli:production_readiness_main"
+scorpion-chaos-drill = "scorpion.production_ops_cli:partial_outage_drill_main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/scorpion"]
@@ -40,7 +67,7 @@ pythonpath = ["."]
 
 [tool.ruff]
 target-version = "py313"
-line-length = 100
+line-length = 102
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]

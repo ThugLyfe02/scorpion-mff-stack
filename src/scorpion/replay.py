@@ -8,6 +8,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
+from .config import DEFAULT_POLICY, Policy
 from .domain import BookState, Effect, SignalEvent
 from .reducer import reduce_book
 
@@ -16,6 +17,11 @@ class IntrabarPolicy(StrEnum):
     CONSERVATIVE = "CONSERVATIVE"
     OPTIMISTIC = "OPTIMISTIC"
     BOUNDS = "BOUNDS"
+
+
+class ReplayOrder(StrEnum):
+    SOURCE_TIME = "SOURCE_TIME"
+    INPUT = "INPUT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,15 +60,29 @@ def same_bar_target_resolution(
     return AmbiguousFill(None, None, "target_not_printed")
 
 
-def replay(events: Sequence[SignalEvent]) -> tuple[BookState, tuple[Effect, ...]]:
-    ordered = sorted(
-        events,
-        key=lambda event: (event.source_ts_utc, event.received_ts_utc, event.event_id),
-    )
+def replay(
+    events: Sequence[SignalEvent],
+    policy: Policy = DEFAULT_POLICY,
+    *,
+    order: ReplayOrder = ReplayOrder.SOURCE_TIME,
+) -> tuple[BookState, tuple[Effect, ...]]:
+    """Replay normalized events under an explicit ordering contract.
+
+    SOURCE_TIME preserves the original research/counterfactual behavior. INPUT is for runtime and
+    recovery surfaces whose caller has already loaded events in the durable normalized process
+    sequence. Stateful production replay must not silently re-sort that sequence by source clock.
+    """
+    if order is ReplayOrder.SOURCE_TIME:
+        ordered: Sequence[SignalEvent] = sorted(
+            events,
+            key=lambda event: (event.source_ts_utc, event.received_ts_utc, event.event_id),
+        )
+    else:
+        ordered = events
     state = BookState()
     effects: list[Effect] = []
     for event in ordered:
-        state, produced = reduce_book(state, event)
+        state, produced = reduce_book(state, event, policy)
         effects.extend(produced)
     return state, tuple(effects)
 

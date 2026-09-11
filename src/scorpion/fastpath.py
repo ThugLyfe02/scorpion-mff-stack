@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
+from typing import Protocol
 
 from .broker import ExecutionMode, ExecutionResult, PaperBroker, Quote, ReviewOnlyBroker
 from .decision_packet import DecisionDisposition, OperatorDecisionPacket
@@ -38,6 +39,16 @@ class PreparedExecutionIntent:
     prepared_ts_utc: datetime
     preparation_latency_us: int
     note: str = ""
+
+
+class QuoteSource(Protocol):
+    def get(
+        self,
+        contract_key: str,
+        *,
+        now: datetime | None = None,
+        max_age: timedelta = timedelta(seconds=1),
+    ) -> Quote | None: ...
 
 
 class QuoteCache:
@@ -90,7 +101,7 @@ class FastPathPreparer:
 
     def __init__(
         self,
-        quote_cache: QuoteCache,
+        quote_cache: QuoteSource,
         *,
         mode: ExecutionMode = ExecutionMode.REVIEW_ONLY,
         quote_max_age: timedelta = timedelta(seconds=1),
