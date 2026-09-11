@@ -173,7 +173,12 @@ def _normalize_claim(claim: str) -> str:
     return normalized
 
 
-def _normalize_strings(values: tuple[str, ...], *, name: str, allow_empty: bool = False) -> tuple[str, ...]:
+def _normalize_strings(
+    values: tuple[str, ...],
+    *,
+    name: str,
+    allow_empty: bool = False,
+) -> tuple[str, ...]:
     normalized = tuple(sorted({item.strip() for item in values if item.strip()}))
     if not allow_empty and not normalized:
         raise ValueError(f"{name} cannot be empty")
@@ -595,6 +600,12 @@ def verify_hypothesis_memory(path: str | Path) -> HypothesisMemoryVerification:
     failures: list[str] = []
     records: dict[str, str] = {}
     for row in hypotheses:
+        mechanism_scope = tuple(
+            str(value) for value in json.loads(str(row["mechanism_scope_json"]))
+        )
+        intervention_scope = tuple(
+            str(value) for value in json.loads(str(row["intervention_scope_json"]))
+        )
         item = ResearchHypothesis(
             hypothesis_id=str(row["hypothesis_id"]),
             family_id=str(row["family_id"]),
@@ -602,10 +613,8 @@ def verify_hypothesis_memory(path: str | Path) -> HypothesisMemoryVerification:
             generation=int(row["generation"]),
             canonical_claim=str(row["canonical_claim"]),
             claim_hash=str(row["claim_hash"]),
-            mechanism_scope=tuple(str(value) for value in json.loads(str(row["mechanism_scope_json"]))),
-            intervention_scope=tuple(
-                str(value) for value in json.loads(str(row["intervention_scope_json"]))
-            ),
+            mechanism_scope=mechanism_scope,
+            intervention_scope=intervention_scope,
             created_ts_utc=datetime.fromisoformat(str(row["created_ts_utc"])).astimezone(UTC),
             record_hash=str(row["record_hash"]),
         )
@@ -627,12 +636,18 @@ def verify_hypothesis_memory(path: str | Path) -> HypothesisMemoryVerification:
             resolution_id=str(row["resolution_id"]),
             hypothesis_id=str(row["hypothesis_id"]),
             status=HypothesisStatus(str(row["status"])),
-            evidence_ids=tuple(str(value) for value in json.loads(str(row["evidence_ids_json"]))),
+            evidence_ids=tuple(
+                str(value) for value in json.loads(str(row["evidence_ids_json"]))
+            ),
             dataset_fingerprints=tuple(
                 str(value) for value in json.loads(str(row["dataset_fingerprints_json"]))
             ),
-            regime_keys=tuple(str(value) for value in json.loads(str(row["regime_keys_json"]))),
-            time_blocks=tuple(str(value) for value in json.loads(str(row["time_blocks_json"]))),
+            regime_keys=tuple(
+                str(value) for value in json.loads(str(row["regime_keys_json"]))
+            ),
+            time_blocks=tuple(
+                str(value) for value in json.loads(str(row["time_blocks_json"]))
+            ),
             selection_family_id=str(row["selection_family_id"]),
             familywise_alpha_spent=float(row["familywise_alpha_spent"]),
             reason=str(row["reason"]),

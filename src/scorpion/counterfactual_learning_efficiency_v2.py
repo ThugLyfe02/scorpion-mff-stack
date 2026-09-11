@@ -402,7 +402,10 @@ def evaluate_causal_learning_efficiency_v2(
     failures.extend(provenance_failures)
     for assignment in matured:
         censoring = censoring_by_id.get(assignment.assignment_id)
-        if censoring is not None and censoring.resolution_probability < policy.minimum_censoring_probability:
+        if (
+            censoring is not None
+            and censoring.resolution_probability < policy.minimum_censoring_probability
+        ):
             failures.append("censoring_probability_below_floor")
         prediction = outcome_by_id.get(assignment.assignment_id)
         if prediction is not None:

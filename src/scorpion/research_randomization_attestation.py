@@ -505,7 +505,9 @@ def verify_randomization_integrity(path: str | Path) -> RandomizationIntegrityRe
         db.executescript(_SCHEMA)
         unit_rows = db.execute("SELECT * FROM research_randomization_units").fetchall()
         attestation_rows = db.execute("SELECT * FROM research_assignment_attestations").fetchall()
-        events = db.execute("SELECT * FROM research_randomization_events ORDER BY sequence").fetchall()
+        events = db.execute(
+            "SELECT * FROM research_randomization_events ORDER BY sequence"
+        ).fetchall()
         checkpoint = db.execute(
             "SELECT * FROM research_randomization_integrity_state WHERE singleton_id=1"
         ).fetchone()

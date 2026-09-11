@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -65,8 +66,8 @@ class CertifiedCrossFittedOutcomePrediction:
         for treatment, value in self.predicted_values.items():
             if not treatment.strip():
                 raise ValueError("prediction treatment key cannot be blank")
-            if not isinstance(value, (int, float)):
-                raise ValueError("prediction values must be numeric")
+            if not math.isfinite(value):
+                raise ValueError("prediction values must be finite")
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,8 +82,8 @@ class CrossFittedCensoringPrediction:
         for name in ("assignment_id", "model_fingerprint", "manifest_hash", "fold_id"):
             if not getattr(self, name).strip():
                 raise ValueError(f"{name} is required")
-        if not 0 < self.resolution_probability <= 1:
-            raise ValueError("resolution_probability must be in (0,1]")
+        if not math.isfinite(self.resolution_probability) or not 0 < self.resolution_probability <= 1:
+            raise ValueError("resolution_probability must be finite and in (0,1]")
 
 
 def _assignment_ids_hash(ids: tuple[str, ...]) -> str:
@@ -107,7 +108,11 @@ def build_crossfit_provenance_manifest(
             raise ValueError(f"{name} is required")
     if not assignment_to_fold:
         raise ValueError("assignment_to_fold cannot be empty")
-    if any(not assignment.strip() or not fold.strip() for assignment, fold in assignment_to_fold.items()):
+    invalid_assignment = any(
+        not assignment.strip() or not fold.strip()
+        for assignment, fold in assignment_to_fold.items()
+    )
+    if invalid_assignment:
         raise ValueError("assignment and fold ids must be non-empty")
     fold_ids = tuple(sorted(set(assignment_to_fold.values())))
     if len(fold_ids) < 2:
@@ -116,18 +121,25 @@ def build_crossfit_provenance_manifest(
         raise ValueError("training truth snapshot mapping must cover every fold")
     universe = tuple(sorted(assignment_to_fold))
     assignment_universe_hash = _assignment_ids_hash(universe)
+    split_assignments = [
+        [assignment, assignment_to_fold[assignment]]
+        for assignment in universe
+    ]
     split_plan_hash = _hash(
         {
             "version": "crossfit-split-plan-v1",
-            "assignment_to_fold": [[assignment, assignment_to_fold[assignment]] for assignment in universe],
+            "assignment_to_fold": split_assignments,
         }
     )
     folds: list[CrossFitFoldCertificate] = []
     for fold_id in fold_ids:
-        heldout = tuple(sorted(
-            assignment for assignment, assigned_fold in assignment_to_fold.items()
-            if assigned_fold == fold_id
-        ))
+        heldout = tuple(
+            sorted(
+                assignment
+                for assignment, assigned_fold in assignment_to_fold.items()
+                if assigned_fold == fold_id
+            )
+        )
         training = tuple(sorted(set(universe) - set(heldout)))
         if not heldout or not training:
             raise ValueError("every cross-fit fold must have training and held-out assignments")
