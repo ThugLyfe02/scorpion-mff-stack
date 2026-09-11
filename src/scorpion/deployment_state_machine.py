@@ -159,10 +159,18 @@ class DeploymentStateMachine(_core.DeploymentStateMachine):
         authorization: ProductionAuthorization,
         evidence_validation: PromotionEvidenceValidationReport,
         evidence_bundle_hash: str,
-        readiness_certificate: RolloutReadinessCertificate,
+        bottleneck_audit: ProductionBottleneckAuditReport | None = None,
         now: datetime | None = None,
+        readiness_certificate: RolloutReadinessCertificate | None = None,
     ) -> RolloutRecord:
         timestamp = (now or datetime.now(UTC)).astimezone(UTC)
+        if readiness_certificate is None:
+            raise ValueError("rollout readiness certificate is required")
+        if (
+            bottleneck_audit is not None
+            and bottleneck_audit.report_hash != readiness_certificate.bottleneck_report_hash
+        ):
+            raise ValueError("legacy bottleneck audit does not match readiness certificate")
         verification = verify_rollout_readiness_certificate(
             readiness_certificate,
             candidate_release_id=candidate_release_id,
