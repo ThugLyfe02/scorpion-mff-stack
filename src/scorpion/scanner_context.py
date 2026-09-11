@@ -56,10 +56,12 @@ def canonical_scanner_observation_hash(payload: Mapping[str, object]) -> str:
 def _mapping(value: object, name: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ScannerContextError(f"{name} must be an object")
-    for key in value:
+    normalized: dict[str, object] = {}
+    for key, item in value.items():
         if not isinstance(key, str):
             raise ScannerContextError(f"{name} keys must be strings")
-    return value  # type: ignore[return-value]
+        normalized[key] = item
+    return normalized
 
 
 def _required_str(payload: Mapping[str, object], key: str) -> str:
@@ -80,7 +82,13 @@ def _optional_float(value: object, name: str) -> float | None:
     return result
 
 
-def _required_int(value: object, name: str, *, minimum: int = 0, maximum: int = 5) -> int:
+def _required_int(
+    value: object,
+    name: str,
+    *,
+    minimum: int = 0,
+    maximum: int = 5,
+) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ScannerContextError(f"{name} must be an integer")
     if value < minimum or value > maximum:
@@ -139,7 +147,8 @@ def parse_scanner_observation(payload: Mapping[str, object]) -> ScannerContextOb
         raise ScannerContextError("scanner context must be RESEARCH_ONLY")
 
     observation_id = _required_str(payload, "observation_id").lower()
-    if len(observation_id) != 64 or any(ch not in "0123456789abcdef" for ch in observation_id):
+    invalid_hex = any(ch not in "0123456789abcdef" for ch in observation_id)
+    if len(observation_id) != 64 or invalid_hex:
         raise ScannerContextError("observation_id must be a SHA-256 hex digest")
     expected_hash = canonical_scanner_observation_hash(payload)
     if observation_id != expected_hash:
@@ -207,7 +216,8 @@ def load_scanner_observations(path: str | Path) -> tuple[ScannerContextObservati
     """Load and validate an immutable stock-finder JSONL research batch."""
 
     rows: list[ScannerContextObservation] = []
-    for line_number, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), start=1):
+    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    for line_number, line in enumerate(lines, start=1):
         if not line.strip():
             continue
         try:
@@ -219,7 +229,9 @@ def load_scanner_observations(path: str | Path) -> tuple[ScannerContextObservati
         payload: dict[str, object] = {}
         for key, value in decoded.items():
             if not isinstance(key, str):
-                raise ScannerContextError(f"scanner JSONL line {line_number} has non-string key")
+                raise ScannerContextError(
+                    f"scanner JSONL line {line_number} has non-string key"
+                )
             payload[key] = value
         try:
             rows.append(parse_scanner_observation(payload))
@@ -245,4 +257,8 @@ def latest_scanner_context_before(
         for item in observations
         if item.instrument_id == instrument_id and item.observed_at_utc <= cutoff
     )
-    return max(eligible, key=lambda item: (item.observed_at_utc, item.observation_id), default=None)
+    return max(
+        eligible,
+        key=lambda item: (item.observed_at_utc, item.observation_id),
+        default=None,
+    )
