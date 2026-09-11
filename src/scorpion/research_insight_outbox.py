@@ -400,7 +400,7 @@ def verify_research_insight_outbox(path: str | Path) -> ResearchInsightOutboxVer
     records: dict[str, str] = {}
     insight_ids: set[str] = set()
     for row in insights:
-        item = ResearchInsight(
+        insight_item = ResearchInsight(
             insight_id=str(row["insight_id"]),
             kind=ResearchInsightKind(str(row["kind"])),
             subject_id=str(row["subject_id"]),
@@ -409,16 +409,18 @@ def verify_research_insight_outbox(path: str | Path) -> ResearchInsightOutboxVer
             created_ts_utc=datetime.fromisoformat(str(row["created_ts_utc"])).astimezone(UTC),
             record_hash=str(row["record_hash"]),
         )
-        payload = _insight_payload(item)
-        if item.record_hash != _hash(payload):
+        insight_payload = _insight_payload(insight_item)
+        if insight_item.record_hash != _hash(insight_payload):
             failures.append("research_insight_record_hash_mismatch")
-        expected_id = _hash({"version": "research-insight-id-v1", "payload": payload})
-        if item.insight_id != expected_id:
+        expected_insight_id = _hash(
+            {"version": "research-insight-id-v1", "payload": insight_payload}
+        )
+        if insight_item.insight_id != expected_insight_id:
             failures.append("research_insight_id_mismatch")
-        records[item.insight_id] = item.record_hash
-        insight_ids.add(item.insight_id)
+        records[insight_item.insight_id] = insight_item.record_hash
+        insight_ids.add(insight_item.insight_id)
     for row in acknowledgements:
-        item = ResearchInsightAck(
+        ack_item = ResearchInsightAck(
             ack_id=str(row["ack_id"]),
             insight_id=str(row["insight_id"]),
             operator=str(row["operator"]),
@@ -428,15 +430,17 @@ def verify_research_insight_outbox(path: str | Path) -> ResearchInsightOutboxVer
             ).astimezone(UTC),
             record_hash=str(row["record_hash"]),
         )
-        if item.insight_id not in insight_ids:
+        if ack_item.insight_id not in insight_ids:
             failures.append("research_insight_ack_parent_missing")
-        payload = _ack_payload(item)
-        if item.record_hash != _hash(payload):
+        ack_payload = _ack_payload(ack_item)
+        if ack_item.record_hash != _hash(ack_payload):
             failures.append("research_insight_ack_record_hash_mismatch")
-        expected_id = _hash({"version": "research-insight-ack-id-v1", "payload": payload})
-        if item.ack_id != expected_id:
+        expected_ack_id = _hash(
+            {"version": "research-insight-ack-id-v1", "payload": ack_payload}
+        )
+        if ack_item.ack_id != expected_ack_id:
             failures.append("research_insight_ack_id_mismatch")
-        records[item.ack_id] = item.record_hash
+        records[ack_item.ack_id] = ack_item.record_hash
     previous = _GENESIS
     chain = _GENESIS
     covered: set[str] = set()

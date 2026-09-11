@@ -515,27 +515,34 @@ def verify_randomization_integrity(path: str | Path) -> RandomizationIntegrityRe
     units: dict[str, AttestedRandomizationUnit] = {}
     records: dict[str, str] = {}
     for row in unit_rows:
-        unit = _load_unit(row)
-        expected_commitment = hashlib.sha256(bytes.fromhex(unit.entropy_hex)).hexdigest()
-        if unit.entropy_commitment != expected_commitment:
+        unit_item = _load_unit(row)
+        expected_commitment = hashlib.sha256(bytes.fromhex(unit_item.entropy_hex)).hexdigest()
+        if unit_item.entropy_commitment != expected_commitment:
             failures.append("randomization_entropy_commitment_mismatch")
         expected_draw = _derive_draw(
-            entropy_hex=unit.entropy_hex,
-            experiment_id=unit.experiment_id,
-            wave_id=unit.wave_id,
-            cluster_id=unit.cluster_id,
-            distribution_hash=unit.distribution_hash,
+            entropy_hex=unit_item.entropy_hex,
+            experiment_id=unit_item.experiment_id,
+            wave_id=unit_item.wave_id,
+            cluster_id=unit_item.cluster_id,
+            distribution_hash=unit_item.distribution_hash,
         )
-        if not math.isclose(unit.random_draw, expected_draw, rel_tol=0.0, abs_tol=1e-15):
+        if not math.isclose(
+            unit_item.random_draw,
+            expected_draw,
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        ):
             failures.append("randomization_draw_mismatch")
-        payload = _unit_payload(unit)
-        if unit.record_hash != _hash(payload):
+        unit_payload = _unit_payload(unit_item)
+        if unit_item.record_hash != _hash(unit_payload):
             failures.append("randomization_unit_record_hash_mismatch")
-        expected_id = _hash({"version": "attested-randomization-id-v1", "payload": payload})
-        if unit.randomization_id != expected_id:
+        expected_unit_id = _hash(
+            {"version": "attested-randomization-id-v1", "payload": unit_payload}
+        )
+        if unit_item.randomization_id != expected_unit_id:
             failures.append("randomization_unit_id_mismatch")
-        units[unit.randomization_id] = unit
-        records[unit.randomization_id] = unit.record_hash
+        units[unit_item.randomization_id] = unit_item
+        records[unit_item.randomization_id] = unit_item.record_hash
     for row in attestation_rows:
         attestation = AssignmentRandomizationAttestation(
             assignment_id=str(row["assignment_id"]),
@@ -547,20 +554,25 @@ def verify_randomization_integrity(path: str | Path) -> RandomizationIntegrityRe
             attested_ts_utc=datetime.fromisoformat(str(row["attested_ts_utc"])).astimezone(UTC),
             record_hash=str(row["record_hash"]),
         )
-        unit = units.get(attestation.randomization_id)
-        assignment = assignment_by_id.get(attestation.assignment_id)
-        if unit is None or assignment is None:
+        parent_unit = units.get(attestation.randomization_id)
+        parent_assignment = assignment_by_id.get(attestation.assignment_id)
+        if parent_unit is None or parent_assignment is None:
             failures.append("randomization_attestation_parent_missing")
             continue
         if (
-            unit.experiment_id != attestation.experiment_id
-            or unit.wave_id != attestation.wave_id
-            or unit.cluster_id != attestation.cluster_id
+            parent_unit.experiment_id != attestation.experiment_id
+            or parent_unit.wave_id != attestation.wave_id
+            or parent_unit.cluster_id != attestation.cluster_id
         ):
             failures.append("randomization_attestation_unit_mismatch")
-        if not math.isclose(assignment.random_draw, unit.random_draw, rel_tol=0.0, abs_tol=1e-15):
+        if not math.isclose(
+            parent_assignment.random_draw,
+            parent_unit.random_draw,
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        ):
             failures.append("randomization_assignment_draw_mismatch")
-        if assignment.chosen_treatment.treatment_key != attestation.chosen_treatment_key:
+        if parent_assignment.chosen_treatment.treatment_key != attestation.chosen_treatment_key:
             failures.append("randomization_assignment_treatment_mismatch")
         expected_hash = _hash(_attestation_payload(attestation))
         if attestation.record_hash != expected_hash:

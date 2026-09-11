@@ -606,7 +606,7 @@ def verify_hypothesis_memory(path: str | Path) -> HypothesisMemoryVerification:
         intervention_scope = tuple(
             str(value) for value in json.loads(str(row["intervention_scope_json"]))
         )
-        item = ResearchHypothesis(
+        hypothesis_item = ResearchHypothesis(
             hypothesis_id=str(row["hypothesis_id"]),
             family_id=str(row["family_id"]),
             parent_hypothesis_id=str(row["parent_hypothesis_id"]),
@@ -619,20 +619,25 @@ def verify_hypothesis_memory(path: str | Path) -> HypothesisMemoryVerification:
             record_hash=str(row["record_hash"]),
         )
         expected_claim = _hash(
-            {"version": "hypothesis-claim-v1", "canonical_claim": item.canonical_claim}
+            {
+                "version": "hypothesis-claim-v1",
+                "canonical_claim": hypothesis_item.canonical_claim,
+            }
         )
-        if item.claim_hash != expected_claim:
+        if hypothesis_item.claim_hash != expected_claim:
             failures.append("hypothesis_claim_hash_mismatch")
-        payload = _hypothesis_payload(item)
-        if item.record_hash != _hash(payload):
+        hypothesis_payload = _hypothesis_payload(hypothesis_item)
+        if hypothesis_item.record_hash != _hash(hypothesis_payload):
             failures.append("hypothesis_record_hash_mismatch")
-        expected_id = _hash({"version": "research-hypothesis-id-v1", "payload": payload})
-        if item.hypothesis_id != expected_id:
+        expected_hypothesis_id = _hash(
+            {"version": "research-hypothesis-id-v1", "payload": hypothesis_payload}
+        )
+        if hypothesis_item.hypothesis_id != expected_hypothesis_id:
             failures.append("hypothesis_id_mismatch")
-        records[item.hypothesis_id] = item.record_hash
+        records[hypothesis_item.hypothesis_id] = hypothesis_item.record_hash
     hypothesis_ids = set(records)
     for row in resolutions:
-        item = HypothesisResolution(
+        resolution_item = HypothesisResolution(
             resolution_id=str(row["resolution_id"]),
             hypothesis_id=str(row["hypothesis_id"]),
             status=HypothesisStatus(str(row["status"])),
@@ -654,15 +659,17 @@ def verify_hypothesis_memory(path: str | Path) -> HypothesisMemoryVerification:
             resolved_ts_utc=datetime.fromisoformat(str(row["resolved_ts_utc"])).astimezone(UTC),
             record_hash=str(row["record_hash"]),
         )
-        if item.hypothesis_id not in hypothesis_ids:
+        if resolution_item.hypothesis_id not in hypothesis_ids:
             failures.append("hypothesis_resolution_parent_missing")
-        payload = _resolution_payload(item)
-        if item.record_hash != _hash(payload):
+        resolution_payload = _resolution_payload(resolution_item)
+        if resolution_item.record_hash != _hash(resolution_payload):
             failures.append("hypothesis_resolution_record_hash_mismatch")
-        expected_id = _hash({"version": "hypothesis-resolution-id-v1", "payload": payload})
-        if item.resolution_id != expected_id:
+        expected_resolution_id = _hash(
+            {"version": "hypothesis-resolution-id-v1", "payload": resolution_payload}
+        )
+        if resolution_item.resolution_id != expected_resolution_id:
             failures.append("hypothesis_resolution_id_mismatch")
-        records[item.resolution_id] = item.record_hash
+        records[resolution_item.resolution_id] = resolution_item.record_hash
     previous = _GENESIS
     chain = _GENESIS
     covered: set[str] = set()
