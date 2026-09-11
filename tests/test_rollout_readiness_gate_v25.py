@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from scorpion._deployment_core_alias import CoreDeploymentStateMachine
 from scorpion.deployment_state_machine import (
     DeploymentStateMachine,
     DeploymentStateMachinePolicy,
@@ -307,11 +308,24 @@ def test_legacy_core_prepare_is_blocked_by_sqlite_trigger(tmp_path):
         bundle,
         _,
     ) = _prepare_inputs(path)
-    legacy_class = DeploymentStateMachine.__mro__[1]
-    legacy = legacy_class(path, policy=machine.policy)
     audit = audit_production_bottlenecks(path, now=NOW)
+
+    legacy_guard_class = DeploymentStateMachine.__mro__[1]
+    legacy_guard = legacy_guard_class(path, policy=machine.policy)
+    with pytest.raises(ValueError, match="rollout readiness certificate is required"):
+        legacy_guard.prepare(
+            candidate_release_id=candidate.release_id,
+            dossier=dossier,
+            authorization=authorization,
+            evidence_validation=validation,
+            evidence_bundle_hash=bundle,
+            bottleneck_audit=audit,
+            now=NOW,
+        )
+
+    legacy_core = CoreDeploymentStateMachine(path, policy=machine.policy)
     with pytest.raises(sqlite3.IntegrityError, match="rollout_readiness_required"):
-        legacy.prepare(
+        legacy_core.prepare(
             candidate_release_id=candidate.release_id,
             dossier=dossier,
             authorization=authorization,
