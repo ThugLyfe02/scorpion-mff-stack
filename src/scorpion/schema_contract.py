@@ -128,8 +128,8 @@ def inspect_schema_connection(db: sqlite3.Connection) -> SchemaContractReport:
         tables.append(TableContract(table, present, missing, False))
         failures.extend(f"incompatible_optional_column:{table}.{column}" for column in missing)
     for group, members in _ADVANCED_GROUPS.items():
-        present = members & existing
-        if present and present != members:
+        present_members = members & existing
+        if present_members and present_members != members:
             failures.extend(
                 f"incomplete_advanced_group:{group}:{table}"
                 for table in sorted(members - existing)
