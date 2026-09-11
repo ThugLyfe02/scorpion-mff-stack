@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scorpion-mff"
-version = "0.28.0"
-description = "Deterministic MFF control plane with information-efficient research allocation, holdout-safe hard-example curriculum construction, checksummed schema-migration provenance, tamper-evident readiness capability journaling, single-snapshot activation certification, activation-epoch-sealed rollout capabilities, exact readiness-policy replay, production operator observability, isolated hot-path latency budgets, atomic durable receipt ordering, evidence-bound rollout/rollback state machines, production bottleneck auditing, partial-outage chaos drills, dual-channel NO_TRADE persistence, formal promotion evidence, leakage-safe adaptive training, and verified recovery."
+version = "0.29.0"
+description = "Deterministic MFF control plane with purged-OOF contextual ensemble specialization, information-efficient research allocation, holdout-safe hard-example curriculum construction, checksummed schema-migration provenance, tamper-evident readiness capability journaling, single-snapshot activation certification, activation-epoch-sealed rollout capabilities, exact readiness-policy replay, production operator observability, isolated hot-path latency budgets, atomic durable receipt ordering, evidence-bound rollout/rollback state machines, production bottleneck auditing, partial-outage chaos drills, dual-channel NO_TRADE persistence, formal promotion evidence, leakage-safe adaptive training, and verified recovery."
 requires-python = ">=3.13"
 dependencies = [
   "discord.py>=2.4,<3",
