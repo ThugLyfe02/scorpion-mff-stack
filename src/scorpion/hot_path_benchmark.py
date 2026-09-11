@@ -187,17 +187,14 @@ def benchmark_hot_path(
         maximum_us=max((sample.total_us for sample in core_profile.samples), default=0),
     )
 
-    context: tempfile.TemporaryDirectory[str] | None = None
+    suffix = hashlib.sha256(timestamp.isoformat().encode()).hexdigest()[:16]
     if workspace is None:
-        context = tempfile.TemporaryDirectory(prefix="scorpion-hot-path-")
-        root = Path(context.name)
+        context = tempfile.TemporaryDirectory(prefix=f"scorpion-hot-path-{suffix}-")
     else:
         root = Path(workspace)
         root.mkdir(parents=True, exist_ok=True)
-    suffix = hashlib.sha256(timestamp.isoformat().encode()).hexdigest()[:16]
-    db_path = root / f"hot-path-{suffix}.db"
-    if db_path.exists():
-        raise FileExistsError(db_path)
+        context = tempfile.TemporaryDirectory(prefix=f"hot-path-{suffix}-", dir=root)
+    db_path = Path(context.name) / "benchmark.db"
 
     try:
         store = Store(db_path)
@@ -223,8 +220,7 @@ def benchmark_hot_path(
         db_precommit_p95_us = db_precommit.p95_us if db_precommit is not None else 0.0
         journal_mode, synchronous_mode = _sqlite_modes(db_path)
     finally:
-        if context is not None:
-            context.cleanup()
+        context.cleanup()
 
     if core.p95_us > policy.maximum_core_p95_us:
         failures.append("core_p95_budget_exceeded")
