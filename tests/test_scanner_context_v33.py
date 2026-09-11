@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -15,7 +16,11 @@ from scorpion.scanner_context import (
 )
 
 
-def _payload(*, observed_at: datetime | None = None, symbol: str = "NVDA") -> dict[str, object]:
+def _payload(
+    *,
+    observed_at: datetime | None = None,
+    symbol: str = "NVDA",
+) -> dict[str, object]:
     observed = observed_at or datetime(2026, 9, 11, 16, 0, tzinfo=UTC)
     payload: dict[str, object] = {
         "schema_version": "scorpion.scanner-observation.v1",
@@ -120,7 +125,9 @@ def test_future_market_evidence_is_rejected() -> None:
 def test_future_verified_catalyst_is_rejected() -> None:
     payload = _payload()
     observed = datetime.fromisoformat(str(payload["observed_at_utc"]))
-    catalyst = dict(payload["catalyst"])  # type: ignore[arg-type]
+    raw_catalyst = payload["catalyst"]
+    assert isinstance(raw_catalyst, Mapping)
+    catalyst = dict(raw_catalyst)
     catalyst["published_at_utc"] = (observed + timedelta(seconds=1)).isoformat()
     payload["catalyst"] = catalyst
     _rehash(payload)
@@ -130,9 +137,15 @@ def test_future_verified_catalyst_is_rejected() -> None:
 
 def test_asof_selector_never_selects_future_context() -> None:
     event_time = datetime(2026, 9, 11, 16, 1, tzinfo=UTC)
-    old = parse_scanner_observation(_payload(observed_at=event_time - timedelta(minutes=2)))
-    latest = parse_scanner_observation(_payload(observed_at=event_time - timedelta(seconds=5)))
-    future = parse_scanner_observation(_payload(observed_at=event_time + timedelta(seconds=1)))
+    old = parse_scanner_observation(
+        _payload(observed_at=event_time - timedelta(minutes=2))
+    )
+    latest = parse_scanner_observation(
+        _payload(observed_at=event_time - timedelta(seconds=5))
+    )
+    future = parse_scanner_observation(
+        _payload(observed_at=event_time + timedelta(seconds=1))
+    )
 
     selected = latest_scanner_context_before(
         (old, future, latest),
