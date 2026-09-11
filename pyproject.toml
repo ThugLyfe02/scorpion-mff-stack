@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scorpion-mff"
-version = "0.26.0"
-description = "Deterministic MFF control plane with activation-epoch-sealed single-use rollout capabilities, exact readiness-policy replay, in-transaction control-state verification, production operator observability, isolated hot-path latency budgets, atomic durable receipt ordering, evidence-bound rollout/rollback state machines, production bottleneck auditing, partial-outage chaos drills, dual-channel NO_TRADE persistence, formal promotion evidence, leakage-safe adaptive training, and verified recovery."
+version = "0.27.0"
+description = "Deterministic MFF control plane with checksummed schema-migration provenance, tamper-evident readiness capability journaling, single-snapshot activation certification, activation-epoch-sealed rollout capabilities, exact readiness-policy replay, production operator observability, isolated hot-path latency budgets, atomic durable receipt ordering, evidence-bound rollout/rollback state machines, production bottleneck auditing, partial-outage chaos drills, dual-channel NO_TRADE persistence, formal promotion evidence, leakage-safe adaptive training, and verified recovery."
 requires-python = ">=3.13"
 dependencies = [
   "discord.py>=2.4,<3",
@@ -27,6 +27,7 @@ scorpion-accuracy = "scorpion.cli:accuracy_main"
 scorpion-ops = "scorpion.cli:ops_main"
 scorpion-storage = "scorpion.cli:storage_main"
 scorpion-schema = "scorpion.cli:schema_main"
+scorpion-schema-migrate = "scorpion.schema_migration_cli:migration_main"
 scorpion-order = "scorpion.cli:order_main"
 scorpion-backup = "scorpion.cli:backup_main"
 scorpion-snapshot = "scorpion.cli:snapshot_main"
