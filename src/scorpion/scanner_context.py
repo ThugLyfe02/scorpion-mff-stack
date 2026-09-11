@@ -190,7 +190,8 @@ def _derive_causal_blockers(
     quality_value = payload.get("quality")
     quality = _mapping(quality_value, "quality") if quality_value is not None else {}
     source_verified = _required_bool(quality, "source_fingerprint_verified", default=False)
-    if not isinstance(source_fingerprint, str) or not source_fingerprint.strip() or not source_verified:
+    source_missing = not isinstance(source_fingerprint, str) or not source_fingerprint.strip()
+    if source_missing or not source_verified:
         blockers.add("source_fingerprint_unverified")
 
     float_shares = payload.get("float_shares")
@@ -305,7 +306,10 @@ def parse_scanner_observation(payload: Mapping[str, object]) -> ScannerContextOb
         observed_at_utc=observed_at,
         observation_time_precision=precision,
         market_data_as_of_utc=market_at,
-        market_data_source=_optional_str(payload.get("market_data_source"), "market_data_source"),
+        market_data_source=_optional_str(
+            payload.get("market_data_source"),
+            "market_data_source",
+        ),
         session=session,
         ross_boxes_hit=boxes_hit,
         ross_boxes_known=boxes_known,
