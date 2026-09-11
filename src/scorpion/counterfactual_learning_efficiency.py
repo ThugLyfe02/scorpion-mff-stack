@@ -54,16 +54,20 @@ class CounterfactualLearningPolicy:
     maximum_supported_treatments: int = 20
 
     def __post_init__(self) -> None:
-        if min(
+        integer_limits = (
             self.minimum_resolved_assignments,
             self.minimum_treatment_assignments,
             self.minimum_sequence_assignments,
             self.maximum_supported_treatments,
-        ) <= 0:
+        )
+        if min(integer_limits) <= 0:
             raise ValueError("counterfactual sample thresholds must be positive")
         if not 0 < self.minimum_resolution_rate <= 1:
             raise ValueError("minimum_resolution_rate must be in (0,1]")
-        if self.minimum_effective_sample_size <= 0 or self.minimum_sequence_effective_sample_size <= 0:
+        if (
+            self.minimum_effective_sample_size <= 0
+            or self.minimum_sequence_effective_sample_size <= 0
+        ):
             raise ValueError("effective sample size thresholds must be positive")
         if not 0 < self.minimum_propensity <= 0.5:
             raise ValueError("minimum_propensity must be in (0,0.5]")
@@ -131,44 +135,48 @@ class _ResolvedRow:
 
 
 def _hash(payload: object) -> str:
-    material = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(material.encode()).hexdigest()
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 def _weighted_mean(values: list[float], weights: list[float]) -> float:
     total = sum(weights)
     if total <= 0:
         raise ValueError("counterfactual weights must have positive mass")
-    return sum(value * weight for value, weight in zip(values, weights, strict=True)) / total
+    numerator = sum(
+        value * weight for value, weight in zip(values, weights, strict=True)
+    )
+    return numerator / total
 
 
 def _effective_sample_size(weights: list[float]) -> float:
     total = sum(weights)
-    square = sum(weight * weight for weight in weights)
-    return total * total / square if square > 0 else 0.0
+    squares = sum(weight * weight for weight in weights)
+    return total * total / squares if squares > 0 else 0.0
 
 
 def _weighted_variance(values: list[float], weights: list[float], mean: float) -> float:
     total = sum(weights)
     if total <= 0:
         return 0.0
-    return sum(
+    numerator = sum(
         weight * (value - mean) ** 2
         for value, weight in zip(values, weights, strict=True)
-    ) / total
+    )
+    return numerator / total
 
 
 def _treatment_universe(
     assignments: tuple[ResearchAssignment, ...],
 ) -> dict[str, ResearchTreatmentBundle]:
-    treatments: dict[str, ResearchTreatmentBundle] = {}
+    output: dict[str, ResearchTreatmentBundle] = {}
     for assignment in assignments:
         for bundle, _ in assignment.distribution:
-            existing = treatments.get(bundle.treatment_key)
+            existing = output.get(bundle.treatment_key)
             if existing is not None and existing != bundle:
                 raise ValueError("research treatment key has inconsistent material")
-            treatments[bundle.treatment_key] = bundle
-    return treatments
+            output[bundle.treatment_key] = bundle
+    return output
 
 
 def _pseudo_values(
@@ -178,20 +186,27 @@ def _pseudo_values(
 ) -> tuple[list[float], list[float], list[float]]:
     pseudo: list[float] = []
     time_weights: list[float] = []
-    correction_weights: list[float] = []
+    corrections: list[float] = []
     for row in rows:
         predicted = row.prediction.predicted_values[treatment_key]
         chosen = row.assignment.chosen_treatment.treatment_key == treatment_key
         correction = 0.0
         correction_weight = 0.0
         if chosen:
-            inverse = min(policy.maximum_importance_weight, 1.0 / row.assignment.chosen_propensity)
+            inverse = min(
+                policy.maximum_importance_weight,
+                1.0 / row.assignment.chosen_propensity,
+            )
             correction = inverse * (row.outcome.realized_value - predicted)
             correction_weight = row.decay_weight * inverse
         pseudo.append(predicted + correction)
         time_weights.append(row.decay_weight)
-        correction_weights.append(correction_weight)
-    return pseudo, time_weights, correction_weights
+        corrections.append(correction_weight)
+    return pseudo, time_weights, corrections
+
+
+def _supported_ess(weights: list[float]) -> float:
+    return _effective_sample_size([weight for weight in weights if weight > 0])
 
 
 def _estimate_treatment(
@@ -202,13 +217,13 @@ def _estimate_treatment(
     z_value: float,
     policy: CounterfactualLearningPolicy,
 ) -> CounterfactualTreatmentEstimate | None:
-    chosen_rows = [
+    chosen = [
         row for row in rows if row.assignment.chosen_treatment.treatment_key == treatment_key
     ]
-    if len(chosen_rows) < policy.minimum_treatment_assignments:
+    if len(chosen) < policy.minimum_treatment_assignments:
         return None
-    pseudo, weights, correction_weights = _pseudo_values(rows, treatment_key, policy)
-    correction_ess = _effective_sample_size([weight for weight in correction_weights if weight > 0])
+    pseudo, weights, corrections = _pseudo_values(rows, treatment_key, policy)
+    correction_ess = _supported_ess(corrections)
     if correction_ess < policy.minimum_effective_sample_size:
         return None
     global_mean = _weighted_mean(pseudo, weights)
@@ -220,29 +235,25 @@ def _estimate_treatment(
             policy,
         )
         regime_mean = _weighted_mean(regime_pseudo, regime_weights)
-        regime_ess = _effective_sample_size(
-            [weight for weight in regime_corrections if weight > 0]
-        )
+        regime_ess = _supported_ess(regime_corrections)
         shrinkage = regime_ess / (regime_ess + policy.regime_prior_strength)
-        variance_values = regime_pseudo
-        variance_weights = regime_weights
+        variance_values, variance_weights = regime_pseudo, regime_weights
     else:
         regime_mean = global_mean
-        regime_ess = 0.0
         shrinkage = 0.0
-        variance_values = pseudo
-        variance_weights = weights
+        variance_values, variance_weights = pseudo, weights
     posterior = shrinkage * regime_mean + (1.0 - shrinkage) * global_mean
     variance_mean = _weighted_mean(variance_values, variance_weights)
     variance = _weighted_variance(variance_values, variance_weights, variance_mean)
-    time_ess = max(1.0, _effective_sample_size(variance_weights))
-    std_error = math.sqrt(max(0.0, variance) / time_ess)
+    std_error = math.sqrt(
+        max(0.0, variance) / max(1.0, _effective_sample_size(variance_weights))
+    )
     lower = posterior - z_value * std_error
     per_cost = lower if bundle.cost_units == 0 else lower / bundle.cost_units
     return CounterfactualTreatmentEstimate(
         treatment_key=treatment_key,
         cost_units=bundle.cost_units,
-        assignments=len(chosen_rows),
+        assignments=len(chosen),
         effective_sample_size=correction_ess,
         global_dr_mean=global_mean,
         regime_dr_mean=regime_mean,
@@ -254,40 +265,38 @@ def _estimate_treatment(
     )
 
 
-def _sequence_estimates(
+def _estimate_sequences(
     rows: list[_ResolvedRow],
     assignments_by_id: Mapping[str, ResearchAssignment],
     base: Mapping[str, CounterfactualTreatmentEstimate],
     z_value: float,
     policy: CounterfactualLearningPolicy,
 ) -> tuple[CounterfactualSequenceEstimate, ...]:
-    by_previous: dict[str, list[_ResolvedRow]] = {}
+    grouped: dict[str, list[_ResolvedRow]] = {}
     for row in rows:
-        previous_id = row.assignment.previous_assignment_id
-        if not previous_id:
-            continue
-        previous = assignments_by_id.get(previous_id)
-        if previous is None:
-            continue
-        key = previous.chosen_treatment.treatment_key
-        by_previous.setdefault(key, []).append(row)
+        previous = assignments_by_id.get(row.assignment.previous_assignment_id)
+        if previous is not None:
+            grouped.setdefault(previous.chosen_treatment.treatment_key, []).append(row)
     output: list[CounterfactualSequenceEstimate] = []
-    for previous_key in sorted(by_previous):
-        members = by_previous[previous_key]
+    for previous_key in sorted(grouped):
+        members = grouped[previous_key]
         for current_key, base_estimate in sorted(base.items()):
             observed = [
-                row for row in members
+                row
+                for row in members
                 if row.assignment.chosen_treatment.treatment_key == current_key
             ]
             if len(observed) < policy.minimum_sequence_assignments:
                 continue
             pseudo, weights, corrections = _pseudo_values(members, current_key, policy)
-            ess = _effective_sample_size([weight for weight in corrections if weight > 0])
+            ess = _supported_ess(corrections)
             if ess < policy.minimum_sequence_effective_sample_size:
                 continue
             conditional = _weighted_mean(pseudo, weights)
             variance = _weighted_variance(pseudo, weights, conditional)
-            std_error = math.sqrt(max(0.0, variance) / max(1.0, _effective_sample_size(weights)))
+            std_error = math.sqrt(
+                max(0.0, variance) / max(1.0, _effective_sample_size(weights))
+            )
             synergy = conditional - base_estimate.posterior_mean
             output.append(
                 CounterfactualSequenceEstimate(
@@ -322,41 +331,42 @@ def evaluate_counterfactual_learning_efficiency(
     verification = verify_research_experiment_ledger(path)
     if not verification.valid:
         return _report(
-            status=CounterfactualLearningStatus.BLOCKED,
-            current_regime=current_regime,
-            reward_contract_hash=reward_contract_hash,
-            assignments=verification.assignments,
-            matured=0,
-            resolved=0,
-            resolution_rate=0.0,
-            model_fingerprint="",
-            chain_hash=verification.chain_hash,
-            treatment_estimates=(),
-            sequence_estimates=(),
-            failures=verification.failures,
+            CounterfactualLearningStatus.BLOCKED,
+            current_regime,
+            reward_contract_hash,
+            verification.assignments,
+            0,
+            0,
+            0.0,
+            "",
+            verification.chain_hash,
+            (),
+            (),
+            verification.failures,
         )
     assignments, outcomes = load_research_experiment_records(path)
     relevant = tuple(
-        item for item in assignments
+        item
+        for item in assignments
         if item.reward_contract_hash == reward_contract_hash and item.assigned_ts_utc <= as_of
     )
     treatments = _treatment_universe(relevant)
+    matured = tuple(item for item in relevant if item.maturity_ts_utc <= as_of)
+    outcome_by_assignment = {
+        item.assignment_id: item
+        for item in outcomes
+        if item.reward_contract_hash == reward_contract_hash and item.realized_ts_utc <= as_of
+    }
+    resolved = tuple(item for item in matured if item.assignment_id in outcome_by_assignment)
+    resolution_rate = len(resolved) / len(matured) if matured else 0.0
     failures: list[str] = []
     if len(treatments) > policy.maximum_supported_treatments:
         failures.append("counterfactual_treatment_universe_too_large")
-    matured = tuple(item for item in relevant if item.maturity_ts_utc <= as_of)
-    outcome_by_assignment = {
-        item.assignment_id: item for item in outcomes
-        if item.reward_contract_hash == reward_contract_hash and item.realized_ts_utc <= as_of
-    }
-    resolved_assignments = tuple(
-        item for item in matured if item.assignment_id in outcome_by_assignment
-    )
-    resolution_rate = len(resolved_assignments) / len(matured) if matured else 0.0
-    if len(resolved_assignments) < policy.minimum_resolved_assignments:
+    if len(resolved) < policy.minimum_resolved_assignments:
         failures.append("insufficient_resolved_counterfactual_assignments")
     if matured and resolution_rate < policy.minimum_resolution_rate:
         failures.append("counterfactual_outcome_resolution_rate_below_floor")
+
     prediction_by_id = {item.assignment_id: item for item in predictions}
     if len(prediction_by_id) != len(predictions):
         raise ValueError("cross-fitted prediction assignment ids must be unique")
@@ -366,7 +376,7 @@ def evaluate_counterfactual_learning_efficiency(
     model_fingerprint = next(iter(model_fingerprints), "")
     treatment_keys = tuple(sorted(treatments))
     rows: list[_ResolvedRow] = []
-    for assignment in resolved_assignments:
+    for assignment in resolved:
         if assignment.chosen_propensity < policy.minimum_propensity:
             failures.append("counterfactual_logged_propensity_below_floor")
             continue
@@ -374,73 +384,70 @@ def evaluate_counterfactual_learning_efficiency(
         if prediction is None:
             failures.append("counterfactual_cross_fitted_prediction_missing")
             continue
-        missing = [key for key in treatment_keys if key not in prediction.predicted_values]
-        if missing:
+        if any(key not in prediction.predicted_values for key in treatment_keys):
             failures.append("counterfactual_prediction_treatment_support_missing")
             continue
         age_days = max(0.0, (as_of - assignment.assigned_ts_utc).total_seconds() / 86400.0)
-        decay = 0.5 ** (age_days / policy.decay_half_life_days)
         rows.append(
             _ResolvedRow(
                 assignment=assignment,
                 outcome=outcome_by_assignment[assignment.assignment_id],
                 prediction=prediction,
-                decay_weight=decay,
+                decay_weight=0.5 ** (age_days / policy.decay_half_life_days),
             )
         )
-    if failures and any(item.startswith("counterfactual_") for item in failures):
-        hard = {
-            "counterfactual_treatment_universe_too_large",
-            "counterfactual_logged_propensity_below_floor",
-            "counterfactual_cross_fitted_prediction_missing",
-            "counterfactual_prediction_treatment_support_missing",
-        }
-        if any(item in hard for item in failures):
-            return _report(
-                status=CounterfactualLearningStatus.BLOCKED,
-                current_regime=current_regime,
-                reward_contract_hash=reward_contract_hash,
-                assignments=len(relevant),
-                matured=len(matured),
-                resolved=len(rows),
-                resolution_rate=resolution_rate,
-                model_fingerprint=model_fingerprint,
-                chain_hash=verification.chain_hash,
-                treatment_estimates=(),
-                sequence_estimates=(),
-                failures=tuple(dict.fromkeys(failures)),
-            )
+    hard_failures = {
+        "counterfactual_treatment_universe_too_large",
+        "counterfactual_logged_propensity_below_floor",
+        "counterfactual_cross_fitted_prediction_missing",
+        "counterfactual_prediction_treatment_support_missing",
+    }
+    if any(item in hard_failures for item in failures):
+        return _report(
+            CounterfactualLearningStatus.BLOCKED,
+            current_regime,
+            reward_contract_hash,
+            len(relevant),
+            len(matured),
+            len(rows),
+            resolution_rate,
+            model_fingerprint,
+            verification.chain_hash,
+            (),
+            (),
+            tuple(dict.fromkeys(failures)),
+        )
     if failures:
         return _report(
-            status=CounterfactualLearningStatus.INSUFFICIENT,
-            current_regime=current_regime,
-            reward_contract_hash=reward_contract_hash,
-            assignments=len(relevant),
-            matured=len(matured),
-            resolved=len(rows),
-            resolution_rate=resolution_rate,
-            model_fingerprint=model_fingerprint,
-            chain_hash=verification.chain_hash,
-            treatment_estimates=(),
-            sequence_estimates=(),
-            failures=tuple(dict.fromkeys(failures)),
+            CounterfactualLearningStatus.INSUFFICIENT,
+            current_regime,
+            reward_contract_hash,
+            len(relevant),
+            len(matured),
+            len(rows),
+            resolution_rate,
+            model_fingerprint,
+            verification.chain_hash,
+            (),
+            (),
+            tuple(dict.fromkeys(failures)),
         )
+
     adjusted_alpha = policy.confidence_alpha / max(1, len(treatment_keys))
     z_value = NormalDist().inv_cdf(1.0 - adjusted_alpha / 2.0)
-    estimates = tuple(
-        item
-        for key in treatment_keys
-        if (
-            item := _estimate_treatment(
-                key,
-                treatments[key],
-                rows,
-                current_regime,
-                z_value,
-                policy,
-            )
-        ) is not None
-    )
+    estimate_list: list[CounterfactualTreatmentEstimate] = []
+    for key in treatment_keys:
+        estimate = _estimate_treatment(
+            key,
+            treatments[key],
+            rows,
+            current_regime,
+            z_value,
+            policy,
+        )
+        if estimate is not None:
+            estimate_list.append(estimate)
+    estimates = tuple(estimate_list)
     if len(estimates) < 2:
         failures.append("insufficient_supported_counterfactual_treatments")
         status = CounterfactualLearningStatus.INSUFFICIENT
@@ -449,25 +456,24 @@ def evaluate_counterfactual_learning_efficiency(
         status = CounterfactualLearningStatus.QUALIFIED
         base = {item.treatment_key: item for item in estimates}
         by_id = {item.assignment_id: item for item in assignments}
-        sequences = _sequence_estimates(rows, by_id, base, z_value, policy)
+        sequences = _estimate_sequences(rows, by_id, base, z_value, policy)
     return _report(
-        status=status,
-        current_regime=current_regime,
-        reward_contract_hash=reward_contract_hash,
-        assignments=len(relevant),
-        matured=len(matured),
-        resolved=len(rows),
-        resolution_rate=resolution_rate,
-        model_fingerprint=model_fingerprint,
-        chain_hash=verification.chain_hash,
-        treatment_estimates=estimates,
-        sequence_estimates=sequences,
-        failures=tuple(failures),
+        status,
+        current_regime,
+        reward_contract_hash,
+        len(relevant),
+        len(matured),
+        len(rows),
+        resolution_rate,
+        model_fingerprint,
+        verification.chain_hash,
+        estimates,
+        sequences,
+        tuple(failures),
     )
 
 
 def _report(
-    *,
     status: CounterfactualLearningStatus,
     current_regime: str,
     reward_contract_hash: str,

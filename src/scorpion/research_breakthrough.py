@@ -160,8 +160,7 @@ def evaluate_breakthrough_candidate(
         failures.append("breakthrough_safety_regression")
     if policy.require_selection_adjustment and any(not item.selection_adjusted for item in evidence):
         failures.append("breakthrough_unadjusted_selection_evidence")
-    hard_block = bool(failures)
-    if hard_block:
+    if failures:
         return _report(hypothesis_id, BreakthroughStatus.BLOCKED, evidence, policy, tuple(failures))
 
     replications = len(evidence)
@@ -203,7 +202,7 @@ def _report(
     datasets = len({item.dataset_fingerprint for item in evidence})
     time_blocks = len({item.time_block for item in evidence})
     regimes = len({item.regime_key for item in evidence})
-    median_effect = statistics.median((item.effect_size for item in evidence)) if evidence else 0.0
+    median_effect = statistics.median(item.effect_size for item in evidence) if evidence else 0.0
     worst_lower = min((item.simultaneous_lower_bound for item in evidence), default=0.0)
     material = {
         "version": "breakthrough-report-v1",

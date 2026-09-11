@@ -9,7 +9,6 @@ from .counterfactual_learning_efficiency import (
     CounterfactualLearningReport,
     CounterfactualLearningStatus,
     CounterfactualSequenceEstimate,
-    CounterfactualTreatmentEstimate,
 )
 
 
@@ -119,7 +118,6 @@ def plan_learning_path(
         return _plan_result(report, None, (), policy, tuple(failures))
 
     transitions = _transition_map(report.sequence_estimates)
-    # (steps, used cost, accumulated value)
     beam: list[tuple[tuple[LearningPathStep, ...], int, float]] = [((), 0, 0.0)]
     completed: list[LearningPathCandidate] = []
     for _ in range(policy.maximum_steps):
