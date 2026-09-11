@@ -139,13 +139,14 @@ def test_contextual_fit_learns_oof_specialists_and_caps_weight_shift():
     fit = fit_contextual_ensemble(_training_rows(), policy=policy)
     global_weights = dict(fit.global_weights)
     contexts = {record.context_key: record for record in fit.contexts}
-    trend = contexts[(('regime', 'trend'),)]
-    mean_revert = contexts[(('regime', 'mean-revert'),)]
+    trend = contexts[(("regime", "trend"),)]
+    mean_revert = contexts[(("regime", "mean-revert"),)]
     assert dict(trend.weights)["model-a"] > global_weights["model-a"]
     assert dict(mean_revert.weights)["model-b"] > global_weights["model-b"]
     for record in fit.contexts:
         for model_id, weight in record.weights:
-            assert abs(weight - global_weights[model_id]) <= policy.maximum_context_weight_shift + 1e-9
+            shift = abs(weight - global_weights[model_id])
+            assert shift <= policy.maximum_context_weight_shift + 1e-9
         assert record.folds >= policy.minimum_context_folds
 
 
