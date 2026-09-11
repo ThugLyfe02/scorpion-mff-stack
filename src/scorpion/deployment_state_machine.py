@@ -205,6 +205,24 @@ class DeploymentStateMachine(_core.DeploymentStateMachine):
         if not evidence_validation.valid:
             raise ValueError("formal promotion evidence schema is invalid")
 
+        # Fast, precise diagnostics before the broader operator snapshot. These checks are
+        # repeated inside BEGIN IMMEDIATE below; this preflight does not carry authority.
+        with self._connect() as preflight_db:
+            consumed = preflight_db.execute(
+                "SELECT consumed_rollout_id FROM production_readiness_consumptions "
+                "WHERE certificate_id=?",
+                (readiness_certificate.certificate_id,),
+            ).fetchone()
+            if consumed is not None and str(consumed["consumed_rollout_id"]):
+                raise ValueError("rollout readiness certificate has already been consumed")
+            preflight_control = capture_control_state_binding(
+                preflight_db,
+                component=readiness_certificate.component,
+                required_heartbeats=readiness_certificate.bottleneck_policy.required_heartbeats,
+            )
+        if preflight_control.state_hash != readiness_certificate.control_state_hash:
+            raise ValueError("control-state epoch changed after readiness certification")
+
         current_snapshot = build_operator_observability_snapshot(
             self.path,
             now=timestamp,
