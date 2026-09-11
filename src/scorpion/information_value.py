@@ -5,6 +5,7 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from enum import StrEnum
+from typing import Protocol
 
 from .uncertainty_decomposition import UncertaintyDecomposition, UncertaintyStatus
 
@@ -14,6 +15,13 @@ class LearningAction(StrEnum):
     LIGHT_SHADOW = "LIGHT_SHADOW"
     DEEP_SHADOW = "DEEP_SHADOW"
     HUMAN_REVIEW = "HUMAN_REVIEW"
+
+
+class YieldCalibration(Protocol):
+    @property
+    def calibration_hash(self) -> str: ...
+
+    def multiplier_for(self, action: str, segment: str = "") -> float: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +84,7 @@ class LearningSignal:
     coverage_deficit: float = 0.0
     novelty: float = 0.0
     actionable_disagreement: bool = False
+    yield_segment: str = ""
 
     def __post_init__(self) -> None:
         if not self.event_id.strip():
@@ -86,6 +95,8 @@ class LearningSignal:
             value = getattr(self, name)
             if not math.isfinite(value) or not 0 <= value <= 1:
                 raise ValueError(f"{name} must be finite and in [0,1]")
+        if self.yield_segment and not self.yield_segment.strip():
+            raise ValueError("yield_segment cannot be whitespace")
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +110,7 @@ class LearningValueAssessment:
     review_utility: float
     intrinsically_ambiguous: bool
     reasons: tuple[str, ...]
+    yield_segment: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +119,8 @@ class LearningAllocationDecision:
     action: LearningAction
     cost_units: int
     utility: float
+    yield_multiplier: float = 1.0
+    base_utility: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +130,7 @@ class LearningBudgetAllocation:
     used_units: int
     total_utility: float
     allocation_hash: str
+    yield_calibration_hash: str = ""
 
 
 def _clamp(value: float) -> float:
@@ -131,13 +146,7 @@ def assess_information_value(
     *,
     policy: InformationValuePolicy | None = None,
 ) -> LearningValueAssessment:
-    """Estimate research value without granting runtime or brokerage authority.
-
-    High epistemic uncertainty is treated as potentially learnable. High aleatoric uncertainty is
-    discounted so the system does not waste training budget repeatedly chasing intrinsically
-    ambiguous examples. Residual hotspots and under-covered slices can restore priority when an
-    example is strategically valuable for model diagnosis.
-    """
+    """Estimate research value without granting runtime or brokerage authority."""
     policy = policy or InformationValuePolicy()
     uncertainty = signal.uncertainty
     epistemic = _clamp(uncertainty.normalized_epistemic)
@@ -203,41 +212,80 @@ def assess_information_value(
         review_utility=review,
         intrinsically_ambiguous=intrinsically_ambiguous,
         reasons=tuple(reasons),
+        yield_segment=signal.yield_segment,
+    )
+
+
+def _scaled_decision(
+    assessment: LearningValueAssessment,
+    action: LearningAction,
+    *,
+    cost_units: int,
+    base_utility: float,
+    calibration: YieldCalibration | None,
+) -> LearningAllocationDecision:
+    multiplier = (
+        calibration.multiplier_for(action.value, assessment.yield_segment)
+        if calibration is not None
+        else 1.0
+    )
+    if not math.isfinite(multiplier) or multiplier <= 0:
+        raise ValueError("yield calibration multiplier must be finite and positive")
+    return LearningAllocationDecision(
+        event_id=assessment.event_id,
+        action=action,
+        cost_units=cost_units,
+        utility=base_utility * multiplier,
+        yield_multiplier=multiplier,
+        base_utility=base_utility,
     )
 
 
 def _options(
     assessment: LearningValueAssessment,
     policy: InformationValuePolicy,
+    calibration: YieldCalibration | None,
 ) -> tuple[LearningAllocationDecision, ...]:
-    options = [LearningAllocationDecision(assessment.event_id, LearningAction.DEFER, 0, 0.0)]
+    options = [
+        LearningAllocationDecision(
+            assessment.event_id,
+            LearningAction.DEFER,
+            0,
+            0.0,
+            1.0,
+            0.0,
+        )
+    ]
     if assessment.intrinsically_ambiguous:
         return tuple(options)
     if assessment.light_utility >= policy.minimum_light_utility:
         options.append(
-            LearningAllocationDecision(
-                assessment.event_id,
+            _scaled_decision(
+                assessment,
                 LearningAction.LIGHT_SHADOW,
-                policy.light_cost_units,
-                assessment.light_utility,
+                cost_units=policy.light_cost_units,
+                base_utility=assessment.light_utility,
+                calibration=calibration,
             )
         )
     if assessment.deep_utility >= policy.minimum_deep_utility:
         options.append(
-            LearningAllocationDecision(
-                assessment.event_id,
+            _scaled_decision(
+                assessment,
                 LearningAction.DEEP_SHADOW,
-                policy.deep_cost_units,
-                assessment.deep_utility,
+                cost_units=policy.deep_cost_units,
+                base_utility=assessment.deep_utility,
+                calibration=calibration,
             )
         )
     if assessment.review_utility >= policy.minimum_review_utility:
         options.append(
-            LearningAllocationDecision(
-                assessment.event_id,
+            _scaled_decision(
+                assessment,
                 LearningAction.HUMAN_REVIEW,
-                policy.review_cost_units,
-                assessment.review_utility,
+                cost_units=policy.review_cost_units,
+                base_utility=assessment.review_utility,
+                calibration=calibration,
             )
         )
     return tuple(options)
@@ -248,8 +296,9 @@ def allocate_learning_budget(
     *,
     budget_units: int,
     policy: InformationValuePolicy | None = None,
+    yield_calibration: YieldCalibration | None = None,
 ) -> LearningBudgetAllocation:
-    """Solve a deterministic multiple-choice knapsack over research-only learning actions."""
+    """Solve an exact research knapsack, optionally calibrated by realized learning yield."""
     policy = policy or InformationValuePolicy()
     if budget_units < 0 or budget_units > policy.maximum_budget_units:
         raise ValueError("budget_units is outside the configured research envelope")
@@ -257,14 +306,11 @@ def allocate_learning_budget(
     if len(event_ids) != len(set(event_ids)):
         raise ValueError("assessments must contain unique event ids")
 
-    # cost -> (utility, decisions). One action at most per event. This is exact for the configured
-    # discrete research budget rather than a greedy heuristic that can waste scarce deep-review
-    # capacity on locally attractive but globally inferior choices.
     states: dict[int, tuple[float, tuple[LearningAllocationDecision, ...]]] = {0: (0.0, ())}
     for assessment in sorted(assessments, key=lambda item: item.event_id):
         next_states: dict[int, tuple[float, tuple[LearningAllocationDecision, ...]]] = {}
         for used, (utility, decisions) in states.items():
-            for option in _options(assessment, policy):
+            for option in _options(assessment, policy, yield_calibration):
                 next_cost = used + option.cost_units
                 if next_cost > budget_units:
                     continue
@@ -283,16 +329,20 @@ def allocate_learning_budget(
         key=lambda item: (-item[1][0], item[0], tuple(d.action.value for d in item[1][1])),
     )
     selected = tuple(item for item in best[1] if item.action is not LearningAction.DEFER)
+    calibration_hash = yield_calibration.calibration_hash if yield_calibration is not None else ""
     material = {
-        "version": "learning-budget-allocation-v1",
+        "version": "learning-budget-allocation-v2",
         "budget_units": budget_units,
         "used_units": best_cost,
         "policy": asdict(policy),
+        "yield_calibration_hash": calibration_hash,
         "decisions": [
             {
                 "event_id": item.event_id,
                 "action": item.action.value,
                 "cost_units": item.cost_units,
+                "base_utility": round(item.base_utility, 12),
+                "yield_multiplier": round(item.yield_multiplier, 12),
                 "utility": round(item.utility, 12),
             }
             for item in selected
@@ -307,4 +357,5 @@ def allocate_learning_budget(
         used_units=best_cost,
         total_utility=best[0],
         allocation_hash=allocation_hash,
+        yield_calibration_hash=calibration_hash,
     )
