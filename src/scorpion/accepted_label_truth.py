@@ -504,8 +504,8 @@ def verify_accepted_truth_ledger(path: str | Path) -> AcceptedTruthLedgerVerific
             failures.append("accepted_truth_event_parent_mismatch")
         if str(row["event_hash"]) != expected:
             failures.append("accepted_truth_event_hash_mismatch")
-        revision = revision_by_id.get(str(row["revision_id"]))
-        if revision is None or revision.event_id != str(row["event_id"]):
+        event_revision = revision_by_id.get(str(row["revision_id"]))
+        if event_revision is None or event_revision.event_id != str(row["event_id"]):
             failures.append("accepted_truth_event_revision_mismatch")
         replay_heads[str(row["event_id"])] = str(row["revision_id"])
         previous_event_hash = str(row["event_hash"])
