@@ -15,7 +15,12 @@ from scorpion.scanner_context import (
 
 
 def _canonical(payload: object) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
 
 
 def _observation(symbol: str, run_id: str) -> dict[str, object]:
@@ -36,8 +41,11 @@ def _observation(symbol: str, run_id: str) -> dict[str, object]:
         "category": "gapper_mobility",
         "source_kind": "EXTERNAL_BRIEF",
         "observed_at_utc": observed.isoformat(),
+        "received_at_utc": (observed + timedelta(seconds=2)).isoformat(),
         "observation_time_precision": "EXACT",
-        "market_data_as_of_utc": (observed - timedelta(seconds=1)).isoformat(),
+        "market_data_as_of_utc": (
+            observed - timedelta(seconds=1)
+        ).isoformat(),
         "market_data_source": "fixture",
         "session": "RTH",
         "last_price": 10.0,
@@ -73,7 +81,13 @@ def _observation(symbol: str, run_id: str) -> dict[str, object]:
             "point_in_time_verified": True,
         },
         "ross": {
-            "boxes": {"price": True, "rvol": True, "float": None, "news": None, "gap": True},
+            "boxes": {
+                "price": True,
+                "rvol": True,
+                "float": None,
+                "news": None,
+                "gap": True,
+            },
             "boxes_hit": 3,
             "boxes_known": 3,
             "boxes_total": 5,
@@ -89,6 +103,7 @@ def _observation(symbol: str, run_id: str) -> dict[str, object]:
         "candidate_fingerprint": "b" * 64,
         "quality": {
             "observation_time_exact": True,
+            "availability_time_verified": True,
             "market_data_timestamped": True,
             "rvol_definition_known": True,
             "float_vintage_verified": False,
@@ -103,12 +118,23 @@ def _observation(symbol: str, run_id: str) -> dict[str, object]:
     return payload
 
 
-def _write_bundle(tmp_path: Path) -> tuple[Path, Path]:
-    rows = [_observation("AENT", "run-1"), _observation("TNON", "run-1")]
+def _write_bundle(
+    tmp_path: Path,
+    *,
+    selection_scope: str = "HITS_ONLY",
+    coverage_complete: bool = True,
+) -> tuple[Path, Path]:
+    rows = [
+        _observation("AENT", "run-1"),
+        _observation("TNON", "run-1"),
+    ]
     batch_text = "".join(_canonical(row) + "\n" for row in rows)
     batch = tmp_path / "run-1.jsonl"
     batch.write_text(batch_text, encoding="utf-8")
 
+    attempted = 2
+    with_data = 2 if coverage_complete else 1
+    errors = 0 if coverage_complete else 1
     manifest: dict[str, object] = {
         "schema_version": "scorpion.scanner-batch.v1",
         "authority": "RESEARCH_ONLY",
@@ -116,26 +142,83 @@ def _write_bundle(tmp_path: Path) -> tuple[Path, Path]:
         "run_id": "run-1",
         "observation_schema": "scorpion.scanner-observation.v1",
         "row_count": 2,
-        "ordered_observation_ids": [row["observation_id"] for row in rows],
-        "batch_sha256": hashlib.sha256(batch_text.encode("utf-8")).hexdigest(),
+        "selected_symbol_count": 2,
+        "ordered_observation_ids": [
+            row["observation_id"] for row in rows
+        ],
+        "batch_sha256": hashlib.sha256(
+            batch_text.encode("utf-8")
+        ).hexdigest(),
+        "selection_scope": selection_scope,
+        "universe_fingerprint": "u" * 64,
+        "symbols_attempted_count": attempted,
+        "symbols_with_market_data_count": with_data,
+        "error_count": errors,
+        "coverage_complete": coverage_complete,
         "policy_fingerprint": "p" * 64,
         "code_revision": "fixture",
-        "generated_at_utc": datetime(2026, 9, 11, 16, 1, tzinfo=UTC).isoformat(),
+        "generated_at_utc": datetime(
+            2026,
+            9,
+            11,
+            16,
+            1,
+            tzinfo=UTC,
+        ).isoformat(),
     }
     material = dict(manifest)
     material.pop("manifest_id")
-    manifest["manifest_id"] = hashlib.sha256(_canonical(material).encode("utf-8")).hexdigest()
+    manifest["manifest_id"] = hashlib.sha256(
+        _canonical(material).encode("utf-8")
+    ).hexdigest()
     manifest_path = tmp_path / "run-1.manifest.json"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
     return batch, manifest_path
 
 
 def test_bundle_verifies_complete_ordered_run(tmp_path: Path) -> None:
     batch, manifest = _write_bundle(tmp_path)
-    loaded = load_scanner_observation_bundle(batch_path=batch, manifest_path=manifest)
+    loaded = load_scanner_observation_bundle(
+        batch_path=batch,
+        manifest_path=manifest,
+    )
     assert loaded.row_count == 2
     assert [row.symbol for row in loaded.observations] == ["AENT", "TNON"]
     assert loaded.policy_fingerprint == "p" * 64
+    assert loaded.coverage_complete is True
+    assert loaded.absence_is_interpretable is False
+
+
+def test_full_universe_complete_run_can_interpret_absence(tmp_path: Path) -> None:
+    batch, manifest = _write_bundle(
+        tmp_path,
+        selection_scope="FULL_UNIVERSE",
+        coverage_complete=True,
+    )
+    loaded = load_scanner_observation_bundle(
+        batch_path=batch,
+        manifest_path=manifest,
+    )
+    assert loaded.absence_is_interpretable is True
+
+
+def test_full_universe_partial_coverage_cannot_interpret_absence(
+    tmp_path: Path,
+) -> None:
+    batch, manifest = _write_bundle(
+        tmp_path,
+        selection_scope="FULL_UNIVERSE",
+        coverage_complete=False,
+    )
+    loaded = load_scanner_observation_bundle(
+        batch_path=batch,
+        manifest_path=manifest,
+    )
+    assert loaded.coverage_complete is False
+    assert loaded.absence_is_interpretable is False
 
 
 def test_bundle_rejects_truncation(tmp_path: Path) -> None:
@@ -143,7 +226,10 @@ def test_bundle_rejects_truncation(tmp_path: Path) -> None:
     first = batch.read_text(encoding="utf-8").splitlines()[0]
     batch.write_text(first + "\n", encoding="utf-8")
     with pytest.raises(ScannerContextError, match="batch hash mismatch"):
-        load_scanner_observation_bundle(batch_path=batch, manifest_path=manifest)
+        load_scanner_observation_bundle(
+            batch_path=batch,
+            manifest_path=manifest,
+        )
 
 
 def test_bundle_rejects_manifest_tampering(tmp_path: Path) -> None:
@@ -151,5 +237,11 @@ def test_bundle_rejects_manifest_tampering(tmp_path: Path) -> None:
     data = json.loads(manifest.read_text(encoding="utf-8"))
     data["row_count"] = 1
     manifest.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(ScannerContextError, match="manifest hash mismatch"):
-        load_scanner_observation_bundle(batch_path=batch, manifest_path=manifest)
+    with pytest.raises(
+        ScannerContextError,
+        match="manifest hash mismatch",
+    ):
+        load_scanner_observation_bundle(
+            batch_path=batch,
+            manifest_path=manifest,
+        )
