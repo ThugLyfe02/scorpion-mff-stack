@@ -9,6 +9,8 @@ from . import _deployment_state_machine_core as _core
 from ._deployment_core_alias import CoreDeploymentStateMachine
 from ._deployment_state_machine_v26 import (
     DeploymentStateMachine as LegacyDeploymentStateMachine,
+)
+from ._deployment_state_machine_v26 import (
     DeploymentStateMachinePolicy,
     RollbackRecord,
     RollbackState,
@@ -62,8 +64,6 @@ class DeploymentStateMachine(LegacyDeploymentStateMachine):
         *,
         policy: DeploymentStateMachinePolicy | None = None,
     ) -> None:
-        # Bootstrap only the stable core schema, then migrate every production extension
-        # through the checksummed migration ledger before installing runtime triggers.
         CoreDeploymentStateMachine.__init__(self, path, policy=policy)
         apply_schema_migrations(self.path, application_id=_APPLICATION_ID)
         with self._connect() as db:
@@ -111,9 +111,7 @@ class DeploymentStateMachine(LegacyDeploymentStateMachine):
             readiness_certificate=readiness_certificate,
         )
         if readiness_certificate is None:
-            # Super already rejects this. Keep type narrowing explicit for strict mypy.
             raise RuntimeError("rollout readiness certificate unexpectedly missing")
-
         payload_hash = capability_payload_sha256(
             certificate_id=readiness_certificate.certificate_id,
             component=prepared.component,
@@ -211,7 +209,6 @@ class DeploymentStateMachine(LegacyDeploymentStateMachine):
         now: datetime,
     ) -> None:
         rollout_id = str(rollout["rollout_id"])
-        component = str(rollout["component"])
         capability = db.execute(
             "SELECT * FROM production_readiness_consumptions WHERE consumed_rollout_id=?",
             (rollout_id,),
@@ -220,9 +217,7 @@ class DeploymentStateMachine(LegacyDeploymentStateMachine):
             raise _ActivationReadinessInvalid("consumed readiness capability is missing")
         certificate_id = str(capability["certificate_id"])
         if certificate_id != str(rollout["readiness_certificate_id"]):
-            raise _ActivationReadinessInvalid(
-                "rollout readiness certificate identity changed"
-            )
+            raise _ActivationReadinessInvalid("rollout readiness certificate identity changed")
         for column in (
             "component",
             "candidate_release_id",
@@ -231,31 +226,23 @@ class DeploymentStateMachine(LegacyDeploymentStateMachine):
             "evidence_bundle_hash",
         ):
             if str(capability[column]) != str(rollout[column]):
-                raise _ActivationReadinessInvalid(
-                    f"readiness capability binding changed:{column}"
-                )
-        expiry = datetime.fromisoformat(str(capability["certificate_expires_ts_utc"])).astimezone(
-            UTC
-        )
+                raise _ActivationReadinessInvalid(f"readiness capability binding changed:{column}")
+        expiry = datetime.fromisoformat(str(capability["certificate_expires_ts_utc"])).astimezone(UTC)
         if now > expiry:
             raise _ActivationReadinessInvalid("readiness capability expired")
-
         encoded_policy = str(capability["bottleneck_policy_json"])
         policy = parse_bottleneck_policy_json(encoded_policy)
         policy_hash = bottleneck_policy_fingerprint(policy)
         if policy_hash != str(capability["bottleneck_policy_sha256"]):
-            raise _ActivationReadinessInvalid(
-                "readiness bottleneck policy integrity mismatch"
-            )
+            raise _ActivationReadinessInvalid("readiness bottleneck policy integrity mismatch")
         if policy_hash != str(rollout["readiness_bottleneck_policy_hash"]):
             raise _ActivationReadinessInvalid("rollout bottleneck policy binding changed")
         if bottleneck_policy_json(policy) != encoded_policy:
             raise _ActivationReadinessInvalid("readiness bottleneck policy is noncanonical")
-
         snapshot = certify_activation_snapshot(
             db,
             self.path,
-            component=component,
+            component=str(rollout["component"]),
             rollout_id=rollout_id,
             certificate_id=certificate_id,
             candidate_release_id=str(rollout["candidate_release_id"]),
@@ -351,12 +338,7 @@ class DeploymentStateMachine(LegacyDeploymentStateMachine):
         now: datetime | None = None,
     ) -> RolloutRecord:
         timestamp = (now or datetime.now(UTC)).astimezone(UTC)
-        result = super().cancel(
-            rollout_id,
-            operator=operator,
-            reason=reason,
-            now=timestamp,
-        )
+        result = super().cancel(rollout_id, operator=operator, reason=reason, now=timestamp)
         self._append_terminal_capability_event(
             rollout_id,
             kind=ReadinessCapabilityEventKind.INVALIDATED,
@@ -385,8 +367,7 @@ class DeploymentStateMachine(LegacyDeploymentStateMachine):
             )
         except Exception:
             with contextlib.suppress(Exception):
-                state = self.get(rollout_id).state
-                if state is RolloutState.EXPIRED:
+                if self.get(rollout_id).state is RolloutState.EXPIRED:
                     self._append_terminal_capability_event(
                         rollout_id,
                         kind=ReadinessCapabilityEventKind.EXPIRED,
