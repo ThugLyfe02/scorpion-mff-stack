@@ -27,11 +27,20 @@ def _payload(
         "authority": "RESEARCH_ONLY",
         "observation_id": "0" * 64,
         "run_id": "scanner-run-1",
+        "producer": {
+            "producer": "scorpion-stock-finder",
+            "package_version": "3.6.0",
+            "code_revision": "fixture",
+            "policy_fingerprint": "p" * 64,
+        },
         "symbol": symbol,
         "instrument_id": f"US_EQUITY:{symbol}",
         "category": "gapper_mobility",
+        "source_kind": "EXTERNAL_BRIEF",
         "observed_at_utc": observed.isoformat(),
+        "observation_time_precision": "EXACT",
         "market_data_as_of_utc": (observed - timedelta(seconds=1)).isoformat(),
+        "market_data_source": "fixture-feed",
         "session": "RTH",
         "last_price": 177.0,
         "prior_close": 170.0,
@@ -41,15 +50,28 @@ def _payload(
         "average_prior_volume": 1_000_000.0,
         "rvol": 5.0,
         "rvol_basis": "EXTERNAL_PROVIDED",
+        "rvol_window": "external",
         "float_shares": 1_000_000,
         "float_source": "fixture",
+        "float_as_of_utc": (observed - timedelta(hours=1)).isoformat(),
+        "float_point_in_time_verified": True,
         "catalyst": {
             "label": "contract",
             "confirmed": True,
             "source": "fixture",
+            "source_id": "story-1",
             "headline": "fixture",
             "published_at_utc": (observed - timedelta(minutes=10)).isoformat(),
             "evidence_hash": "f" * 64,
+            "point_in_time_verified": True,
+        },
+        "corporate_action": {
+            "status": "CLEAR",
+            "source": "fixture-actions",
+            "checked_through_utc": observed.isoformat(),
+            "latest_effective_at_utc": None,
+            "split_factor": None,
+            "evidence_hash": "e" * 64,
             "point_in_time_verified": True,
         },
         "ross": {
@@ -74,13 +96,15 @@ def _payload(
         "source_fingerprint": "a" * 64,
         "candidate_fingerprint": "b" * 64,
         "quality": {
+            "observation_time_exact": True,
             "market_data_timestamped": True,
             "rvol_definition_known": True,
-            "fundamentals_vintage_verified": False,
+            "float_vintage_verified": True,
             "catalyst_publication_time_verified": True,
-            "corporate_action_checked": False,
-            "source_fingerprint_present": True,
-            "blocking_reasons": ["float_vintage_unverified"],
+            "corporate_action_verified": True,
+            "source_fingerprint_verified": True,
+            "policy_fingerprint_present": True,
+            "blocking_reasons": [],
         },
     }
     payload["observation_id"] = canonical_scanner_observation_hash(payload)
@@ -91,11 +115,14 @@ def _rehash(payload: dict[str, object]) -> None:
     payload["observation_id"] = canonical_scanner_observation_hash(payload)
 
 
-def test_valid_scanner_context_is_research_only() -> None:
+def test_valid_scanner_context_is_research_only_and_causal_safe() -> None:
     parsed = parse_scanner_observation(_payload())
     assert parsed.research_only is True
     assert parsed.instrument_id == "US_EQUITY:NVDA"
-    assert parsed.quality_blocking_reasons == ("float_vintage_unverified",)
+    assert parsed.quality_blocking_reasons == ()
+    assert parsed.causal_blocking_reasons == ()
+    assert parsed.causal_research_eligible is True
+    assert parsed.policy_fingerprint == "p" * 64
 
 
 def test_live_authority_is_rejected_even_with_valid_hash() -> None:
@@ -135,6 +162,15 @@ def test_future_verified_catalyst_is_rejected() -> None:
         parse_scanner_observation(payload)
 
 
+def test_future_float_evidence_is_rejected() -> None:
+    payload = _payload()
+    observed = datetime.fromisoformat(str(payload["observed_at_utc"]))
+    payload["float_as_of_utc"] = (observed + timedelta(seconds=1)).isoformat()
+    _rehash(payload)
+    with pytest.raises(ScannerContextError, match="future float evidence"):
+        parse_scanner_observation(payload)
+
+
 def test_asof_selector_never_selects_future_context() -> None:
     event_time = datetime(2026, 9, 11, 16, 1, tzinfo=UTC)
     old = parse_scanner_observation(
@@ -156,13 +192,61 @@ def test_asof_selector_never_selects_future_context() -> None:
     assert selected.observation_id == latest.observation_id
 
 
-def test_jsonl_loader_validates_every_row(tmp_path: Path) -> None:
+def test_default_selector_skips_date_only_or_unattested_context() -> None:
+    event_time = datetime(2026, 9, 11, 16, 1, tzinfo=UTC)
+    payload = _payload(observed_at=event_time - timedelta(seconds=5))
+    payload["observation_time_precision"] = "DATE_ONLY"
+    quality = dict(payload["quality"])  # type: ignore[arg-type]
+    quality["observation_time_exact"] = False
+    quality["blocking_reasons"] = ["observation_time_not_exact"]
+    payload["quality"] = quality
+    _rehash(payload)
+    unsafe = parse_scanner_observation(payload)
+    assert unsafe.causal_research_eligible is False
+
+    assert (
+        latest_scanner_context_before(
+            (unsafe,),
+            symbol="NVDA",
+            source_ts_utc=event_time,
+        )
+        is None
+    )
+    exploratory = latest_scanner_context_before(
+        (unsafe,),
+        symbol="NVDA",
+        source_ts_utc=event_time,
+        require_causal_safe=False,
+    )
+    assert exploratory is not None
+
+
+def test_consumer_does_not_trust_empty_producer_blockers() -> None:
+    payload = _payload()
+    producer = dict(payload["producer"])  # type: ignore[arg-type]
+    producer["policy_fingerprint"] = None
+    payload["producer"] = producer
+    quality = dict(payload["quality"])  # type: ignore[arg-type]
+    quality["blocking_reasons"] = []
+    payload["quality"] = quality
+    _rehash(payload)
+
+    parsed = parse_scanner_observation(payload)
+    assert parsed.causal_research_eligible is False
+    assert "policy_fingerprint_missing" in parsed.causal_blocking_reasons
+
+
+def test_jsonl_loader_validates_every_row_and_rejects_duplicates(tmp_path: Path) -> None:
     payload = _payload()
     path = tmp_path / "scanner.jsonl"
     path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
     rows = load_scanner_observations(path)
     assert len(rows) == 1
     assert rows[0].symbol == "NVDA"
+
+    path.write_text(json.dumps(payload) + "\n" + json.dumps(payload) + "\n", encoding="utf-8")
+    with pytest.raises(ScannerContextError, match="duplicate scanner observation"):
+        load_scanner_observations(path)
 
 
 def test_unknown_schema_is_rejected() -> None:
