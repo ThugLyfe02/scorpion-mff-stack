@@ -126,9 +126,17 @@ def load_scanner_observation_bundle(
         raise ScannerContextError("scanner batch run_id mismatch")
 
     policy_value = payload.get("policy_fingerprint")
-    policy_fingerprint = policy_value.strip() if isinstance(policy_value, str) and policy_value.strip() else None
+    policy_fingerprint = (
+        policy_value.strip()
+        if isinstance(policy_value, str) and policy_value.strip()
+        else None
+    )
     code_value = payload.get("code_revision")
-    code_revision = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
+    code_revision = (
+        code_value.strip()
+        if isinstance(code_value, str) and code_value.strip()
+        else None
+    )
 
     return ScannerContextBatch(
         manifest_id=manifest_id,
