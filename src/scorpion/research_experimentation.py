@@ -684,13 +684,13 @@ def verify_research_experiment_ledger(
         except (ValueError, TypeError):
             failures.append("research_outcome_decode_failure")
             continue
-        assignment_item = assignments.get(outcome_item.assignment_id)
-        if assignment_item is None:
+        parent_assignment = assignments.get(outcome_item.assignment_id)
+        if parent_assignment is None:
             failures.append("research_outcome_assignment_missing")
             continue
-        if outcome_item.reward_contract_hash != assignment_item.reward_contract_hash:
+        if outcome_item.reward_contract_hash != parent_assignment.reward_contract_hash:
             failures.append("research_outcome_reward_contract_mismatch")
-        if outcome_item.realized_ts_utc < assignment_item.maturity_ts_utc:
+        if outcome_item.realized_ts_utc < parent_assignment.maturity_ts_utc:
             failures.append("research_outcome_before_maturity")
         if outcome_item.record_hash != _hash(outcome_payload):
             failures.append("research_outcome_record_hash_mismatch")
