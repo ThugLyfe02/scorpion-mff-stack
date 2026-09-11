@@ -10,6 +10,7 @@ import pytest
 from scorpion.scanner_context import (
     ScannerContextError,
     canonical_scanner_observation_hash,
+    latest_scanner_context_available_before,
     latest_scanner_context_before,
     load_scanner_observations,
     parse_scanner_observation,
@@ -19,9 +20,11 @@ from scorpion.scanner_context import (
 def _payload(
     *,
     observed_at: datetime | None = None,
+    received_at: datetime | None = None,
     symbol: str = "NVDA",
 ) -> dict[str, object]:
     observed = observed_at or datetime(2026, 9, 11, 16, 0, tzinfo=UTC)
+    received = received_at or observed + timedelta(seconds=2)
     payload: dict[str, object] = {
         "schema_version": "scorpion.scanner-observation.v1",
         "authority": "RESEARCH_ONLY",
@@ -38,8 +41,11 @@ def _payload(
         "category": "gapper_mobility",
         "source_kind": "EXTERNAL_BRIEF",
         "observed_at_utc": observed.isoformat(),
+        "received_at_utc": received.isoformat(),
         "observation_time_precision": "EXACT",
-        "market_data_as_of_utc": (observed - timedelta(seconds=1)).isoformat(),
+        "market_data_as_of_utc": (
+            observed - timedelta(seconds=1)
+        ).isoformat(),
         "market_data_source": "fixture-feed",
         "session": "RTH",
         "last_price": 177.0,
@@ -61,7 +67,9 @@ def _payload(
             "source": "fixture",
             "source_id": "story-1",
             "headline": "fixture",
-            "published_at_utc": (observed - timedelta(minutes=10)).isoformat(),
+            "published_at_utc": (
+                observed - timedelta(minutes=10)
+            ).isoformat(),
             "evidence_hash": "f" * 64,
             "point_in_time_verified": True,
         },
@@ -97,6 +105,7 @@ def _payload(
         "candidate_fingerprint": "b" * 64,
         "quality": {
             "observation_time_exact": True,
+            "availability_time_verified": True,
             "market_data_timestamped": True,
             "rvol_definition_known": True,
             "float_vintage_verified": True,
@@ -122,6 +131,7 @@ def test_valid_scanner_context_is_research_only_and_causal_safe() -> None:
     assert parsed.quality_blocking_reasons == ()
     assert parsed.causal_blocking_reasons == ()
     assert parsed.causal_research_eligible is True
+    assert parsed.runtime_availability_verified is True
     assert parsed.policy_fingerprint == "p" * 64
 
 
@@ -143,9 +153,21 @@ def test_tampering_is_rejected_by_hash() -> None:
 def test_future_market_evidence_is_rejected() -> None:
     payload = _payload()
     observed = datetime.fromisoformat(str(payload["observed_at_utc"]))
-    payload["market_data_as_of_utc"] = (observed + timedelta(seconds=1)).isoformat()
+    payload["market_data_as_of_utc"] = (
+        observed + timedelta(seconds=1)
+    ).isoformat()
     _rehash(payload)
     with pytest.raises(ScannerContextError, match="future market evidence"):
+        parse_scanner_observation(payload)
+
+
+def test_receipt_before_source_observation_is_rejected() -> None:
+    observed = datetime(2026, 9, 11, 16, 0, tzinfo=UTC)
+    payload = _payload(
+        observed_at=observed,
+        received_at=observed - timedelta(milliseconds=1),
+    )
+    with pytest.raises(ScannerContextError, match="cannot precede"):
         parse_scanner_observation(payload)
 
 
@@ -155,7 +177,9 @@ def test_future_verified_catalyst_is_rejected() -> None:
     raw_catalyst = payload["catalyst"]
     assert isinstance(raw_catalyst, Mapping)
     catalyst = dict(raw_catalyst)
-    catalyst["published_at_utc"] = (observed + timedelta(seconds=1)).isoformat()
+    catalyst["published_at_utc"] = (
+        observed + timedelta(seconds=1)
+    ).isoformat()
     payload["catalyst"] = catalyst
     _rehash(payload)
     with pytest.raises(ScannerContextError, match="future catalyst evidence"):
@@ -165,7 +189,9 @@ def test_future_verified_catalyst_is_rejected() -> None:
 def test_future_float_evidence_is_rejected() -> None:
     payload = _payload()
     observed = datetime.fromisoformat(str(payload["observed_at_utc"]))
-    payload["float_as_of_utc"] = (observed + timedelta(seconds=1)).isoformat()
+    payload["float_as_of_utc"] = (
+        observed + timedelta(seconds=1)
+    ).isoformat()
     _rehash(payload)
     with pytest.raises(ScannerContextError, match="future float evidence"):
         parse_scanner_observation(payload)
@@ -192,6 +218,56 @@ def test_asof_selector_never_selects_future_context() -> None:
     assert selected.observation_id == latest.observation_id
 
 
+def test_operational_selector_requires_context_to_have_arrived() -> None:
+    source_time = datetime(2026, 9, 11, 16, 1, tzinfo=UTC)
+    mff_received = source_time + timedelta(milliseconds=500)
+    observation_time = source_time - timedelta(seconds=5)
+
+    available = parse_scanner_observation(
+        _payload(
+            observed_at=observation_time,
+            received_at=source_time + timedelta(milliseconds=100),
+        )
+    )
+    late = parse_scanner_observation(
+        _payload(
+            observed_at=observation_time + timedelta(seconds=1),
+            received_at=source_time + timedelta(seconds=2),
+        )
+    )
+
+    selected = latest_scanner_context_available_before(
+        (late, available),
+        symbol="NVDA",
+        source_ts_utc=source_time,
+        received_ts_utc=mff_received,
+    )
+    assert selected is not None
+    assert selected.observation_id == available.observation_id
+
+
+def test_historical_backfill_is_not_operationally_available_in_the_past() -> None:
+    source_time = datetime(2026, 9, 11, 16, 1, tzinfo=UTC)
+    backfill = parse_scanner_observation(
+        _payload(
+            observed_at=source_time - timedelta(minutes=10),
+            received_at=source_time + timedelta(days=2),
+        )
+    )
+    assert backfill.causal_research_eligible is True
+    assert latest_scanner_context_before(
+        (backfill,),
+        symbol="NVDA",
+        source_ts_utc=source_time,
+    ) is not None
+    assert latest_scanner_context_available_before(
+        (backfill,),
+        symbol="NVDA",
+        source_ts_utc=source_time,
+        received_ts_utc=source_time + timedelta(seconds=1),
+    ) is None
+
+
 def test_default_selector_skips_date_only_or_unattested_context() -> None:
     event_time = datetime(2026, 9, 11, 16, 1, tzinfo=UTC)
     payload = _payload(observed_at=event_time - timedelta(seconds=5))
@@ -204,14 +280,11 @@ def test_default_selector_skips_date_only_or_unattested_context() -> None:
     unsafe = parse_scanner_observation(payload)
     assert unsafe.causal_research_eligible is False
 
-    assert (
-        latest_scanner_context_before(
-            (unsafe,),
-            symbol="NVDA",
-            source_ts_utc=event_time,
-        )
-        is None
-    )
+    assert latest_scanner_context_before(
+        (unsafe,),
+        symbol="NVDA",
+        source_ts_utc=event_time,
+    ) is None
     exploratory = latest_scanner_context_before(
         (unsafe,),
         symbol="NVDA",
@@ -236,7 +309,9 @@ def test_consumer_does_not_trust_empty_producer_blockers() -> None:
     assert "policy_fingerprint_missing" in parsed.causal_blocking_reasons
 
 
-def test_jsonl_loader_validates_every_row_and_rejects_duplicates(tmp_path: Path) -> None:
+def test_jsonl_loader_validates_every_row_and_rejects_duplicates(
+    tmp_path: Path,
+) -> None:
     payload = _payload()
     path = tmp_path / "scanner.jsonl"
     path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
@@ -244,8 +319,14 @@ def test_jsonl_loader_validates_every_row_and_rejects_duplicates(tmp_path: Path)
     assert len(rows) == 1
     assert rows[0].symbol == "NVDA"
 
-    path.write_text(json.dumps(payload) + "\n" + json.dumps(payload) + "\n", encoding="utf-8")
-    with pytest.raises(ScannerContextError, match="duplicate scanner observation"):
+    path.write_text(
+        json.dumps(payload) + "\n" + json.dumps(payload) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ScannerContextError,
+        match="duplicate scanner observation",
+    ):
         load_scanner_observations(path)
 
 
