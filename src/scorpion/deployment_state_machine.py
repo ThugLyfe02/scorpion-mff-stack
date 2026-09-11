@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import sqlite3
@@ -9,13 +10,19 @@ from pathlib import Path
 from . import _deployment_state_machine_core as _core
 from ._deployment_state_machine_core import (
     DeploymentStateMachinePolicy,
+    RollbackRecord,
     RollbackState,
+    RolloutHealthEvidence,
+    RolloutIntegrityReport,
     RolloutRecord,
     RolloutState,
 )
 from .fail_safe_control import NoTradeSafetyLatch, SafetyMode
 from .operator_observability import OperatorSystemState, build_operator_observability_snapshot
-from .production_bottleneck_audit import ProductionBottleneckAuditReport
+from .production_bottleneck_audit import (
+    ProductionBottleneckAuditReport,
+    audit_production_bottlenecks,
+)
 from .production_gate import (
     ProductionAuthorization,
     ProductionAuthorizationStatus,
@@ -23,14 +30,31 @@ from .production_gate import (
 )
 from .production_readiness import (
     RolloutReadinessCertificate,
+    activation_bottleneck_fingerprint,
+    activation_control_fingerprint,
+    activation_operator_state_fingerprint,
+    bottleneck_policy_fingerprint,
+    bottleneck_policy_json,
     bottleneck_state_fingerprint,
     capture_control_state_binding,
     operator_state_fingerprint,
+    parse_bottleneck_policy_json,
     verify_rollout_readiness_certificate,
 )
 from .promotion_evidence_schema import PromotionEvidenceValidationReport
 from .release_guard import ReleaseState
 from .schema_contract import SCHEMA_CONTRACT_VERSION
+
+__all__ = [
+    "DeploymentStateMachine",
+    "DeploymentStateMachinePolicy",
+    "RollbackRecord",
+    "RollbackState",
+    "RolloutHealthEvidence",
+    "RolloutIntegrityReport",
+    "RolloutRecord",
+    "RolloutState",
+]
 
 _READINESS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS production_readiness_consumptions (
@@ -41,6 +65,16 @@ CREATE TABLE IF NOT EXISTS production_readiness_consumptions (
     authorization_id TEXT NOT NULL,
     evidence_bundle_hash TEXT NOT NULL,
     control_state_hash TEXT NOT NULL,
+    activation_control_hash TEXT NOT NULL DEFAULT '',
+    operator_state_hash TEXT NOT NULL DEFAULT '',
+    activation_operator_state_hash TEXT NOT NULL DEFAULT '',
+    bottleneck_state_hash TEXT NOT NULL DEFAULT '',
+    activation_bottleneck_hash TEXT NOT NULL DEFAULT '',
+    bottleneck_policy_json TEXT NOT NULL DEFAULT '',
+    bottleneck_policy_sha256 TEXT NOT NULL DEFAULT '',
+    safety_event_count INTEGER NOT NULL DEFAULT 0,
+    safety_head_event_id TEXT NOT NULL DEFAULT '',
+    safety_chain_hash TEXT NOT NULL DEFAULT '',
     certificate_expires_ts_utc TEXT NOT NULL,
     consumed_rollout_id TEXT NOT NULL DEFAULT '',
     consumed_ts_utc TEXT NOT NULL DEFAULT ''
@@ -61,39 +95,91 @@ _NONTERMINAL = (
 )
 
 
+class _ActivationReadinessInvalid(ValueError):
+    pass
+
+
 def _hash_payload(payload: object) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _ensure_column(db: sqlite3.Connection, column: str, ddl: str) -> None:
-    columns = {str(row[1]) for row in db.execute("PRAGMA table_info(deployment_rollouts)")}
+def _ensure_column(
+    db: sqlite3.Connection,
+    *,
+    table: str,
+    column: str,
+    ddl: str,
+) -> None:
+    columns = {str(row[1]) for row in db.execute(f"PRAGMA table_info({table})")}
     if column not in columns:
-        db.execute(f"ALTER TABLE deployment_rollouts ADD COLUMN {ddl}")
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
 def _ensure_readiness_enforcement(db: sqlite3.Connection) -> None:
     db.executescript(_READINESS_SCHEMA)
     for column, ddl in (
         ("readiness_certificate_id", "readiness_certificate_id TEXT NOT NULL DEFAULT ''"),
-        (
-            "readiness_expires_ts_utc",
-            "readiness_expires_ts_utc TEXT NOT NULL DEFAULT ''",
-        ),
+        ("readiness_expires_ts_utc", "readiness_expires_ts_utc TEXT NOT NULL DEFAULT ''"),
         (
             "readiness_operator_state_hash",
             "readiness_operator_state_hash TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "readiness_activation_operator_state_hash",
+            "readiness_activation_operator_state_hash TEXT NOT NULL DEFAULT ''",
         ),
         (
             "readiness_bottleneck_state_hash",
             "readiness_bottleneck_state_hash TEXT NOT NULL DEFAULT ''",
         ),
         (
+            "readiness_activation_bottleneck_hash",
+            "readiness_activation_bottleneck_hash TEXT NOT NULL DEFAULT ''",
+        ),
+        (
             "readiness_control_state_hash",
             "readiness_control_state_hash TEXT NOT NULL DEFAULT ''",
         ),
+        (
+            "readiness_activation_control_hash",
+            "readiness_activation_control_hash TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "readiness_bottleneck_policy_hash",
+            "readiness_bottleneck_policy_hash TEXT NOT NULL DEFAULT ''",
+        ),
     ):
-        _ensure_column(db, column, ddl)
+        _ensure_column(db, table="deployment_rollouts", column=column, ddl=ddl)
+
+    for column, ddl in (
+        ("activation_control_hash", "activation_control_hash TEXT NOT NULL DEFAULT ''"),
+        ("operator_state_hash", "operator_state_hash TEXT NOT NULL DEFAULT ''"),
+        (
+            "activation_operator_state_hash",
+            "activation_operator_state_hash TEXT NOT NULL DEFAULT ''",
+        ),
+        ("bottleneck_state_hash", "bottleneck_state_hash TEXT NOT NULL DEFAULT ''"),
+        (
+            "activation_bottleneck_hash",
+            "activation_bottleneck_hash TEXT NOT NULL DEFAULT ''",
+        ),
+        ("bottleneck_policy_json", "bottleneck_policy_json TEXT NOT NULL DEFAULT ''"),
+        (
+            "bottleneck_policy_sha256",
+            "bottleneck_policy_sha256 TEXT NOT NULL DEFAULT ''",
+        ),
+        ("safety_event_count", "safety_event_count INTEGER NOT NULL DEFAULT 0"),
+        ("safety_head_event_id", "safety_head_event_id TEXT NOT NULL DEFAULT ''"),
+        ("safety_chain_hash", "safety_chain_hash TEXT NOT NULL DEFAULT ''"),
+    ):
+        _ensure_column(
+            db,
+            table="production_readiness_consumptions",
+            column=column,
+            ddl=ddl,
+        )
+
     db.executescript(
         """
         DROP TRIGGER IF EXISTS require_rollout_readiness_capability;
@@ -117,6 +203,12 @@ def _ensure_readiness_enforcement(db: sqlite3.Connection) -> None:
                       AND r.authorization_id=NEW.authorization_id
                       AND r.evidence_bundle_hash=NEW.evidence_bundle_hash
                       AND r.control_state_hash=NEW.readiness_control_state_hash
+                      AND r.activation_control_hash=NEW.readiness_activation_control_hash
+                      AND r.activation_operator_state_hash=
+                          NEW.readiness_activation_operator_state_hash
+                      AND r.activation_bottleneck_hash=
+                          NEW.readiness_activation_bottleneck_hash
+                      AND r.bottleneck_policy_sha256=NEW.readiness_bottleneck_policy_hash
                       AND r.consumed_rollout_id=''
                       AND r.certificate_expires_ts_utc>=NEW.created_ts_utc
                 )
@@ -139,7 +231,7 @@ def _ensure_readiness_enforcement(db: sqlite3.Connection) -> None:
 
 
 class DeploymentStateMachine(_core.DeploymentStateMachine):
-    """Production deployment machine with non-bypassable readiness consumption at PREPARED."""
+    """Production deployment machine with readiness-bound PREPARED and activation."""
 
     def __init__(
         self,
@@ -205,8 +297,6 @@ class DeploymentStateMachine(_core.DeploymentStateMachine):
         if not evidence_validation.valid:
             raise ValueError("formal promotion evidence schema is invalid")
 
-        # Fast, precise diagnostics before the broader operator snapshot. These checks are
-        # repeated inside BEGIN IMMEDIATE below; this preflight does not carry authority.
         with self._connect() as preflight_db:
             consumed = preflight_db.execute(
                 "SELECT consumed_rollout_id FROM production_readiness_consumptions "
@@ -237,9 +327,7 @@ class DeploymentStateMachine(_core.DeploymentStateMachine):
         current_operator_state = operator_state_fingerprint(current_snapshot)
         if current_operator_state != readiness_certificate.operator_state_hash:
             raise ValueError("operator production state changed after readiness certification")
-        current_bottleneck_state = bottleneck_state_fingerprint(
-            current_snapshot.bottleneck_report
-        )
+        current_bottleneck_state = bottleneck_state_fingerprint(current_snapshot.bottleneck_report)
         if current_bottleneck_state != readiness_certificate.bottleneck_state_hash:
             raise ValueError("production bottleneck state changed after readiness certification")
         if not current_snapshot.bottleneck_report.ready_for_rollout:
@@ -248,6 +336,9 @@ class DeploymentStateMachine(_core.DeploymentStateMachine):
         latch = NoTradeSafetyLatch(self.path)
         if not latch.verify_integrity(readiness_certificate.component).valid:
             raise ValueError("component safety ledger integrity is invalid")
+
+        policy_json = bottleneck_policy_json(readiness_certificate.bottleneck_policy)
+        policy_hash = bottleneck_policy_fingerprint(readiness_certificate.bottleneck_policy)
 
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -335,7 +426,7 @@ class DeploymentStateMachine(_core.DeploymentStateMachine):
 
                 rollout_id = _hash_payload(
                     {
-                        "version": "deployment-rollout-v4",
+                        "version": "deployment-rollout-v5",
                         "component": component,
                         "candidate_release_id": candidate_release_id,
                         "dossier_id": dossier.dossier_id,
@@ -343,16 +434,28 @@ class DeploymentStateMachine(_core.DeploymentStateMachine):
                         "evidence_bundle_hash": evidence_bundle_hash,
                         "readiness_certificate_id": readiness_certificate.certificate_id,
                         "operator_state_hash": readiness_certificate.operator_state_hash,
+                        "activation_operator_state_hash": (
+                            readiness_certificate.activation_operator_state_hash
+                        ),
                         "bottleneck_state_hash": readiness_certificate.bottleneck_state_hash,
+                        "activation_bottleneck_hash": (
+                            readiness_certificate.activation_bottleneck_hash
+                        ),
                         "control_state_hash": readiness_certificate.control_state_hash,
+                        "activation_control_hash": readiness_certificate.activation_control_hash,
+                        "bottleneck_policy_hash": policy_hash,
                     }
                 )
                 db.execute(
                     """
                     INSERT INTO production_readiness_consumptions
                     (certificate_id,component,candidate_release_id,dossier_id,authorization_id,
-                     evidence_bundle_hash,control_state_hash,certificate_expires_ts_utc)
-                    VALUES (?,?,?,?,?,?,?,?)
+                     evidence_bundle_hash,control_state_hash,activation_control_hash,
+                     operator_state_hash,activation_operator_state_hash,bottleneck_state_hash,
+                     activation_bottleneck_hash,bottleneck_policy_json,bottleneck_policy_sha256,
+                     safety_event_count,safety_head_event_id,safety_chain_hash,
+                     certificate_expires_ts_utc)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(certificate_id) DO NOTHING
                     """,
                     (
@@ -363,6 +466,16 @@ class DeploymentStateMachine(_core.DeploymentStateMachine):
                         authorization.authorization_id,
                         evidence_bundle_hash,
                         readiness_certificate.control_state_hash,
+                        readiness_certificate.activation_control_hash,
+                        readiness_certificate.operator_state_hash,
+                        readiness_certificate.activation_operator_state_hash,
+                        readiness_certificate.bottleneck_state_hash,
+                        readiness_certificate.activation_bottleneck_hash,
+                        policy_json,
+                        policy_hash,
+                        readiness_certificate.safety_event_count,
+                        readiness_certificate.safety_head_event_id,
+                        readiness_certificate.safety_chain_hash,
                         readiness_certificate.expires_ts_utc.astimezone(UTC).isoformat(),
                     ),
                 )
@@ -382,8 +495,10 @@ class DeploymentStateMachine(_core.DeploymentStateMachine):
                      evidence_bundle_hash,preparation_audit_hash,state,rollback_state,generation,
                      created_ts_utc,updated_ts_utc,readiness_certificate_id,
                      readiness_expires_ts_utc,readiness_operator_state_hash,
-                     readiness_bottleneck_state_hash,readiness_control_state_hash)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,'PREPARED','NONE',0,?,?,?,?,?,?,?)
+                     readiness_activation_operator_state_hash,readiness_bottleneck_state_hash,
+                     readiness_activation_bottleneck_hash,readiness_control_state_hash,
+                     readiness_activation_control_hash,readiness_bottleneck_policy_hash)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,'PREPARED','NONE',0,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         rollout_id,
@@ -401,8 +516,12 @@ class DeploymentStateMachine(_core.DeploymentStateMachine):
                         readiness_certificate.certificate_id,
                         readiness_certificate.expires_ts_utc.astimezone(UTC).isoformat(),
                         readiness_certificate.operator_state_hash,
+                        readiness_certificate.activation_operator_state_hash,
                         readiness_certificate.bottleneck_state_hash,
+                        readiness_certificate.activation_bottleneck_hash,
                         readiness_certificate.control_state_hash,
+                        readiness_certificate.activation_control_hash,
+                        policy_hash,
                     ),
                 )
                 self._append_event(
@@ -414,7 +533,7 @@ class DeploymentStateMachine(_core.DeploymentStateMachine):
                     actor="production-readiness-gate",
                     reason=(
                         "single-use readiness capability consumed; formal evidence, "
-                        "operator state and control epoch accepted"
+                        "operator state and activation epoch accepted"
                     ),
                     now=timestamp,
                 )
@@ -433,6 +552,101 @@ class DeploymentStateMachine(_core.DeploymentStateMachine):
             )
             raise ValueError("component safety ledger integrity is invalid")
         return self.get(rollout_id)
+
+    def _validate_activation_preconditions_in_transaction(
+        self,
+        db: sqlite3.Connection,
+        rollout: sqlite3.Row,
+        *,
+        current_audit: ProductionBottleneckAuditReport,
+        now: datetime,
+    ) -> None:
+        rollout_id = str(rollout["rollout_id"])
+        component = str(rollout["component"])
+        capability = db.execute(
+            "SELECT * FROM production_readiness_consumptions WHERE consumed_rollout_id=?",
+            (rollout_id,),
+        ).fetchone()
+        if capability is None:
+            raise _ActivationReadinessInvalid("consumed readiness capability is missing")
+        if str(capability["certificate_id"]) != str(rollout["readiness_certificate_id"]):
+            raise _ActivationReadinessInvalid("rollout readiness certificate identity changed")
+        for column in (
+            "component",
+            "candidate_release_id",
+            "dossier_id",
+            "authorization_id",
+            "evidence_bundle_hash",
+        ):
+            if str(capability[column]) != str(rollout[column]):
+                raise _ActivationReadinessInvalid(f"readiness capability binding changed:{column}")
+
+        expiry = datetime.fromisoformat(str(capability["certificate_expires_ts_utc"])).astimezone(
+            UTC
+        )
+        if now > expiry:
+            raise _ActivationReadinessInvalid("readiness capability expired")
+
+        encoded_policy = str(capability["bottleneck_policy_json"])
+        policy = parse_bottleneck_policy_json(encoded_policy)
+        policy_hash = bottleneck_policy_fingerprint(policy)
+        if policy_hash != str(capability["bottleneck_policy_sha256"]):
+            raise _ActivationReadinessInvalid("readiness bottleneck policy integrity mismatch")
+        if policy_hash != str(rollout["readiness_bottleneck_policy_hash"]):
+            raise _ActivationReadinessInvalid("rollout bottleneck policy binding changed")
+        if bottleneck_policy_json(policy) != encoded_policy:
+            raise _ActivationReadinessInvalid("readiness bottleneck policy is noncanonical")
+
+        control = capture_control_state_binding(
+            db,
+            component=component,
+            required_heartbeats=policy.required_heartbeats,
+        )
+        expected_control = str(capability["activation_control_hash"])
+        if expected_control != str(rollout["readiness_activation_control_hash"]):
+            raise _ActivationReadinessInvalid("activation control binding changed")
+        if activation_control_fingerprint(
+            control,
+            prepared_rollout_id=rollout_id,
+        ) != expected_control:
+            raise _ActivationReadinessInvalid("activation control epoch changed after PREPARED")
+        if control.safety_event_count != int(capability["safety_event_count"]):
+            raise _ActivationReadinessInvalid("safety generation changed after PREPARED")
+        if control.safety_head_event_id != str(capability["safety_head_event_id"]):
+            raise _ActivationReadinessInvalid("safety event head changed after PREPARED")
+        if control.safety_chain_hash != str(capability["safety_chain_hash"]):
+            raise _ActivationReadinessInvalid("safety event chain changed after PREPARED")
+
+        authoritative_audit = audit_production_bottlenecks(
+            self.path,
+            now=now,
+            policy=policy,
+        )
+        if not authoritative_audit.ready_for_rollout:
+            raise _ActivationReadinessInvalid("authoritative bottleneck audit blocks activation")
+        expected_bottleneck = str(capability["activation_bottleneck_hash"])
+        if expected_bottleneck != str(rollout["readiness_activation_bottleneck_hash"]):
+            raise _ActivationReadinessInvalid("activation bottleneck binding changed")
+        if activation_bottleneck_fingerprint(authoritative_audit) != expected_bottleneck:
+            raise _ActivationReadinessInvalid("bottleneck epoch changed after PREPARED")
+        if activation_bottleneck_fingerprint(current_audit) != expected_bottleneck:
+            raise _ActivationReadinessInvalid("caller audit does not match readiness epoch")
+
+        snapshot = build_operator_observability_snapshot(
+            self.path,
+            now=now,
+            bottleneck_policy=policy,
+        )
+        if snapshot.system_state is not OperatorSystemState.READY:
+            raise _ActivationReadinessInvalid("operator observability is no longer rollout-ready")
+        expected_operator = str(capability["activation_operator_state_hash"])
+        if expected_operator != str(rollout["readiness_activation_operator_state_hash"]):
+            raise _ActivationReadinessInvalid("activation operator binding changed")
+        if activation_operator_state_fingerprint(
+            snapshot,
+            component=component,
+        ) != expected_operator:
+            raise _ActivationReadinessInvalid("operator activation epoch changed after PREPARED")
 
     def activate(
         self,
@@ -484,12 +698,23 @@ class DeploymentStateMachine(_core.DeploymentStateMachine):
                 else:
                     db.execute("ROLLBACK")
             raise ValueError("rollout readiness capability expired before activation")
-        return super().activate(
-            rollout_id,
-            operator=operator,
-            current_audit=current_audit,
-            now=timestamp,
-        )
+        try:
+            return super().activate(
+                rollout_id,
+                operator=operator,
+                current_audit=current_audit,
+                now=timestamp,
+            )
+        except _ActivationReadinessInvalid as exc:
+            with contextlib.suppress(Exception):
+                if self.get(rollout_id).state is RolloutState.PREPARED:
+                    self.cancel(
+                        rollout_id,
+                        operator="production-readiness-gate",
+                        reason=f"activation readiness invalidated:{exc}",
+                        now=timestamp,
+                    )
+            raise ValueError(f"fresh rollout readiness is required: {exc}") from exc
 
 
 def __getattr__(name: str) -> object:

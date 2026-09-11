@@ -329,6 +329,17 @@ class DeploymentStateMachine:
         db.execute("PRAGMA foreign_keys=ON")
         return db
 
+    def _validate_activation_preconditions_in_transaction(
+        self,
+        db: sqlite3.Connection,
+        rollout: sqlite3.Row,
+        *,
+        current_audit: ProductionBottleneckAuditReport,
+        now: datetime,
+    ) -> None:
+        """Extension point for stronger production gates before any activation mutation."""
+        del db, rollout, current_audit, now
+
     def _append_event(
         self,
         db: sqlite3.Connection,
@@ -680,6 +691,12 @@ class DeploymentStateMachine:
                 )
                 db.execute("COMMIT")
                 raise ValueError("production authorization expired before activation")
+            self._validate_activation_preconditions_in_transaction(
+                db,
+                row,
+                current_audit=current_audit,
+                now=timestamp,
+            )
             safety = db.execute(
                 "SELECT mode,source_release_id FROM component_safety_state WHERE component=?",
                 (component,),

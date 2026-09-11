@@ -85,11 +85,14 @@ class ProductionReadinessCertificate:
     schema_contract_version: str
     operator_snapshot_hash: str
     operator_state_hash: str
+    activation_operator_state_hash: str
     bottleneck_report_hash: str
     bottleneck_state_hash: str
+    activation_bottleneck_hash: str
     hot_path_benchmark_id: str
     chaos_drill_id: str
     control_state_hash: str
+    activation_control_hash: str
     safety_event_count: int
     safety_head_event_id: str
     safety_chain_hash: str
@@ -126,11 +129,14 @@ class RolloutReadinessCertificate:
     expires_ts_utc: datetime
     operator_snapshot_hash: str
     operator_state_hash: str
+    activation_operator_state_hash: str
     bottleneck_report_hash: str
     bottleneck_state_hash: str
+    activation_bottleneck_hash: str
     hot_path_benchmark_id: str
     chaos_drill_id: str
     control_state_hash: str
+    activation_control_hash: str
     safety_event_count: int
     safety_head_event_id: str
     safety_chain_hash: str
@@ -168,12 +174,75 @@ def _table_exists(db: sqlite3.Connection, table: str) -> bool:
     )
 
 
+def bottleneck_policy_material(policy: ProductionBottleneckAuditPolicy) -> dict[str, object]:
+    return asdict(policy)
+
+
+def bottleneck_policy_json(policy: ProductionBottleneckAuditPolicy) -> str:
+    return json.dumps(
+        bottleneck_policy_material(policy),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def bottleneck_policy_fingerprint(policy: ProductionBottleneckAuditPolicy) -> str:
+    return _hash_payload(
+        {"version": "production-bottleneck-policy-v1", **bottleneck_policy_material(policy)}
+    )
+
+
+def parse_bottleneck_policy_json(encoded: str) -> ProductionBottleneckAuditPolicy:
+    try:
+        payload = json.loads(encoded)
+    except json.JSONDecodeError as exc:
+        raise ValueError("bottleneck policy JSON is invalid") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("bottleneck policy JSON must encode an object")
+    material = dict(payload)
+    required = material.get("required_heartbeats")
+    if not isinstance(required, list) or not all(isinstance(item, str) for item in required):
+        raise ValueError("bottleneck policy required_heartbeats is invalid")
+    material["required_heartbeats"] = tuple(required)
+    try:
+        return ProductionBottleneckAuditPolicy(**material)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("bottleneck policy material is invalid") from exc
+
+
 def bottleneck_state_fingerprint(report: ProductionBottleneckAuditReport) -> str:
-    """Hash bottleneck state without its observation timestamp or evidence-instance hash."""
+    """Hash the full observed bottleneck state without its generation timestamp."""
     return _hash_payload(
         {
             "version": "production-bottleneck-state-v1",
             "snapshot": asdict(report.snapshot),
+            "findings": [asdict(item) for item in report.findings],
+            "dominant_bottleneck": report.dominant_bottleneck,
+            "ready_for_rollout": report.ready_for_rollout,
+        }
+    )
+
+
+def activation_bottleneck_fingerprint(report: ProductionBottleneckAuditReport) -> str:
+    """Hash activation-relevant semantics while excluding expected storage/time drift."""
+    snapshot = report.snapshot
+    return _hash_payload(
+        {
+            "version": "activation-bottleneck-state-v1",
+            "pending_raw": snapshot.pending_raw,
+            "pending_review_effects": snapshot.pending_review_effects,
+            "pending_deliveries": snapshot.pending_deliveries,
+            "expired_delivery_leases": snapshot.expired_delivery_leases,
+            "queue_utilization": snapshot.queue_utilization,
+            "pipeline_p95_us": snapshot.pipeline_p95_us,
+            "db_precommit_p95_us": snapshot.db_precommit_p95_us,
+            "stale_required_heartbeats": snapshot.stale_required_heartbeats,
+            "active_release_conflicts": snapshot.active_release_conflicts,
+            "active_shadow_conflicts": snapshot.active_shadow_conflicts,
+            "active_rollout_conflicts": snapshot.active_rollout_conflicts,
+            "safety_state_conflicts": snapshot.safety_state_conflicts,
+            "expired_ready_dossiers": snapshot.expired_ready_dossiers,
+            "ingress_consumer_alive": snapshot.ingress_consumer_alive,
             "findings": [asdict(item) for item in report.findings],
             "dominant_bottleneck": report.dominant_bottleneck,
             "ready_for_rollout": report.ready_for_rollout,
@@ -190,9 +259,7 @@ def operator_state_fingerprint(snapshot: OperatorObservabilitySnapshot) -> str:
             "schema_compatible": snapshot.schema_compatible,
             "runtime_halted": snapshot.runtime_halted,
             "halt_reason": snapshot.halt_reason,
-            "bottleneck_state_hash": bottleneck_state_fingerprint(
-                snapshot.bottleneck_report
-            ),
+            "bottleneck_state_hash": bottleneck_state_fingerprint(snapshot.bottleneck_report),
             "latency_report": asdict(snapshot.latency_report),
             "components": [asdict(item) for item in snapshot.components],
             "pending_raw_revisions": snapshot.pending_raw_revisions,
@@ -204,6 +271,86 @@ def operator_state_fingerprint(snapshot: OperatorObservabilitySnapshot) -> str:
             "warnings": snapshot.warnings,
             "next_actions": snapshot.next_actions,
         }
+    )
+
+
+def activation_operator_state_fingerprint(
+    snapshot: OperatorObservabilitySnapshot,
+    *,
+    component: str,
+) -> str:
+    """Normalize only the target rollout fields expected to change at PREPARED."""
+    components: list[dict[str, object]] = []
+    for item in snapshot.components:
+        material = asdict(item)
+        if item.component == component:
+            material["rollout_id"] = ""
+            material["rollout_state"] = ""
+            material["rollback_state"] = ""
+        components.append(material)
+    return _hash_payload(
+        {
+            "version": "activation-operator-state-v1",
+            "system_state": snapshot.system_state.value,
+            "schema_compatible": snapshot.schema_compatible,
+            "runtime_halted": snapshot.runtime_halted,
+            "halt_reason": snapshot.halt_reason,
+            "activation_bottleneck_hash": activation_bottleneck_fingerprint(
+                snapshot.bottleneck_report
+            ),
+            "latency_report": asdict(snapshot.latency_report),
+            "components": components,
+            "pending_raw_revisions": snapshot.pending_raw_revisions,
+            "pending_review_effects": snapshot.pending_review_effects,
+            "pending_deliveries": snapshot.pending_deliveries,
+            "expired_delivery_leases": snapshot.expired_delivery_leases,
+            "stale_required_heartbeats": snapshot.stale_required_heartbeats,
+            "blockers": snapshot.blockers,
+            "warnings": snapshot.warnings,
+            "next_actions": snapshot.next_actions,
+        }
+    )
+
+
+def _control_state_material(
+    binding: ControlStateBinding,
+    *,
+    rollout_rows: tuple[tuple[str, str, int], ...],
+    version: str,
+) -> dict[str, object]:
+    return {
+        "version": version,
+        "active_release_ids": binding.active_release_ids,
+        "safety_mode": binding.safety_mode,
+        "safety_source_release_id": binding.safety_source_release_id,
+        "safety_updated_ts_utc": binding.safety_updated_ts_utc,
+        "safety_event_count": binding.safety_event_count,
+        "safety_head_event_id": binding.safety_head_event_id,
+        "safety_chain_hash": binding.safety_chain_hash,
+        "runtime_halt_value": binding.runtime_halt_value,
+        "runtime_halt_updated_ts_utc": binding.runtime_halt_updated_ts_utc,
+        "heartbeat_metadata": binding.heartbeat_metadata,
+        "pending_raw": binding.pending_raw,
+        "pending_deliveries": binding.pending_deliveries,
+        "rollout_rows": rollout_rows,
+    }
+
+
+def activation_control_fingerprint(
+    binding: ControlStateBinding,
+    *,
+    prepared_rollout_id: str | None = None,
+) -> str:
+    """Hash semantic control state, normalizing only the rollout being activated."""
+    rows = binding.rollout_rows
+    if prepared_rollout_id is not None:
+        rows = tuple(row for row in rows if row[0] != prepared_rollout_id)
+    return _hash_payload(
+        _control_state_material(
+            binding,
+            rollout_rows=rows,
+            version="activation-control-state-v1",
+        )
     )
 
 
@@ -274,10 +421,7 @@ def capture_control_state_binding(
                 (heartbeat,),
             ).fetchone()
             heartbeat_metadata.append(
-                (
-                    heartbeat,
-                    str(row["metadata_json"]) if row is not None else "",
-                )
+                (heartbeat, str(row["metadata_json"]) if row is not None else "")
             )
     else:
         heartbeat_metadata.extend((heartbeat, "") for heartbeat in required_heartbeats)
@@ -314,24 +458,7 @@ def capture_control_state_binding(
             )
         )
 
-    material = {
-        "version": "production-control-state-binding-v1",
-        "component": component,
-        "active_release_ids": active_release_ids,
-        "safety_mode": safety_mode,
-        "safety_source_release_id": safety_source_release_id,
-        "safety_updated_ts_utc": safety_updated_ts_utc,
-        "safety_event_count": safety_event_count,
-        "safety_head_event_id": safety_head_event_id,
-        "safety_chain_hash": safety_chain_hash,
-        "runtime_halt_value": runtime_halt_value,
-        "runtime_halt_updated_ts_utc": runtime_halt_updated_ts_utc,
-        "heartbeat_metadata": heartbeat_metadata,
-        "pending_raw": pending_raw,
-        "pending_deliveries": pending_deliveries,
-        "rollout_rows": rollout_rows,
-    }
-    return ControlStateBinding(
+    provisional = ControlStateBinding(
         active_release_ids=active_release_ids,
         safety_mode=safety_mode,
         safety_source_release_id=safety_source_release_id,
@@ -345,7 +472,21 @@ def capture_control_state_binding(
         pending_raw=pending_raw,
         pending_deliveries=pending_deliveries,
         rollout_rows=rollout_rows,
-        state_hash=_hash_payload(material),
+        state_hash="",
+    )
+    return replace(
+        provisional,
+        state_hash=_hash_payload(
+            {
+                "version": "production-control-state-binding-v1",
+                "component": component,
+                **_control_state_material(
+                    provisional,
+                    rollout_rows=rollout_rows,
+                    version="production-control-state-v1",
+                ),
+            }
+        ),
     )
 
 
@@ -371,10 +512,10 @@ def _readiness_policy_hash(
 ) -> str:
     return _hash_payload(
         {
-            "version": "production-readiness-policy-v2",
+            "version": "production-readiness-policy-v3",
             "readiness": asdict(policy),
             "benchmark": asdict(benchmark_policy) if benchmark_policy is not None else None,
-            "bottleneck": asdict(bottleneck_policy),
+            "bottleneck": bottleneck_policy_material(bottleneck_policy),
         }
     )
 
@@ -383,7 +524,7 @@ def _production_certificate_material(
     certificate: ProductionReadinessCertificate,
 ) -> dict[str, object]:
     return {
-        "version": "production-readiness-v2",
+        "version": "production-readiness-v3",
         "component": certificate.component,
         "active_release_id": certificate.active_release_id,
         "generated_ts_utc": certificate.generated_ts_utc.astimezone(UTC).isoformat(),
@@ -391,11 +532,14 @@ def _production_certificate_material(
         "schema_contract_version": certificate.schema_contract_version,
         "operator_snapshot_hash": certificate.operator_snapshot_hash,
         "operator_state_hash": certificate.operator_state_hash,
+        "activation_operator_state_hash": certificate.activation_operator_state_hash,
         "bottleneck_report_hash": certificate.bottleneck_report_hash,
         "bottleneck_state_hash": certificate.bottleneck_state_hash,
+        "activation_bottleneck_hash": certificate.activation_bottleneck_hash,
         "hot_path_benchmark_id": certificate.hot_path_benchmark_id,
         "chaos_drill_id": certificate.chaos_drill_id,
         "control_state_hash": certificate.control_state_hash,
+        "activation_control_hash": certificate.activation_control_hash,
         "safety_event_count": certificate.safety_event_count,
         "safety_head_event_id": certificate.safety_head_event_id,
         "safety_chain_hash": certificate.safety_chain_hash,
@@ -552,11 +696,19 @@ def evaluate_production_readiness(
         schema_contract_version=SCHEMA_CONTRACT_VERSION,
         operator_snapshot_hash=snapshot.snapshot_id,
         operator_state_hash=operator_state_fingerprint(snapshot),
+        activation_operator_state_hash=activation_operator_state_fingerprint(
+            snapshot,
+            component=component,
+        ),
         bottleneck_report_hash=snapshot.bottleneck_report.report_hash,
         bottleneck_state_hash=bottleneck_state_fingerprint(snapshot.bottleneck_report),
+        activation_bottleneck_hash=activation_bottleneck_fingerprint(
+            snapshot.bottleneck_report
+        ),
         hot_path_benchmark_id=benchmark.benchmark_id,
         chaos_drill_id=chaos.drill_id if chaos is not None else "",
         control_state_hash=control.state_hash,
+        activation_control_hash=activation_control_fingerprint(control),
         safety_event_count=control.safety_event_count,
         safety_head_event_id=control.safety_head_event_id,
         safety_chain_hash=control.safety_chain_hash,
@@ -587,10 +739,8 @@ def _rollout_certificate_material(
     certificate: RolloutReadinessCertificate,
 ) -> dict[str, object]:
     return {
-        "version": "rollout-readiness-capability-v1",
-        "production_readiness_certificate_id": (
-            certificate.production_readiness_certificate_id
-        ),
+        "version": "rollout-readiness-capability-v2",
+        "production_readiness_certificate_id": certificate.production_readiness_certificate_id,
         "production_readiness_policy_hash": certificate.production_readiness_policy_hash,
         "schema_contract_version": certificate.schema_contract_version,
         "component": certificate.component,
@@ -612,15 +762,18 @@ def _rollout_certificate_material(
         "expires_ts_utc": certificate.expires_ts_utc.astimezone(UTC).isoformat(),
         "operator_snapshot_hash": certificate.operator_snapshot_hash,
         "operator_state_hash": certificate.operator_state_hash,
+        "activation_operator_state_hash": certificate.activation_operator_state_hash,
         "bottleneck_report_hash": certificate.bottleneck_report_hash,
         "bottleneck_state_hash": certificate.bottleneck_state_hash,
+        "activation_bottleneck_hash": certificate.activation_bottleneck_hash,
         "hot_path_benchmark_id": certificate.hot_path_benchmark_id,
         "chaos_drill_id": certificate.chaos_drill_id,
         "control_state_hash": certificate.control_state_hash,
+        "activation_control_hash": certificate.activation_control_hash,
         "safety_event_count": certificate.safety_event_count,
         "safety_head_event_id": certificate.safety_head_event_id,
         "safety_chain_hash": certificate.safety_chain_hash,
-        "bottleneck_policy": asdict(certificate.bottleneck_policy),
+        "bottleneck_policy": bottleneck_policy_material(certificate.bottleneck_policy),
         "status": certificate.status.value,
         "failures": certificate.failures,
     }
@@ -706,6 +859,8 @@ def issue_rollout_readiness_certificate(
             component=component,
             required_heartbeats=effective_bottleneck_policy.required_heartbeats,
         )
+    if host.control_state_hash != control.state_hash:
+        failures.append("control_state_changed_during_rollout_readiness_issue")
     expected_active = (predecessor,) if predecessor else ()
     if control.active_release_ids != expected_active:
         failures.append("active_predecessor_changed_before_readiness_issue")
@@ -753,11 +908,14 @@ def issue_rollout_readiness_certificate(
         expires_ts_utc=expires,
         operator_snapshot_hash=host.operator_snapshot_hash,
         operator_state_hash=host.operator_state_hash,
+        activation_operator_state_hash=host.activation_operator_state_hash,
         bottleneck_report_hash=host.bottleneck_report_hash,
         bottleneck_state_hash=host.bottleneck_state_hash,
+        activation_bottleneck_hash=host.activation_bottleneck_hash,
         hot_path_benchmark_id=host.hot_path_benchmark_id,
         chaos_drill_id=host.chaos_drill_id,
         control_state_hash=control.state_hash,
+        activation_control_hash=activation_control_fingerprint(control),
         safety_event_count=control.safety_event_count,
         safety_head_event_id=control.safety_head_event_id,
         safety_chain_hash=control.safety_chain_hash,
