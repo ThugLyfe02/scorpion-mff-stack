@@ -5,7 +5,7 @@ import random
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 from statistics import mean, median
 from zoneinfo import ZoneInfo
@@ -208,7 +208,7 @@ def evaluate_scanner_mff_confluence(
     comparable_count = 0
     selected_returns: list[float] = []
     not_selected_returns: list[float] = []
-    by_day: dict[object, dict[str, list[float]]] = defaultdict(
+    by_day: dict[date, dict[str, list[float]]] = defaultdict(
         lambda: {"SELECTED": [], "NOT_SELECTED": []}
     )
 
