@@ -5,12 +5,13 @@ import random
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from statistics import mean, median
 from zoneinfo import ZoneInfo
 
 from .execution_forensics import CompletedTrade
-from .scanner_batch import ScannerContextBatch, ScannerBatchRowMetadata
+from .scanner_batch import ScannerBatchRowMetadata, ScannerContextBatch
 from .scanner_context import (
     ScannerContextObservation,
     latest_scanner_context_available_before,
@@ -55,7 +56,7 @@ class ScannerConfluencePolicy:
 class ConfluenceTradeLink:
     entry_event_id: str
     symbol: str
-    opened_ts_utc: object
+    opened_ts_utc: datetime
     return_pct: float
     observation_id: str | None
     scanner_run_id: str | None
@@ -153,21 +154,19 @@ def _select_context(
     *,
     symbol: str,
     policy: ScannerConfluencePolicy,
-    entry_received_at_by_event_id: Mapping[str, object] | None,
+    entry_received_at_by_event_id: Mapping[str, datetime] | None,
 ) -> ScannerContextObservation | None:
     if policy.require_operational_availability:
         if entry_received_at_by_event_id is None:
             return None
-        raw_received = entry_received_at_by_event_id.get(trade.entry_event_id)
-        from datetime import datetime
-
-        if not isinstance(raw_received, datetime):
+        received = entry_received_at_by_event_id.get(trade.entry_event_id)
+        if received is None:
             return None
         context = latest_scanner_context_available_before(
             observations,
             symbol=symbol,
             source_ts_utc=trade.opened_ts_utc,
-            received_ts_utc=raw_received,
+            received_ts_utc=received,
             require_causal_safe=True,
         )
     else:
@@ -190,7 +189,7 @@ def evaluate_scanner_mff_confluence(
     batches: tuple[ScannerContextBatch, ...],
     *,
     policy: ScannerConfluencePolicy | None = None,
-    entry_received_at_by_event_id: Mapping[str, object] | None = None,
+    entry_received_at_by_event_id: Mapping[str, datetime] | None = None,
 ) -> ScannerConfluenceReport:
     """Measure scanner information value on quote-supported MFF completed trades.
 
