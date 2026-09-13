@@ -16,12 +16,19 @@ from .scanner_context import (
 )
 
 SCANNER_BATCH_SCHEMA = "scorpion.scanner-batch.v1"
+# Deliberately hard-coded on the consumer side. A producer semantic change must
+# trigger an explicit MFF compatibility review rather than silently inheriting a
+# new meaning under the same schema name.
+EXPECTED_SCANNER_CONTRACT_FINGERPRINT = (
+    "e314fa3a571debc97e54e7aa1c8e810fe4766c64ad0e98d49e3f49781ef89f7c"
+)
 
 
 @dataclass(frozen=True, slots=True)
 class ScannerContextBatch:
     manifest_id: str
     run_id: str
+    contract_fingerprint: str
     row_count: int
     selected_symbol_count: int
     ordered_observation_ids: tuple[str, ...]
@@ -162,6 +169,11 @@ def _validate_selection_semantics(
         disposition = _required_str(row, "selection_disposition")
         if disposition not in {"SELECTED", "NOT_SELECTED", "UNKNOWN"}:
             raise ScannerContextError("unsupported scanner selection_disposition")
+        confidence_semantics = _required_str(row, "confidence_semantics")
+        if confidence_semantics != "RANKING_HEURISTIC":
+            raise ScannerContextError(
+                "scanner confidence must remain RANKING_HEURISTIC"
+            )
         symbols.append(symbol)
         if disposition == "SELECTED":
             selected_symbols.add(symbol)
@@ -202,7 +214,7 @@ def load_scanner_observation_bundle(
     batch_path: str | Path,
     manifest_path: str | Path,
 ) -> ScannerContextBatch:
-    """Verify bytes, completeness, selection semantics, then every observation."""
+    """Verify semantic contract, bytes, completeness, then every observation."""
 
     batch_file = Path(batch_path)
     manifest_file = Path(manifest_path)
@@ -232,6 +244,11 @@ def load_scanner_observation_bundle(
     if observation_schema != SCANNER_OBSERVATION_SCHEMA:
         raise ScannerContextError(
             "scanner batch observation schema mismatch"
+        )
+    contract_fingerprint = _required_str(payload, "contract_fingerprint").lower()
+    if contract_fingerprint != EXPECTED_SCANNER_CONTRACT_FINGERPRINT:
+        raise ScannerContextError(
+            "scanner semantic contract fingerprint mismatch"
         )
 
     manifest_id = _required_str(payload, "manifest_id").lower()
@@ -345,6 +362,7 @@ def load_scanner_observation_bundle(
     return ScannerContextBatch(
         manifest_id=manifest_id,
         run_id=run_id,
+        contract_fingerprint=contract_fingerprint,
         row_count=row_count,
         selected_symbol_count=selected_count,
         ordered_observation_ids=ordered_ids,
