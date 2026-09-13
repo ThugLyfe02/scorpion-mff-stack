@@ -14,11 +14,7 @@ from .scanner_context import (
 
 @dataclass(frozen=True, slots=True)
 class MffContextProbe:
-    """Minimal MFF event identity for scanner-context research audits.
-
-    Intentionally contains no order/effect fields and does not import the MFF
-    reducer/domain. This keeps the audit outside execution authority.
-    """
+    """Minimal MFF event identity for scanner-context research audits."""
 
     event_id: str
     symbol: str
@@ -44,6 +40,7 @@ class ScannerContextAuditRow:
     source_context_age_seconds: float | None
     operational_context_age_seconds: float | None
     availability_lag_seconds: float | None
+    operational_context_fresh: bool
     backfill_only: bool
     blockers: tuple[str, ...]
 
@@ -54,10 +51,14 @@ class ScannerContextAuditReport:
     source_context_events: int
     causal_safe_events: int
     operational_available_events: int
+    fresh_operational_events: int
+    stale_operational_events: int
     backfill_only_events: int
     source_context_rate: float
     causal_safe_rate: float
     operational_available_rate: float
+    fresh_operational_rate: float
+    max_context_age_seconds: float
     median_source_age_seconds: float | None
     p95_source_age_seconds: float | None
     median_operational_age_seconds: float | None
@@ -72,7 +73,6 @@ def _p95(values: list[float]) -> float | None:
     if not values:
         return None
     ordered = sorted(values)
-    # Deterministic nearest-rank p95, suitable for operational evidence summaries.
     rank = max(1, (95 * len(ordered) + 99) // 100)
     return ordered[min(rank - 1, len(ordered) - 1)]
 
@@ -90,19 +90,20 @@ def _age_seconds(event_ts: datetime, observation_ts: datetime) -> float:
 def audit_scanner_context_coverage(
     observations: tuple[ScannerContextObservation, ...],
     probes: tuple[MffContextProbe, ...],
+    *,
+    max_context_age_seconds: float = 1800.0,
 ) -> ScannerContextAuditReport:
-    """Measure scanner usefulness without changing MFF runtime behavior.
+    """Measure source-time, causal, availability, and freshness coverage.
 
-    Three layers are intentionally separate:
-
-    * source context: past-only observation exists, even if provenance is weak;
-    * causal-safe: evidence gates pass for source-time research;
-    * operational: causal-safe context had actually arrived before MFF received
-      the event.
-
-    A high source-context rate with a low operational rate is evidence of a
-    backfill/latency problem, not evidence that the live system had confluence.
+    ``operational_available`` only means the context had arrived by MFF receive
+    time. ``fresh_operational`` additionally requires the scanner observation to
+    be no older than ``max_context_age_seconds`` at the Discord source clock.
+    The distinction prevents a stale morning board from inflating live-context
+    coverage hours later.
     """
+
+    if max_context_age_seconds <= 0:
+        raise ValueError("max_context_age_seconds must be positive")
 
     rows: list[ScannerContextAuditRow] = []
     source_ages: list[float] = []
@@ -112,6 +113,8 @@ def audit_scanner_context_coverage(
     source_count = 0
     safe_count = 0
     operational_count = 0
+    fresh_operational_count = 0
+    stale_operational_count = 0
     backfill_count = 0
 
     for probe in probes:
@@ -138,6 +141,7 @@ def audit_scanner_context_coverage(
         source_age: float | None = None
         operational_age: float | None = None
         availability_lag: float | None = None
+        operational_fresh = False
         row_blockers: tuple[str, ...] = ()
 
         if any_context is not None:
@@ -160,7 +164,13 @@ def audit_scanner_context_coverage(
                 operational.observed_at_utc,
             )
             operational_ages.append(operational_age)
-            assert operational.received_at_utc is not None
+            operational_fresh = operational_age <= max_context_age_seconds
+            if operational_fresh:
+                fresh_operational_count += 1
+            else:
+                stale_operational_count += 1
+            if operational.received_at_utc is None:
+                raise AssertionError("operational context must have received_at_utc")
             availability_lag = max(
                 0.0,
                 (
@@ -190,6 +200,7 @@ def audit_scanner_context_coverage(
                 source_context_age_seconds=source_age,
                 operational_context_age_seconds=operational_age,
                 availability_lag_seconds=availability_lag,
+                operational_context_fresh=operational_fresh,
                 backfill_only=backfill_only,
                 blockers=row_blockers,
             )
@@ -205,10 +216,14 @@ def audit_scanner_context_coverage(
         source_context_events=source_count,
         causal_safe_events=safe_count,
         operational_available_events=operational_count,
+        fresh_operational_events=fresh_operational_count,
+        stale_operational_events=stale_operational_count,
         backfill_only_events=backfill_count,
         source_context_rate=rate(source_count),
         causal_safe_rate=rate(safe_count),
         operational_available_rate=rate(operational_count),
+        fresh_operational_rate=rate(fresh_operational_count),
+        max_context_age_seconds=max_context_age_seconds,
         median_source_age_seconds=median(source_ages) if source_ages else None,
         p95_source_age_seconds=_p95(source_ages),
         median_operational_age_seconds=(
