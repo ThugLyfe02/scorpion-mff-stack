@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from scorpion.scanner_context import (
     canonical_scanner_observation_hash,
     parse_scanner_observation,
@@ -175,13 +177,10 @@ def test_audit_separates_source_context_causal_safety_and_live_availability() ->
 
 def test_probe_rejects_impossible_receive_clock() -> None:
     source = datetime(2026, 9, 11, 16, 0, tzinfo=UTC)
-    try:
+    with pytest.raises(ValueError, match="cannot precede"):
         MffContextProbe(
             "bad",
             "NVDA",
             source,
             source - timedelta(seconds=1),
         )
-        assert False, "expected ValueError"
-    except ValueError as exc:
-        assert "cannot precede" in str(exc)
