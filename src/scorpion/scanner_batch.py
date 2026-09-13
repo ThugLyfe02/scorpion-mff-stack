@@ -16,12 +16,18 @@ from .scanner_context import (
 )
 
 SCANNER_BATCH_SCHEMA = "scorpion.scanner-batch.v1"
-# Deliberately hard-coded on the consumer side. A producer semantic change must
-# trigger an explicit MFF compatibility review rather than silently inheriting a
-# new meaning under the same schema name.
 EXPECTED_SCANNER_CONTRACT_FINGERPRINT = (
     "e314fa3a571debc97e54e7aa1c8e810fe4766c64ad0e98d49e3f49781ef89f7c"
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ScannerBatchRowMetadata:
+    observation_id: str
+    symbol: str
+    selection_disposition: str
+    confidence: float
+    confidence_semantics: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,10 +49,17 @@ class ScannerContextBatch:
     code_revision: str | None
     generated_at_utc: datetime
     observations: tuple[ScannerContextObservation, ...]
+    row_metadata: tuple[ScannerBatchRowMetadata, ...]
 
     @property
     def absence_is_interpretable(self) -> bool:
         return self.selection_scope == "FULL_UNIVERSE" and self.coverage_complete
+
+    def metadata_for(self, observation_id: str) -> ScannerBatchRowMetadata | None:
+        return next(
+            (item for item in self.row_metadata if item.observation_id == observation_id),
+            None,
+        )
 
 
 def _canonical_json(payload: object) -> str:
@@ -113,6 +126,16 @@ def _required_bool(payload: Mapping[str, object], key: str) -> bool:
     return value
 
 
+def _required_confidence(payload: Mapping[str, object]) -> float:
+    value = payload.get("confidence")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ScannerContextError("scanner confidence must be numeric")
+    confidence = float(value)
+    if confidence < 0.0 or confidence > 1.0:
+        raise ScannerContextError("scanner confidence must be in [0,1]")
+    return confidence
+
+
 def _parse_utc(value: object, name: str) -> datetime:
     if not isinstance(value, str) or not value.strip():
         raise ScannerContextError(f"{name} is required")
@@ -161,10 +184,12 @@ def _validate_selection_semantics(
     coverage_complete: bool,
     attempted_count: int | None,
     universe_fingerprint: str | None,
-) -> int:
+) -> tuple[int, tuple[ScannerBatchRowMetadata, ...]]:
     selected_symbols: set[str] = set()
     symbols: list[str] = []
+    metadata: list[ScannerBatchRowMetadata] = []
     for row in raw_rows:
+        observation_id = _required_str(row, "observation_id")
         symbol = _required_str(row, "symbol").upper()
         disposition = _required_str(row, "selection_disposition")
         if disposition not in {"SELECTED", "NOT_SELECTED", "UNKNOWN"}:
@@ -174,6 +199,16 @@ def _validate_selection_semantics(
             raise ScannerContextError(
                 "scanner confidence must remain RANKING_HEURISTIC"
             )
+        confidence = _required_confidence(row)
+        metadata.append(
+            ScannerBatchRowMetadata(
+                observation_id=observation_id,
+                symbol=symbol,
+                selection_disposition=disposition,
+                confidence=confidence,
+                confidence_semantics=confidence_semantics,
+            )
+        )
         symbols.append(symbol)
         if disposition == "SELECTED":
             selected_symbols.add(symbol)
@@ -206,7 +241,7 @@ def _validate_selection_semantics(
         if _symbol_universe_fingerprint(symbols) != universe_fingerprint:
             raise ScannerContextError("scanner batch universe fingerprint mismatch")
 
-    return len(selected_symbols)
+    return len(selected_symbols), tuple(metadata)
 
 
 def load_scanner_observation_bundle(
@@ -334,7 +369,7 @@ def load_scanner_observation_bundle(
         raise ScannerContextError("scanner batch hash mismatch")
 
     raw_rows = _decode_batch_rows(batch_text)
-    actual_selected = _validate_selection_semantics(
+    actual_selected, row_metadata = _validate_selection_semantics(
         raw_rows,
         selection_scope=selection_scope,
         coverage_complete=coverage_complete,
@@ -354,6 +389,8 @@ def load_scanner_observation_bundle(
         raise ScannerContextError(
             "scanner batch observation identity/order mismatch"
         )
+    if tuple(item.observation_id for item in row_metadata) != actual_ids:
+        raise ScannerContextError("scanner row metadata identity/order mismatch")
 
     run_id = _required_str(payload, "run_id")
     if any(item.run_id != run_id for item in observations):
@@ -386,4 +423,5 @@ def load_scanner_observation_bundle(
             "generated_at_utc",
         ),
         observations=observations,
+        row_metadata=row_metadata,
     )
