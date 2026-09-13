@@ -42,7 +42,7 @@ class ScannerContextBatch:
         return self.selection_scope == "FULL_UNIVERSE" and self.coverage_complete
 
 
-def _canonical_json(payload: Mapping[str, object]) -> str:
+def _canonical_json(payload: object) -> str:
     return json.dumps(
         payload,
         sort_keys=True,
@@ -53,6 +53,11 @@ def _canonical_json(payload: Mapping[str, object]) -> str:
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _symbol_universe_fingerprint(symbols: list[str]) -> str:
+    normalized = sorted({symbol.strip().upper() for symbol in symbols if symbol.strip()})
+    return _sha256_text(_canonical_json(normalized))
 
 
 def _required_str(payload: Mapping[str, object], key: str) -> str:
@@ -116,12 +121,88 @@ def _parse_utc(value: object, name: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _decode_batch_rows(batch_text: str) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for line_number, line in enumerate(batch_text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            decoded: object = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ScannerContextError(
+                f"invalid scanner batch row JSON at line {line_number}"
+            ) from exc
+        if not isinstance(decoded, dict):
+            raise ScannerContextError(
+                f"scanner batch row {line_number} must be an object"
+            )
+        row: dict[str, object] = {}
+        for key, value in decoded.items():
+            if not isinstance(key, str):
+                raise ScannerContextError(
+                    f"scanner batch row {line_number} has non-string key"
+                )
+            row[key] = value
+        rows.append(row)
+    return rows
+
+
+def _validate_selection_semantics(
+    raw_rows: list[dict[str, object]],
+    *,
+    selection_scope: str,
+    coverage_complete: bool,
+    attempted_count: int | None,
+    universe_fingerprint: str | None,
+) -> int:
+    selected_symbols: set[str] = set()
+    symbols: list[str] = []
+    for row in raw_rows:
+        symbol = _required_str(row, "symbol").upper()
+        disposition = _required_str(row, "selection_disposition")
+        if disposition not in {"SELECTED", "NOT_SELECTED", "UNKNOWN"}:
+            raise ScannerContextError("unsupported scanner selection_disposition")
+        symbols.append(symbol)
+        if disposition == "SELECTED":
+            selected_symbols.add(symbol)
+        if selection_scope == "HITS_ONLY" and disposition != "SELECTED":
+            raise ScannerContextError(
+                "HITS_ONLY scanner batch may contain only SELECTED observations"
+            )
+        if selection_scope == "FULL_UNIVERSE" and disposition == "UNKNOWN":
+            raise ScannerContextError(
+                "FULL_UNIVERSE scanner batch cannot contain UNKNOWN selection disposition"
+            )
+
+    if selection_scope == "FULL_UNIVERSE" and coverage_complete:
+        if attempted_count is None:
+            raise ScannerContextError(
+                "complete FULL_UNIVERSE batch requires attempted count"
+            )
+        if len(symbols) != attempted_count:
+            raise ScannerContextError(
+                "complete FULL_UNIVERSE row count must equal attempted count"
+            )
+        if len(symbols) != len(set(symbols)):
+            raise ScannerContextError(
+                "complete FULL_UNIVERSE requires exactly one row per symbol"
+            )
+        if universe_fingerprint is None:
+            raise ScannerContextError(
+                "complete FULL_UNIVERSE requires universe_fingerprint"
+            )
+        if _symbol_universe_fingerprint(symbols) != universe_fingerprint:
+            raise ScannerContextError("scanner batch universe fingerprint mismatch")
+
+    return len(selected_symbols)
+
+
 def load_scanner_observation_bundle(
     *,
     batch_path: str | Path,
     manifest_path: str | Path,
 ) -> ScannerContextBatch:
-    """Verify bytes, completeness, coverage semantics, then every observation."""
+    """Verify bytes, completeness, selection semantics, then every observation."""
 
     batch_file = Path(batch_path)
     manifest_file = Path(manifest_path)
@@ -200,6 +281,10 @@ def load_scanner_observation_bundle(
     )
     error_count = _required_nonnegative_int(payload, "error_count")
     coverage_complete = _required_bool(payload, "coverage_complete")
+    universe_fingerprint = _optional_str(
+        payload.get("universe_fingerprint"),
+        "universe_fingerprint",
+    )
     if (
         attempted_count is not None
         and with_data_count is not None
@@ -209,6 +294,10 @@ def load_scanner_observation_bundle(
             "scanner market-data count cannot exceed attempted count"
         )
     if coverage_complete:
+        if selection_scope != "FULL_UNIVERSE":
+            raise ScannerContextError(
+                "coverage_complete is valid only for FULL_UNIVERSE batches"
+            )
         if attempted_count is None or with_data_count is None:
             raise ScannerContextError(
                 "complete scanner coverage requires explicit counts"
@@ -217,11 +306,28 @@ def load_scanner_observation_bundle(
             raise ScannerContextError(
                 "scanner coverage_complete contradicts counts/errors"
             )
+        if row_count != attempted_count:
+            raise ScannerContextError(
+                "complete FULL_UNIVERSE row count must equal attempted count"
+            )
 
     batch_text = batch_file.read_text(encoding="utf-8")
     expected_batch_hash = _required_str(payload, "batch_sha256").lower()
     if _sha256_text(batch_text) != expected_batch_hash:
         raise ScannerContextError("scanner batch hash mismatch")
+
+    raw_rows = _decode_batch_rows(batch_text)
+    actual_selected = _validate_selection_semantics(
+        raw_rows,
+        selection_scope=selection_scope,
+        coverage_complete=coverage_complete,
+        attempted_count=attempted_count,
+        universe_fingerprint=universe_fingerprint,
+    )
+    if actual_selected != selected_count:
+        raise ScannerContextError(
+            "scanner batch selected_symbol_count mismatch"
+        )
 
     observations = load_scanner_observations(batch_file)
     if len(observations) != row_count:
@@ -235,11 +341,6 @@ def load_scanner_observation_bundle(
     run_id = _required_str(payload, "run_id")
     if any(item.run_id != run_id for item in observations):
         raise ScannerContextError("scanner batch run_id mismatch")
-    actual_selected = len({item.symbol for item in observations})
-    if actual_selected != selected_count:
-        raise ScannerContextError(
-            "scanner batch selected_symbol_count mismatch"
-        )
 
     return ScannerContextBatch(
         manifest_id=manifest_id,
@@ -249,10 +350,7 @@ def load_scanner_observation_bundle(
         ordered_observation_ids=ordered_ids,
         batch_sha256=expected_batch_hash,
         selection_scope=selection_scope,
-        universe_fingerprint=_optional_str(
-            payload.get("universe_fingerprint"),
-            "universe_fingerprint",
-        ),
+        universe_fingerprint=universe_fingerprint,
         symbols_attempted_count=attempted_count,
         symbols_with_market_data_count=with_data_count,
         error_count=error_count,
