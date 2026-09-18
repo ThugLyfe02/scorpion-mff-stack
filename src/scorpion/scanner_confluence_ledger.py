@@ -667,6 +667,31 @@ def _snapshot_from_payload(payload: dict[str, Any], snapshot_id: str) -> FrozenC
     )
 
 
+
+def load_confluence_snapshots(
+    path: Path | str,
+) -> tuple[FrozenConfluenceSnapshot, ...]:
+    """Load and re-verify immutable context snapshots for research analysis."""
+
+    snapshots: list[FrozenConfluenceSnapshot] = []
+    with _connect(path) as connection:
+        rows = connection.execute(
+            "SELECT snapshot_id, payload_json FROM confluence_snapshots "
+            "ORDER BY entry_event_id, mode"
+        ).fetchall()
+        for row in rows:
+            decoded = json.loads(str(row["payload_json"]))
+            if not isinstance(decoded, dict):
+                raise ValueError("stored confluence snapshot payload must be an object")
+            snapshot = _snapshot_from_payload(decoded, str(row["snapshot_id"]))
+            if not snapshot.verify_snapshot_id():
+                raise ValueError("stored confluence snapshot identity mismatch")
+            if snapshot.authority != "RESEARCH_ONLY" or snapshot.execution_authority:
+                raise ValueError("stored confluence snapshot authority boundary invalid")
+            snapshots.append(snapshot)
+    return tuple(snapshots)
+
+
 def verify_confluence_ledger(path: Path | str) -> ConfluenceLedgerVerification:
     with _connect(path) as connection:
         snapshot_rows = connection.execute(
