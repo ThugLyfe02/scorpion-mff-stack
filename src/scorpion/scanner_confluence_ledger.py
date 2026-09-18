@@ -5,7 +5,6 @@ import json
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
