@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -245,9 +245,7 @@ def evaluate_attribution_availability_bias(
         rows=tuple(rows),
         findings=tuple(findings),
     )
-    return AttributionBiasReport(
-        **{
-            **asdict(provisional),
-            "report_id": _hash(provisional.canonical_payload()),
-        }
+    return replace(
+        provisional,
+        report_id=_hash(provisional.canonical_payload()),
     )
