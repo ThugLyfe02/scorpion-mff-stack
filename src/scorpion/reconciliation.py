@@ -49,7 +49,54 @@ def reconcile_positions(
     observations: Sequence[ExternalPositionObservation],
 ) -> ReconciliationReport:
     findings: list[ReconciliationFinding] = []
-    external = {observation.contract_key: observation for observation in observations}
+    external: dict[str, ExternalPositionObservation] = {}
+    for observation in observations:
+        if not observation.contract_key:
+            findings.append(
+                ReconciliationFinding(
+                    "invalid_external_contract",
+                    ReconciliationSeverity.CRITICAL,
+                    "",
+                    "external observation is missing contract_key",
+                )
+            )
+            continue
+        if observation.contract_key in external:
+            findings.append(
+                ReconciliationFinding(
+                    "duplicate_external_observation",
+                    ReconciliationSeverity.CRITICAL,
+                    observation.contract_key,
+                    "multiple observations supplied for the same contract",
+                )
+            )
+            continue
+        if observation.quantity < 0:
+            findings.append(
+                ReconciliationFinding(
+                    "unsupported_external_short_position",
+                    ReconciliationSeverity.CRITICAL,
+                    observation.contract_key,
+                    (
+                        f"external quantity={observation.quantity}; "
+                        "Scorpion execution state is long-only"
+                    ),
+                )
+            )
+        if (
+            observation.quantity > 0
+            and observation.average_price is not None
+            and observation.average_price <= 0
+        ):
+            findings.append(
+                ReconciliationFinding(
+                    "invalid_external_average_price",
+                    ReconciliationSeverity.CRITICAL,
+                    observation.contract_key,
+                    f"external average_price={observation.average_price}",
+                )
+            )
+        external[observation.contract_key] = observation
 
     for contract_key, position in state.positions.items():
         observed = external.pop(contract_key, None)
@@ -60,7 +107,7 @@ def reconcile_positions(
                         "missing_external_position",
                         ReconciliationSeverity.CRITICAL,
                         contract_key,
-                        f"source state quantity={position.quantity}, external quantity=0",
+                        f"execution quantity={position.quantity}, external quantity=0",
                     )
                 )
                 continue
@@ -70,7 +117,7 @@ def reconcile_positions(
                         "quantity_mismatch",
                         ReconciliationSeverity.CRITICAL,
                         contract_key,
-                        f"source={position.quantity}, external={observed.quantity}",
+                        f"execution={position.quantity}, external={observed.quantity}",
                     )
                 )
             if (
@@ -83,7 +130,7 @@ def reconcile_positions(
                         "average_price_mismatch",
                         ReconciliationSeverity.WARNING,
                         contract_key,
-                        f"source={position.average_price}, external={observed.average_price}",
+                        f"execution={position.average_price}, external={observed.average_price}",
                     )
                 )
         elif observed is not None and observed.quantity > 0:

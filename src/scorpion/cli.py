@@ -10,6 +10,7 @@ from pathlib import Path
 from .accuracy import score_decisions
 from .decision_store import unresolved_packet_count
 from .domain import EventKind, SignalEvent
+from .execution_journal import ExecutionJournal, FillSource, reconstruct_execution_state
 from .integrity import IntegrityLedger
 from .ops_queue import load_operator_inbox
 from .reconciliation import ExternalPositionObservation, reconcile_positions
@@ -50,6 +51,7 @@ def ops_main() -> None:
     resilience = assess_resilience(health, wal_bytes=storage.wal_bytes)
     latency = load_stage_latency_report(args.db, limit=args.latency_window)
     integrity = IntegrityLedger(args.db).verify_database()
+    execution_truth = reconstruct_execution_state(args.db, store.load_signals())
     inbox = load_operator_inbox(args.db, limit=args.queue_limit)
     payload = {
         "operational_mode": resilience.mode.value,
@@ -85,6 +87,25 @@ def ops_main() -> None:
         "stage_latency": asdict(latency),
         "storage": asdict(storage),
         "integrity": asdict(integrity),
+        "execution_truth": {
+            "available": execution_truth.available,
+            "fills_applied": execution_truth.fills_applied,
+            "journal_integrity": asdict(execution_truth.verification),
+            "anomalies": list(execution_truth.anomalies),
+            "positions": (
+                {
+                    key: {
+                        "status": position.status.value,
+                        "quantity": position.quantity,
+                        "average_price": str(position.average_price),
+                        "generation": position.generation,
+                    }
+                    for key, position in sorted(execution_truth.state.positions.items())
+                }
+                if execution_truth.state is not None
+                else None
+            ),
+        },
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -111,11 +132,36 @@ def reconcile_main() -> None:
         if isinstance(row, dict)
     ]
     store = Store(args.db)
-    state, _ = replay(store.load_signals())
-    report = reconcile_positions(state, observations)
+    execution_truth = reconstruct_execution_state(args.db, store.load_signals())
+    if not execution_truth.available or execution_truth.state is None:
+        payload = {
+            "clean": False,
+            "critical": True,
+            "execution_truth_available": False,
+            "fills_applied": execution_truth.fills_applied,
+            "journal_integrity": asdict(execution_truth.verification),
+            "findings": [
+                {
+                    "code": "execution_truth_unavailable",
+                    "severity": "CRITICAL",
+                    "contract_key": "",
+                    "detail": ";".join(
+                        (*execution_truth.verification.failures, *execution_truth.anomalies)
+                    )
+                    or "execution state could not be reconstructed safely",
+                }
+            ],
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    report = reconcile_positions(execution_truth.state, observations)
     payload = {
         "clean": report.clean,
         "critical": report.critical,
+        "execution_truth_available": True,
+        "fills_applied": execution_truth.fills_applied,
+        "journal_integrity": asdict(execution_truth.verification),
         "findings": [
             {
                 "code": finding.code,
@@ -128,6 +174,70 @@ def reconcile_main() -> None:
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
 
+
+
+def record_fill_main() -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Record an already-executed paper or externally confirmed fill. "
+            "This command never submits an order."
+        )
+    )
+    parser.add_argument("event_id")
+    parser.add_argument("--db", default="scorpion.db")
+    parser.add_argument("--quantity-delta", type=int, required=True)
+    parser.add_argument("--fill-price", type=Decimal, required=True)
+    parser.add_argument(
+        "--source",
+        choices=[source.value for source in FillSource],
+        required=True,
+    )
+    parser.add_argument("--recorded-by", required=True)
+    parser.add_argument("--filled-ts")
+    parser.add_argument("--external-ref")
+    parser.add_argument("--note", default="")
+    parser.add_argument("--final", action="store_true")
+    parser.add_argument("--fill-id")
+    args = parser.parse_args()
+    if args.filled_ts:
+        parsed_fill_time = datetime.fromisoformat(args.filled_ts)
+        if parsed_fill_time.tzinfo is None or parsed_fill_time.utcoffset() is None:
+            raise ValueError("--filled-ts must include a timezone offset")
+        filled_ts = parsed_fill_time.astimezone(UTC)
+    else:
+        filled_ts = datetime.now(UTC)
+    record = ExecutionJournal(args.db).record(
+        args.event_id,
+        quantity_delta=args.quantity_delta,
+        fill_price=args.fill_price,
+        source=FillSource(args.source),
+        recorded_by=args.recorded_by,
+        filled_ts_utc=filled_ts,
+        external_ref=args.external_ref,
+        note=args.note,
+        final=args.final,
+        fill_id=args.fill_id,
+    )
+    print(
+        json.dumps(
+            {
+                "sequence": record.sequence,
+                "fill_id": record.fill.fill_id,
+                "event_id": record.fill.event_id,
+                "contract_key": record.fill.contract_key,
+                "generation": record.fill.generation,
+                "quantity_delta": record.fill.quantity_delta,
+                "fill_price": str(record.fill.fill_price),
+                "source": record.fill.source.value,
+                "external_ref": record.fill.external_ref,
+                "filled_ts_utc": record.fill.filled_ts_utc.isoformat(),
+                "record_hash": record.record_hash,
+                "note": "fill recorded; no order was submitted by Scorpion",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 def replay_main() -> None:
     parser = argparse.ArgumentParser()
