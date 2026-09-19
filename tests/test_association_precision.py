@@ -12,7 +12,7 @@ def _open_two(raw_factory):
         raw_factory(
             "NVDA 227.5P Sep11 @ 2.63",
             message_id="e2",
-            channel_id="968352649437126676",
+            channel_id="946975031399972884",
         )
     )
     state, _ = reduce_book(state, second)
@@ -56,7 +56,13 @@ def test_ambiguous_lineage_refuses_guess(raw_factory):
     state = BookState(
         positions={position_a.contract_key: position_a, position_b.contract_key: position_b}
     )
-    followup = parse_message(raw_factory("Closing runners +10%", message_id="f3"))
+    followup = parse_message(
+        raw_factory(
+            "Closing runners +10%",
+            message_id="f3",
+            channel_id="1231301953972207667",
+        )
+    )
     decision = associate_followup_with_evidence(followup, state)
     assert decision.event.contract_key is None
     assert decision.evidence.method == "source_lineage_ambiguous"

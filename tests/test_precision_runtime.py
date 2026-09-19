@@ -24,7 +24,7 @@ def test_parser_event_id_changes_on_edit(raw_factory):
 
 def test_pending_raw_is_recovered_after_crash_boundary(tmp_path, raw_factory):
     store = Store(tmp_path / "recovery.db")
-    raw = raw_factory("QQQ 719C TODAY @ 1.01", message_id="crash-boundary")
+    raw = raw_factory("AAPL 200C TODAY @ 1.01", message_id="crash-boundary")
     store.append_raw(raw)
     assert store.health_snapshot()["pending_raw_revisions"] == 1
 
@@ -37,7 +37,7 @@ def test_pending_raw_is_recovered_after_crash_boundary(tmp_path, raw_factory):
 def test_live_and_replayed_state_fingerprints_match(tmp_path, raw_factory):
     store = Store(tmp_path / "fingerprint.db")
     pipeline = Pipeline(store, allowed_author_ids=frozenset({"author"}))
-    raw = raw_factory("QQQ 719C TODAY @ 1.01", message_id="fp")
+    raw = raw_factory("AAPL 200C TODAY @ 1.01", message_id="fp")
     asyncio.run(pipeline.handle(raw))
     first = state_fingerprint(pipeline.state)
 
