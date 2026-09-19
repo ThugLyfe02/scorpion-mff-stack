@@ -36,12 +36,25 @@ def test_resilience_degrades_on_semantic_quality_spike():
     assert any(signal.code == "ambiguity_spike" for signal in assessment.signals)
 
 
-def test_resilience_halts_on_stale_pipeline_heartbeat():
+def test_idle_channel_does_not_turn_message_heartbeat_into_false_outage():
     now = datetime.now(UTC)
     health = _health(
         heartbeats={
-            "pipeline": {"last_seen_ts_utc": (now - timedelta(seconds=20)).isoformat()}
+            "pipeline": {"last_seen_ts_utc": (now - timedelta(minutes=5)).isoformat()}
         }
+    )
+    assessment = assess_resilience(health, now=now)
+    assert assessment.mode is OperationalMode.NORMAL
+    assert not any("heartbeat_stale" in signal.code for signal in assessment.signals)
+
+
+def test_resilience_halts_when_pending_work_and_pipeline_heartbeat_are_stale():
+    now = datetime.now(UTC)
+    health = _health(
+        pending_raw_revisions=1,
+        heartbeats={
+            "pipeline": {"last_seen_ts_utc": (now - timedelta(seconds=20)).isoformat()}
+        },
     )
     assessment = assess_resilience(health, now=now)
     assert assessment.mode is OperationalMode.HALTED

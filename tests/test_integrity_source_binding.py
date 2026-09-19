@@ -31,3 +31,25 @@ def test_integrity_source_verification_detects_audit_mutation(tmp_path, raw_fact
     verification = IntegrityLedger(path).verify_database()
     assert verification.ok is False
     assert any("source_evidence_mismatch" in item for item in verification.failures)
+
+
+def test_integrity_source_verification_binds_full_effect_payload(tmp_path, raw_factory):
+    path = tmp_path / "effect-tamper.db"
+    store = Store(path)
+    pipeline = Pipeline(store, allowed_author_ids=frozenset({"author"}))
+    asyncio.run(pipeline.handle(raw_factory("AAPL 200C TODAY @ 1.01")))
+
+    assert IntegrityLedger(path).verify_database().ok is True
+    with sqlite3.connect(path) as db:
+        db.execute(
+            """
+            UPDATE proposed_effects
+            SET contract_key='TSLA|CALL|999|2026-09-08',
+                quantity_hint=999,
+                metadata_json='{"tampered":"yes"}'
+            """
+        )
+
+    verification = IntegrityLedger(path).verify_database()
+    assert verification.ok is False
+    assert any("source_evidence_mismatch" in item for item in verification.failures)

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .domain import Effect, SignalEvent
-from .replay import replay, state_fingerprint
+from .replay import replay, semantic_state_fingerprint
 
 EffectSignature = tuple[str, str, int, str]
 
@@ -37,7 +38,14 @@ def replay_snapshot(events: Sequence[SignalEvent]) -> ReplaySnapshot:
     state, effects = replay(events)
     signatures = tuple(sorted(_effect_signature(effect) for effect in effects))
     positions = {key: position.status.value for key, position in sorted(state.positions.items())}
-    return ReplaySnapshot(state_fingerprint(state), signatures, positions)
+    return ReplaySnapshot(semantic_state_fingerprint(state), signatures, positions)
+
+
+def _expanded_difference(
+    left: Counter[EffectSignature],
+    right: Counter[EffectSignature],
+) -> tuple[EffectSignature, ...]:
+    return tuple(sorted((left - right).elements()))
 
 
 def compare_replay_semantics(
@@ -46,8 +54,8 @@ def compare_replay_semantics(
 ) -> SemanticReplayDiff:
     baseline = replay_snapshot(baseline_events)
     candidate = replay_snapshot(candidate_events)
-    baseline_effects = set(baseline.effect_signatures)
-    candidate_effects = set(candidate.effect_signatures)
+    baseline_effects = Counter(baseline.effect_signatures)
+    candidate_effects = Counter(candidate.effect_signatures)
     position_changes: dict[str, tuple[str | None, str | None]] = {}
     for key in sorted(set(baseline.positions) | set(candidate.positions)):
         old = baseline.positions.get(key)
@@ -56,7 +64,7 @@ def compare_replay_semantics(
             position_changes[key] = (old, new)
     return SemanticReplayDiff(
         state_changed=baseline.fingerprint != candidate.fingerprint,
-        added_effects=tuple(sorted(candidate_effects - baseline_effects)),
-        removed_effects=tuple(sorted(baseline_effects - candidate_effects)),
+        added_effects=_expanded_difference(candidate_effects, baseline_effects),
+        removed_effects=_expanded_difference(baseline_effects, candidate_effects),
         position_changes=position_changes,
     )

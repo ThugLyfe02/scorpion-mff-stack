@@ -13,6 +13,19 @@ from .domain import Effect, EffectKind, SignalEvent
 from .pricing import entry_is_stale, entry_limit
 
 
+class QuoteCacheStatus(StrEnum):
+    FRESH = "FRESH"
+    MISSING = "MISSING"
+    STALE = "STALE"
+
+
+@dataclass(frozen=True, slots=True)
+class QuoteLookup:
+    status: QuoteCacheStatus
+    quote: Quote | None
+    age_ms: float | None
+
+
 class FastPathStatus(StrEnum):
     PAPER_READY = "PAPER_READY"
     AWAITING_HUMAN_AUTHORIZATION = "AWAITING_HUMAN_AUTHORIZATION"
@@ -63,6 +76,24 @@ class QuoteCache:
         with self._lock:
             self._quotes[contract_key] = quote
 
+    def lookup(
+        self,
+        contract_key: str,
+        *,
+        now: datetime | None = None,
+        max_age: timedelta = timedelta(seconds=1),
+    ) -> QuoteLookup:
+        now = (now or datetime.now(UTC)).astimezone(UTC)
+        with self._lock:
+            quote = self._quotes.get(contract_key)
+        if quote is None:
+            return QuoteLookup(QuoteCacheStatus.MISSING, None, None)
+        age = now - quote.observed_ts_utc.astimezone(UTC)
+        age_ms = age.total_seconds() * 1_000.0
+        if age < timedelta(0) or age > max_age:
+            return QuoteLookup(QuoteCacheStatus.STALE, quote, age_ms)
+        return QuoteLookup(QuoteCacheStatus.FRESH, quote, age_ms)
+
     def get(
         self,
         contract_key: str,
@@ -70,15 +101,8 @@ class QuoteCache:
         now: datetime | None = None,
         max_age: timedelta = timedelta(seconds=1),
     ) -> Quote | None:
-        now = (now or datetime.now(UTC)).astimezone(UTC)
-        with self._lock:
-            quote = self._quotes.get(contract_key)
-        if quote is None:
-            return None
-        age = now - quote.observed_ts_utc.astimezone(UTC)
-        if age < timedelta(0) or age > max_age:
-            return None
-        return quote
+        lookup = self.lookup(contract_key, now=now, max_age=max_age)
+        return lookup.quote if lookup.status is QuoteCacheStatus.FRESH else None
 
 
 class FastPathPreparer:
@@ -152,13 +176,22 @@ class FastPathPreparer:
         contract_key = effect.contract_key
         if contract_key is None:
             return finish(FastPathStatus.REVIEW_REQUIRED, note="effect missing contract")
-        quote = self.quote_cache.get(
+        lookup = self.quote_cache.lookup(
             contract_key,
             now=now,
             max_age=self.quote_max_age,
         )
-        if quote is None:
+        if lookup.status is QuoteCacheStatus.MISSING:
             return finish(FastPathStatus.QUOTE_UNAVAILABLE)
+        if lookup.status is QuoteCacheStatus.STALE:
+            return finish(
+                FastPathStatus.QUOTE_STALE,
+                quote=lookup.quote,
+                note=f"cached quote age_ms={lookup.age_ms:.1f}" if lookup.age_ms is not None else "",
+            )
+        quote = lookup.quote
+        if quote is None:
+            raise RuntimeError("fresh quote lookup returned no quote")
 
         limit_price: Decimal | None
         if effect.kind in {EffectKind.PROPOSE_OPEN, EffectKind.PROPOSE_ADD}:

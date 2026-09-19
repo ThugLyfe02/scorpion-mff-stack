@@ -71,10 +71,12 @@ class DiscordHistorySynchronizer:
         textless = 0
         embed_messages = 0
         run_id = self.archive.start_run(len(self.channel_ids))
+        finished = False
+        callback_failure: BaseException | None = None
 
         @client.event
         async def on_ready() -> None:
-            nonlocal seen, inserted, textless, embed_messages
+            nonlocal seen, inserted, textless, embed_messages, finished, callback_failure
             try:
                 for channel_id in sorted(self.channel_ids):
                     channel = client.get_channel(int(channel_id))
@@ -130,7 +132,9 @@ class DiscordHistorySynchronizer:
                         "attachments are preserved by Discord but image text is not OCR-guessed"
                     ),
                 )
+                finished = True
             except Exception as exc:
+                callback_failure = exc
                 self.archive.finish_run(
                     run_id,
                     messages_seen=seen,
@@ -138,11 +142,39 @@ class DiscordHistorySynchronizer:
                     status="FAILED",
                     note=f"{type(exc).__name__}: {exc}",
                 )
-                raise
+                finished = True
             finally:
                 await client.close()
 
-        await client.start(token)
+        try:
+            await client.start(token)
+        except Exception as exc:
+            if not finished:
+                self.archive.finish_run(
+                    run_id,
+                    messages_seen=seen,
+                    messages_inserted=inserted,
+                    status="FAILED",
+                    note=f"{type(exc).__name__}: {exc}",
+                )
+                finished = True
+            raise
+        finally:
+            if not client.is_closed():
+                await client.close()
+
+        if callback_failure is not None:
+            raise RuntimeError("Discord history synchronization failed") from callback_failure
+        if not finished:
+            self.archive.finish_run(
+                run_id,
+                messages_seen=seen,
+                messages_inserted=inserted,
+                status="FAILED",
+                note="client stopped before synchronization completed",
+            )
+            raise RuntimeError("Discord history synchronization stopped before completion")
+
         return HistorySyncResult(
             len(self.channel_ids),
             seen,

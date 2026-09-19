@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from scorpion.association import associate_followup_with_evidence
@@ -82,6 +82,32 @@ def test_fastpath_blocks_etf_strategy_before_quote_use(raw_factory):
         now=datetime(2026, 9, 8, 14, 0, tzinfo=UTC),
     )
     assert intent.status is FastPathStatus.BLOCKED_STRATEGY
+
+
+def test_fastpath_distinguishes_stale_quote_from_missing_quote(raw_factory):
+    event, effect, packet = _event_effect_packet(raw_factory("TSLA 345C TODAY @ 1.00"))
+    cache = QuoteCache()
+    now = datetime(2026, 9, 8, 14, 0, tzinfo=UTC)
+    cache.update(
+        event.contract_key or "",
+        bid=Decimal("1.00"),
+        ask=Decimal("1.05"),
+        observed_ts_utc=now - timedelta(seconds=2),
+    )
+    stale = FastPathPreparer(cache).prepare(event, effect, packet, quantity=1, now=now)
+    assert stale.status is FastPathStatus.QUOTE_STALE
+    assert stale.quote is not None
+    assert "age_ms=" in stale.note
+
+    missing = FastPathPreparer(QuoteCache()).prepare(
+        event,
+        effect,
+        packet,
+        quantity=1,
+        now=now,
+    )
+    assert missing.status is FastPathStatus.QUOTE_UNAVAILABLE
+    assert missing.quote is None
 
 
 def test_fastpath_rejects_25_percent_entry_dislocation(raw_factory):

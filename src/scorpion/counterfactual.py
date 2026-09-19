@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -9,7 +10,7 @@ from .domain import BookState, Effect, EventKind, RawDiscordMessage, SignalEvent
 from .invariants import assert_valid_book
 from .parser import ParseDecision, parse_message_with_evidence
 from .reducer import reduce_book
-from .replay import state_fingerprint
+from .replay import semantic_state_fingerprint
 
 EvidenceParser = Callable[[RawDiscordMessage, frozenset[str] | None], ParseDecision]
 
@@ -64,7 +65,7 @@ def run_counterfactual(
             message_contracts[event.message_id] = event.contract_key
 
     return CounterfactualRun(
-        fingerprint=state_fingerprint(state),
+        fingerprint=semantic_state_fingerprint(state),
         events=tuple(events),
         effects=tuple(effects),
         review_effects=sum(effect.kind.value == "REVIEW" for effect in effects),
@@ -84,17 +85,20 @@ def compare_counterfactual_runs(
         left.contract_key != right.contract_key
         for left, right in zip(baseline.events, candidate.events, strict=False)
     ) + abs(len(baseline.events) - len(candidate.events))
-    baseline_effects = {
+    baseline_effects = Counter(
         (effect.kind.value, effect.contract_key, effect.generation, effect.reason)
         for effect in baseline.effects
-    }
-    candidate_effects = {
+    )
+    candidate_effects = Counter(
         (effect.kind.value, effect.contract_key, effect.generation, effect.reason)
         for effect in candidate.effects
-    }
+    )
+    effect_changes = sum((baseline_effects - candidate_effects).values()) + sum(
+        (candidate_effects - baseline_effects).values()
+    )
     return CounterfactualDelta(
         fingerprint_changed=baseline.fingerprint != candidate.fingerprint,
         event_kind_changes=event_kind_changes,
         contract_changes=contract_changes,
-        effect_changes=len(baseline_effects ^ candidate_effects),
+        effect_changes=effect_changes,
     )

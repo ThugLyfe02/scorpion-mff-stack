@@ -99,19 +99,20 @@ _CONDITIONAL_RE = re.compile(
     r"\b(?:if|would|could|might|maybe|looking\s+to|ready\s+to|plan(?:ning)?\s+to)\b",
     re.IGNORECASE,
 )
+_NEGATION_PREFIX = (
+    r"(?:not|never|do\s+not|don['’]?t|dont|did\s+not|didn['’]?t|didnt)"
+)
 _NEGATED_ACTION_RE = re.compile(
-    r"\b(?:not|never|do\s+not|don't|dont)\s+(?:currently\s+|yet\s+)?"
-    r"(?:buy|enter|entry|add(?:ing)?|close|closing|sell|selling|sold|trim(?:ming)?|exit|out)\b",
+    rf"\b{_NEGATION_PREFIX}\s+(?:currently\s+)?"
+    r"(?:buy(?:ing)?|bought|enter(?:ed|ing)?|entry|add(?:ed|ing)?|"
+    r"average(?:d|ing)?|close(?:d|ing)?|sell(?:ing)?|sold|trim(?:med|ming)?|"
+    r"exit(?:ed|ing)?|out|tak(?:e|ing)|lock(?:ed|ing)?|scal(?:e|ed|ing))\b"
+    r"(?:\s+yet\b)?",
     re.IGNORECASE,
 )
-_NEGATION_TOKEN_RE = re.compile(r"\b(?:not|never|do\s+not|don't|dont)\b", re.IGNORECASE)
+_NEGATION_TOKEN_RE = re.compile(rf"\b{_NEGATION_PREFIX}\b", re.IGNORECASE)
 _HISTORICAL_CONTEXT_RE = re.compile(
     r"\b(?:earlier|yesterday|previously|prior|old\s+alert|recap|last\s+session|from\s+yesterday)\b",
-    re.IGNORECASE,
-)
-_ACTION_CUE_RE = re.compile(
-    r"\b(?:buy|entry|enter|add(?:ed|ing)?|close|closed|closing|sell|sold|trim(?:med|ming)?|"
-    r"exit|out|stop)\b",
     re.IGNORECASE,
 )
 _GENERIC_CLOSE_RE = re.compile(r"\bclos(?:e|ing)\b", re.IGNORECASE)
@@ -254,12 +255,13 @@ def parse_message_with_evidence(
             0.10,
             matched_terms=(negation_match.group(0),),
         )
-    historical_context = _HISTORICAL_CONTEXT_RE.search(normalized)
-    historical_action = entry_match is not None or _ACTION_CUE_RE.search(normalized) is not None
-    historical_families = tuple(
-        kind for kind in _action_hits(normalized) if kind is not EventKind.AMBIGUOUS
+    contextual_hits = _action_hits(normalized)
+    contextual_families = tuple(
+        kind for kind in contextual_hits if kind is not EventKind.AMBIGUOUS
     )
-    if historical_context is not None and historical_action and len(historical_families) <= 1:
+    historical_context = _HISTORICAL_CONTEXT_RE.search(normalized)
+    historical_action = entry_match is not None or bool(contextual_hits)
+    if historical_context is not None and historical_action and len(contextual_families) <= 1:
         return finish(
             _base(raw, EventKind.AMBIGUOUS, "historical_action_context"),
             "action.historical_context",
@@ -267,11 +269,8 @@ def parse_message_with_evidence(
             matched_terms=(historical_context.group(0),),
         )
     conditional_context = _CONDITIONAL_RE.search(normalized)
-    conditional_action = entry_match is not None or _ACTION_CUE_RE.search(normalized) is not None
-    conditional_families = tuple(
-        kind for kind in _action_hits(normalized) if kind is not EventKind.AMBIGUOUS
-    )
-    if conditional_context is not None and conditional_action and len(conditional_families) <= 1:
+    conditional_action = entry_match is not None or bool(contextual_hits)
+    if conditional_context is not None and conditional_action and len(contextual_families) <= 1:
         return finish(
             _base(raw, EventKind.AMBIGUOUS, "conditional_action_context"),
             "action.conditional_context",

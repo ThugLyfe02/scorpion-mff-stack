@@ -5,8 +5,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .association import associate_followup_with_evidence
-from .decision_packet import OperatorDecisionPacket, build_decision_packet
+from .decision_packet import DecisionDisposition, OperatorDecisionPacket, build_decision_packet
 from .domain import BookState, Effect, RawDiscordMessage, SignalEvent
+from .execution_state import replay_admitted_events
 from .invariants import assert_valid_book
 from .parser import parse_message_with_evidence
 from .reducer import reduce_book
@@ -36,14 +37,23 @@ class Pipeline:
     resilience_assessment: ResilienceAssessment = field(default_factory=_normal_resilience)
     source_shift_resolver: SourceShiftResolver | None = None
     state: BookState = field(init=False)
+    observed_state: BookState = field(init=False)
     recent_events: list[SignalEvent] = field(init=False)
 
-    def __post_init__(self) -> None:
+    def _rebuild_states(self) -> None:
         historical_signals = self.store.load_signals()
-        self.state, historical_effects = replay(historical_signals)
+        self.observed_state, _ = replay(historical_signals)
+        self.state, execution_effects = replay_admitted_events(
+            self.store.path,
+            historical_signals,
+        )
+        assert_valid_book(self.observed_state)
         assert_valid_book(self.state)
-        self.store.append_effects(historical_effects)
+        self.store.append_effects(execution_effects)
         self.recent_events = historical_signals[-100:]
+
+    def __post_init__(self) -> None:
+        self._rebuild_states()
 
         for raw in self.store.load_pending_raw():
             try:
@@ -57,6 +67,25 @@ class Pipeline:
         if self.source_shift_resolver is None:
             return None
         return self.source_shift_resolver(raw.author_id, raw.channel_id)
+
+    def _association_state(self) -> BookState:
+        """Merge research-observed and admitted positions for source-lineage association only."""
+        positions = dict(self.observed_state.positions)
+        positions.update(self.state.positions)
+        days = [
+            day
+            for day in (
+                self.observed_state.first_entry_proposed_on,
+                self.state.first_entry_proposed_on,
+            )
+            if day is not None
+        ]
+        return BookState(
+            positions=positions,
+            halted=self.observed_state.halted or self.state.halted,
+            seen_event_ids=self.observed_state.seen_event_ids | self.state.seen_event_ids,
+            first_entry_proposed_on=max(days) if days else None,
+        )
 
     def _process(
         self,
@@ -81,16 +110,21 @@ class Pipeline:
                 if raw.referenced_message_id
                 else None
             )
+            association_state = self._association_state()
             associated = associate_followup_with_evidence(
                 parsed.event,
-                self.state,
+                association_state,
                 referenced_key,
             )
             association_us = _elapsed_us(association_started_ns)
 
             reduce_started_ns = time.perf_counter_ns()
             event = associated.event
-            sequence = assess_sequence(event, self.state, recent_events=self.recent_events)
+            sequence = assess_sequence(
+                event,
+                association_state,
+                recent_events=self.recent_events,
+            )
             packet: OperatorDecisionPacket = build_decision_packet(
                 event,
                 parsed.evidence,
@@ -99,8 +133,19 @@ class Pipeline:
                 sequence,
                 source_shift=self._source_shift(raw),
             )
-            proposed_state, proposed_effects = reduce_book(self.state, event)
-            assert_valid_book(proposed_state)
+            observed_proposed_state, observed_effects = reduce_book(self.observed_state, event)
+            assert_valid_book(observed_proposed_state)
+
+            blocked_from_execution_state = packet.disposition in {
+                DecisionDisposition.BLOCKED_STRATEGY,
+                DecisionDisposition.BLOCKED_SYSTEM,
+            }
+            if blocked_from_execution_state:
+                proposed_state = self.state
+                proposed_effects = observed_effects
+            else:
+                proposed_state, proposed_effects = reduce_book(self.state, event)
+                assert_valid_book(proposed_state)
             proposed_fingerprint = state_fingerprint(proposed_state)
             reduce_validate_us = _elapsed_us(reduce_started_ns)
 
@@ -126,23 +171,23 @@ class Pipeline:
                     "effect_count": len(proposed_effects),
                     "parser_latency_us": parsed.evidence.latency_us,
                     "state_fingerprint": proposed_fingerprint,
+                    "observed_state_fingerprint": state_fingerprint(observed_proposed_state),
                     "decision_disposition": packet.disposition.value,
                     "operational_mode": packet.system_mode.value,
                 },
                 stage_latencies_us=stage_latencies_us,
             )
             if result.inserted:
-                self.state = proposed_state
+                self.observed_state = observed_proposed_state
+                if not blocked_from_execution_state:
+                    self.state = proposed_state
                 self.recent_events.append(event)
                 self.recent_events = self.recent_events[-100:]
                 effects = proposed_effects
             else:
                 effects = ()
-                if event.event_id not in self.state.seen_event_ids:
-                    historical_signals = self.store.load_signals()
-                    self.state, _ = replay(historical_signals)
-                    self.recent_events = historical_signals[-100:]
-                    assert_valid_book(self.state)
+                if event.event_id not in self.observed_state.seen_event_ids:
+                    self._rebuild_states()
             return event, effects
         except Exception as exc:
             self.store.mark_raw_failed(raw.revision_id, type(exc).__name__)

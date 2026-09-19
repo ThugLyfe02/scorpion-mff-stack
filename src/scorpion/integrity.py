@@ -55,6 +55,17 @@ def _payload_hash(payload_json: str) -> str:
     return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
 
 
+def effect_payload_digest(effects: Sequence[Mapping[str, object]]) -> str:
+    """Hash the complete ordered effect payload used by the execution-review boundary."""
+    payload = json.dumps(
+        [dict(effect) for effect in effects],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def compute_record_hash(
     sequence: int,
     record_id: str,
@@ -173,6 +184,38 @@ def _packet_strategy_fields(
     }
 
 
+def _effect_rows_digest(
+    effects: Sequence[sqlite3.Row],
+    *,
+    event_id: str,
+    failures: list[str],
+) -> str | None:
+    payloads: list[dict[str, object]] = []
+    for effect in effects:
+        try:
+            metadata = json.loads(str(effect["metadata_json"]))
+        except json.JSONDecodeError:
+            failures.append(f"effect_metadata_json_invalid:{event_id}")
+            return None
+        if not isinstance(metadata, dict):
+            failures.append(f"effect_metadata_not_object:{event_id}")
+            return None
+        payloads.append(
+            {
+                "kind": str(effect["kind"]),
+                "contract_key": str(effect["contract_key"]) if effect["contract_key"] else None,
+                "generation": int(effect["generation"]),
+                "reason": str(effect["reason"]),
+                "quantity_hint": (
+                    int(effect["quantity_hint"]) if effect["quantity_hint"] is not None else None
+                ),
+                "metadata": metadata,
+                "status": str(effect["status"]),
+            }
+        )
+    return effect_payload_digest(payloads)
+
+
 def _extended_expected_payload(
     db: sqlite3.Connection,
     *,
@@ -182,6 +225,15 @@ def _extended_expected_payload(
     effects: Sequence[sqlite3.Row],
     failures: list[str],
 ) -> dict[str, Scalar] | None:
+    if "effects_sha256" in payload:
+        effects_sha256 = _effect_rows_digest(
+            effects,
+            event_id=event_id,
+            failures=failures,
+        )
+        if effects_sha256 is None:
+            return None
+        base = {**base, "effects_sha256": effects_sha256}
     if "decision_packet_id" not in payload:
         return base
     if not _table_exists(db, "operator_decision_packets"):
@@ -273,7 +325,8 @@ def verify_database_evidence(path: str | Path) -> DatabaseEvidenceVerification:
 
             effects = db.execute(
                 """
-                SELECT kind,status FROM proposed_effects
+                SELECT kind,status,contract_key,generation,reason,quantity_hint,metadata_json
+                FROM proposed_effects
                 WHERE source_event_id=? ORDER BY effect_id
                 """,
                 (event_id,),

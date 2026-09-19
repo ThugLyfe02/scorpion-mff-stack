@@ -28,9 +28,11 @@ def load_rule_calibration(path: str | Path) -> dict[str, RuleCalibration]:
     try:
         rows = db.execute(
             """
-            SELECT d.parser_rule,d.parser_confidence,d.kind,a.expected_kind
+            SELECT d.parser_rule,d.parser_confidence,d.kind,a.expected_kind,
+                   a.expected_contract_key,s.contract_key
             FROM adjudications a
             JOIN decision_audit d ON d.event_id=a.event_id
+            JOIN signal_events s ON s.event_id=a.event_id
             ORDER BY a.adjudicated_ts_utc,d.event_id
             """
         ).fetchall()
@@ -40,7 +42,13 @@ def load_rule_calibration(path: str | Path) -> dict[str, RuleCalibration]:
         CalibrationObservation(
             rule_id=row["parser_rule"],
             stated_confidence=float(row["parser_confidence"]),
-            correct=row["kind"] == row["expected_kind"],
+            correct=(
+                row["kind"] == row["expected_kind"]
+                and (
+                    row["expected_contract_key"] is None
+                    or row["contract_key"] == row["expected_contract_key"]
+                )
+            ),
             actionable=row["kind"] in {"ENTRY", "ADD", "TRIM", "EXIT"},
         )
         for row in rows

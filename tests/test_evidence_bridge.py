@@ -9,9 +9,7 @@ from scorpion.shadow import ShadowComparison, ShadowPrediction, compare_shadow
 from scorpion.store import Store
 
 
-def test_persisted_adjudications_drive_rule_calibration(tmp_path, raw_factory):
-    store = Store(tmp_path / "evidence.db")
-    raw = raw_factory("QQQ 719C TODAY @ 1.01")
+def _persist_decision(store, raw):
     from scorpion.parser import parse_message_with_evidence
 
     parsed = parse_message_with_evidence(raw)
@@ -23,10 +21,30 @@ def test_persisted_adjudications_drive_rule_calibration(tmp_path, raw_factory):
         AssociationEvidence("not_required", 1.0, 0),
         pipeline_latency_us=100,
     )
+    return parsed
+
+
+def test_persisted_adjudications_drive_rule_calibration(tmp_path, raw_factory):
+    store = Store(tmp_path / "evidence.db")
+    parsed = _persist_decision(store, raw_factory("QQQ 719C TODAY @ 1.01"))
     store.record_adjudication(parsed.event.event_id, EventKind.ENTRY, reviewer="reviewer")
     calibration = load_rule_calibration(store.path)
     assert calibration["entry.complete"].samples == 1
     assert calibration["entry.complete"].correct == 1
+
+
+def test_contract_mismatch_counts_as_calibration_failure(tmp_path, raw_factory):
+    store = Store(tmp_path / "contract-evidence.db")
+    parsed = _persist_decision(store, raw_factory("QQQ 719C TODAY @ 1.01"))
+    store.record_adjudication(
+        parsed.event.event_id,
+        EventKind.ENTRY,
+        reviewer="reviewer",
+        expected_contract_key="QQQ|CALL|720|2026-09-08",
+    )
+    calibration = load_rule_calibration(store.path)
+    assert calibration["entry.complete"].samples == 1
+    assert calibration["entry.complete"].correct == 0
 
 
 def test_shadow_reliability_becomes_ensemble_weight(tmp_path, raw_factory):

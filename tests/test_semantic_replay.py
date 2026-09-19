@@ -30,6 +30,15 @@ def test_identical_replay_has_no_semantic_delta():
     assert diff.removed_effects == ()
 
 
+def test_version_only_event_identity_change_is_not_a_semantic_delta():
+    baseline = [event(EventKind.ENTRY, "parser-v1-id")]
+    candidate = [event(EventKind.ENTRY, "parser-v2-id")]
+    diff = compare_replay_semantics(baseline, candidate)
+    assert diff.state_changed is False
+    assert diff.added_effects == ()
+    assert diff.removed_effects == ()
+
+
 def test_downstream_effect_change_is_visible():
     baseline = [event(EventKind.ENTRY, "e1")]
     candidate = [event(EventKind.ENTRY, "e1"), event(EventKind.EXIT, "e2")]
@@ -37,3 +46,18 @@ def test_downstream_effect_change_is_visible():
     assert diff.state_changed is True
     assert diff.added_effects
     assert diff.position_changes
+
+
+def test_repeated_effect_multiplicity_is_preserved():
+    baseline = [
+        event(EventKind.ENTRY, "e1"),
+        event(EventKind.TRIM, "t1"),
+    ]
+    candidate = [
+        event(EventKind.ENTRY, "e1"),
+        event(EventKind.TRIM, "t1"),
+        event(EventKind.TRIM, "t2"),
+    ]
+    diff = compare_replay_semantics(baseline, candidate)
+    added_trims = [signature for signature in diff.added_effects if signature[0] == "PROPOSE_TRIM"]
+    assert len(added_trims) == 1

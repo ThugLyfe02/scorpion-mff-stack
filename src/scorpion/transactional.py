@@ -13,7 +13,7 @@ from .accuracy import AssociationEvidence, DecisionEvidence
 from .decision_packet import DecisionDisposition, OperatorDecisionPacket
 from .decision_store import append_decision_packet
 from .domain import Effect, SignalEvent
-from .integrity import append_integrity_record
+from .integrity import append_integrity_record, effect_payload_digest
 from .stage_trace import append_stage_trace
 from .store import Store
 
@@ -152,6 +152,20 @@ class SQLiteTransitionCommitter:
                 if inserted:
                     append_decision_packet(db, decision_packet)
                     effect_kinds = ",".join(effect.kind.value for effect in effects)
+                    effects_sha256 = effect_payload_digest(
+                        [
+                            {
+                                "kind": effect.kind.value,
+                                "contract_key": effect.contract_key,
+                                "generation": effect.generation,
+                                "reason": effect.reason,
+                                "quantity_hint": effect.quantity_hint,
+                                "metadata": dict(effect.metadata),
+                                "status": effect_status,
+                            }
+                            for effect in effects
+                        ]
+                    )
                     append_integrity_record(
                         db,
                         event.event_id,
@@ -166,6 +180,7 @@ class SQLiteTransitionCommitter:
                             "effect_count": effect_count,
                             "effect_kinds": effect_kinds,
                             "effect_status": effect_status,
+                            "effects_sha256": effects_sha256,
                             "decision_packet_id": decision_packet.packet_id,
                             "decision_disposition": decision_packet.disposition.value,
                             "operational_mode": decision_packet.system_mode.value,
