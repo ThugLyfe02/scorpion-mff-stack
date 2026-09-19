@@ -67,13 +67,7 @@ def replay(events: Sequence[SignalEvent]) -> tuple[BookState, tuple[Effect, ...]
     return state, tuple(effects)
 
 
-def state_fingerprint(state: BookState) -> str:
-    """Stable digest used to prove live/replay state equivalence."""
-    payload = asdict(state)
-    payload["seen_event_ids"] = sorted(state.seen_event_ids)
-    payload["first_entry_proposed_on"] = (
-        state.first_entry_proposed_on.isoformat() if state.first_entry_proposed_on else None
-    )
+def _position_payload(state: BookState) -> dict[str, dict[str, object]]:
     positions: dict[str, dict[str, object]] = {}
     for key in sorted(state.positions):
         position = state.positions[key]
@@ -92,7 +86,40 @@ def state_fingerprint(state: BookState) -> str:
             "added_once": position.added_once,
             "last_reason": position.last_reason,
         }
-    payload["positions"] = positions
+    return positions
+
+
+def state_fingerprint(state: BookState) -> str:
+    """Stable operational digest used to prove live/replay state identity.
+
+    Event identities intentionally participate in this fingerprint. Use
+    semantic_state_fingerprint() when comparing parser/model candidates whose event IDs may
+    legitimately differ because their parser version differs.
+    """
+    payload = asdict(state)
+    payload["seen_event_ids"] = sorted(state.seen_event_ids)
+    payload["first_entry_proposed_on"] = (
+        state.first_entry_proposed_on.isoformat() if state.first_entry_proposed_on else None
+    )
+    payload["positions"] = _position_payload(state)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def semantic_state_fingerprint(state: BookState) -> str:
+    """Digest semantic book state while normalizing parser-version-specific event identity.
+
+    The event count is retained so suppressing or inventing a normalized event can still alter
+    the digest, while version-derived event IDs themselves cannot create a false semantic delta.
+    """
+    payload = {
+        "halted": state.halted,
+        "seen_event_count": len(state.seen_event_ids),
+        "first_entry_proposed_on": (
+            state.first_entry_proposed_on.isoformat() if state.first_entry_proposed_on else None
+        ),
+        "positions": _position_payload(state),
+    }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
