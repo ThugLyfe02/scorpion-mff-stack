@@ -46,7 +46,8 @@ def test_pipeline_preserves_etf_signal_but_blocks_execution_progression(tmp_path
     pipeline = Pipeline(store, allowed_author_ids=frozenset({"author"}))
     event, effects = asyncio.run(pipeline.handle(raw_factory("QQQ 719C TODAY @ 1.01")))
     assert len(effects) == 1
-    assert event.contract_key in pipeline.state.positions
+    assert event.contract_key not in pipeline.state.positions
+    assert event.contract_key in pipeline.observed_state.positions
 
     with store.connect() as db:
         effect = db.execute(

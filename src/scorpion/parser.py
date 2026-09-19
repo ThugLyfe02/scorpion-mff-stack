@@ -105,7 +105,7 @@ _NEGATION_PREFIX = (
 _NEGATED_ACTION_RE = re.compile(
     rf"\b{_NEGATION_PREFIX}\s+(?:currently\s+)?"
     r"(?:buy(?:ing)?|bought|enter(?:ed|ing)?|entry|add(?:ed|ing)?|"
-    r"average(?:d|ing)?|close(?:d|ing)?|sell(?:ing)?|sold|trim(?:med|ming)?|"
+    r"average(?:d|ing)?|clos(?:e|ed|ing)|sell(?:ing)?|sold|trim(?:med|ming)?|"
     r"exit(?:ed|ing)?|out|tak(?:e|ing)|lock(?:ed|ing)?|scal(?:e|ed|ing))\b"
     r"(?:\s+yet\b)?",
     re.IGNORECASE,
