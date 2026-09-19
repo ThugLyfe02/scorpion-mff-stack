@@ -187,7 +187,11 @@ class FastPathPreparer:
             return finish(
                 FastPathStatus.QUOTE_STALE,
                 quote=lookup.quote,
-                note=f"cached quote age_ms={lookup.age_ms:.1f}" if lookup.age_ms is not None else "",
+                note=(
+                    f"cached quote age_ms={lookup.age_ms:.1f}"
+                    if lookup.age_ms is not None
+                    else ""
+                ),
             )
         quote = lookup.quote
         if quote is None:
