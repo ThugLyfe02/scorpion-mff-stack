@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from .association import associate_followup_with_evidence
 from .domain import BookState, Effect, RawDiscordMessage, SignalEvent
+from .integrity import ReplayIntegritySentinel
 from .invariants import assert_valid_book
 from .parser import parse_message_with_evidence
 from .reducer import reduce_book
@@ -13,17 +14,26 @@ from .store import Store
 from .transactional import SQLiteTransitionCommitter, TransitionCommitter
 
 
+class RuntimeHaltedError(RuntimeError):
+    pass
+
+
 @dataclass(slots=True)
 class Pipeline:
     store: Store
     allowed_author_ids: frozenset[str] | None = None
     committer: TransitionCommitter = field(default_factory=SQLiteTransitionCommitter)
+    integrity_sentinel: ReplayIntegritySentinel = field(default_factory=ReplayIntegritySentinel)
     state: BookState = field(init=False)
 
     def __post_init__(self) -> None:
         self.state, historical_effects = replay(self.store.load_signals())
         assert_valid_book(self.state)
         self.store.append_effects(historical_effects)
+
+        halted, _ = self.store.runtime_halt()
+        if halted:
+            return
 
         for raw in self.store.load_pending_raw():
             try:
@@ -42,6 +52,16 @@ class Pipeline:
         started_ns = time.perf_counter_ns()
         if persist_raw:
             self.store.append_raw(raw)
+        halted, halt_reason = self.store.runtime_halt()
+        if halted:
+            self.store.heartbeat(
+                "pipeline",
+                last_message_id=raw.message_id,
+                last_revision_id=raw.revision_id,
+                status="halted",
+                halt_reason=halt_reason,
+            )
+            raise RuntimeHaltedError(f"runtime halted: {halt_reason}")
         try:
             parsed = parse_message_with_evidence(raw, self.allowed_author_ids)
             referenced_key = (
@@ -78,6 +98,7 @@ class Pipeline:
             if result.inserted:
                 self.state = proposed_state
                 effects = proposed_effects
+                self.integrity_sentinel.after_commit(self.store, self.state)
             else:
                 effects = ()
                 if event.event_id not in self.state.seen_event_ids:
