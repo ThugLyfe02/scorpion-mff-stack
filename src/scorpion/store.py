@@ -145,6 +145,8 @@ class Store:
         db.row_factory = sqlite3.Row
         try:
             db.execute("PRAGMA busy_timeout=5000")
+            db.execute("PRAGMA foreign_keys=ON")
+            db.execute("PRAGMA synchronous=FULL")
             yield db
         finally:
             db.close()
