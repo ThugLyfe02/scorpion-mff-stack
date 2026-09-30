@@ -496,6 +496,14 @@ class Store:
                 (value, now),
             )
 
+    def runtime_halt(self) -> tuple[bool, str]:
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM runtime_flags WHERE key='halt'").fetchone()
+        if row is None:
+            return False, ""
+        payload = json.loads(row["value"])
+        return bool(payload.get("halted", False)), str(payload.get("reason", ""))
+
     def health_snapshot(self) -> dict[str, object]:
         with self.connect() as db:
             beats = {
