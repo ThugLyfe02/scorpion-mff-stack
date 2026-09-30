@@ -64,3 +64,16 @@ def test_pending_recovery_does_not_run_while_halt_is_latched(tmp_path, raw_facto
     assert pipeline.state.positions == {}
     assert [row.revision_id for row in store.load_pending_raw()] == [raw.revision_id]
     assert store.load_signals() == []
+
+
+def test_store_reasserts_connection_scoped_sqlite_safety_pragmas(tmp_path):
+    store = Store(tmp_path / "pragmas.db")
+
+    with store.connect() as db:
+        foreign_keys = db.execute("PRAGMA foreign_keys").fetchone()[0]
+        synchronous = db.execute("PRAGMA synchronous").fetchone()[0]
+        busy_timeout = db.execute("PRAGMA busy_timeout").fetchone()[0]
+
+    assert foreign_keys == 1
+    assert synchronous == 2
+    assert busy_timeout == 5000
