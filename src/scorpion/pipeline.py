@@ -5,23 +5,35 @@ from dataclasses import dataclass, field
 
 from .association import associate_followup_with_evidence
 from .domain import BookState, Effect, RawDiscordMessage, SignalEvent
+from .integrity import ReplayIntegritySentinel
 from .invariants import assert_valid_book
 from .parser import parse_message_with_evidence
 from .reducer import reduce_book
 from .replay import replay, state_fingerprint
 from .store import Store
+from .transactional import SQLiteTransitionCommitter, TransitionCommitter
+
+
+class RuntimeHaltedError(RuntimeError):
+    pass
 
 
 @dataclass(slots=True)
 class Pipeline:
     store: Store
     allowed_author_ids: frozenset[str] | None = None
+    committer: TransitionCommitter = field(default_factory=SQLiteTransitionCommitter)
+    integrity_sentinel: ReplayIntegritySentinel = field(default_factory=ReplayIntegritySentinel)
     state: BookState = field(init=False)
 
     def __post_init__(self) -> None:
         self.state, historical_effects = replay(self.store.load_signals())
         assert_valid_book(self.state)
         self.store.append_effects(historical_effects)
+
+        halted, _ = self.store.runtime_halt()
+        if halted:
+            return
 
         for raw in self.store.load_pending_raw():
             try:
@@ -40,6 +52,16 @@ class Pipeline:
         started_ns = time.perf_counter_ns()
         if persist_raw:
             self.store.append_raw(raw)
+        halted, halt_reason = self.store.runtime_halt()
+        if halted:
+            self.store.heartbeat(
+                "pipeline",
+                last_message_id=raw.message_id,
+                last_revision_id=raw.revision_id,
+                status="halted",
+                halt_reason=halt_reason,
+            )
+            raise RuntimeHaltedError(f"runtime halted: {halt_reason}")
         try:
             parsed = parse_message_with_evidence(raw, self.allowed_author_ids)
             referenced_key = (
@@ -53,33 +75,35 @@ class Pipeline:
                 referenced_key,
             )
             event = associated.event
-            inserted = self.store.append_signal(event)
-            effects: tuple[Effect, ...]
-            if inserted:
-                self.state, effects = reduce_book(self.state, event)
-                assert_valid_book(self.state)
-                self.store.append_effects(effects)
+            proposed_state, proposed_effects = reduce_book(self.state, event)
+            assert_valid_book(proposed_state)
+            proposed_fingerprint = state_fingerprint(proposed_state)
+            result = self.committer.commit(
+                self.store,
+                raw_revision_id=raw.revision_id,
+                event=event,
+                effects=proposed_effects,
+                parser=parsed.evidence,
+                association=associated.evidence,
+                started_ns=started_ns,
+                heartbeat_metadata={
+                    "last_message_id": raw.message_id,
+                    "last_revision_id": raw.revision_id,
+                    "last_event_id": event.event_id,
+                    "effect_count": len(proposed_effects),
+                    "parser_latency_us": parsed.evidence.latency_us,
+                    "state_fingerprint": proposed_fingerprint,
+                },
+            )
+            if result.inserted:
+                self.state = proposed_state
+                effects = proposed_effects
+                self.integrity_sentinel.after_commit(self.store, self.state)
             else:
                 effects = ()
-
-            pipeline_latency_us = max(0, (time.perf_counter_ns() - started_ns) // 1_000)
-            self.store.append_decision_audit(
-                event,
-                parsed.evidence,
-                associated.evidence,
-                pipeline_latency_us=pipeline_latency_us,
-            )
-            self.store.mark_raw_processed(raw.revision_id)
-            self.store.heartbeat(
-                "pipeline",
-                last_message_id=raw.message_id,
-                last_revision_id=raw.revision_id,
-                last_event_id=event.event_id,
-                effect_count=len(effects),
-                parser_latency_us=parsed.evidence.latency_us,
-                pipeline_latency_us=pipeline_latency_us,
-                state_fingerprint=state_fingerprint(self.state),
-            )
+                if event.event_id not in self.state.seen_event_ids:
+                    self.state, _ = replay(self.store.load_signals())
+                    assert_valid_book(self.state)
             return event, effects
         except Exception as exc:
             self.store.mark_raw_failed(raw.revision_id, type(exc).__name__)
