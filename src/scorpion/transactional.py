@@ -14,6 +14,10 @@ from .domain import Effect, SignalEvent
 from .store import Store
 
 
+class RuntimeHaltedError(RuntimeError):
+    """Normalization was denied by the durable runtime halt."""
+
+
 @dataclass(frozen=True, slots=True)
 class TransitionCommitResult:
     inserted: bool
@@ -62,6 +66,17 @@ class SQLiteTransitionCommitter:
         with store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
+                # Serialize admission with Store.set_halt(), which uses the same SQLite
+                # writer lock. A pre-transaction check alone leaves a halt/commit race.
+                halt = db.execute(
+                    "SELECT value FROM runtime_flags WHERE key='halt'"
+                ).fetchone()
+                if halt is not None:
+                    payload = json.loads(halt["value"])
+                    if payload.get("halted", False):
+                        raise RuntimeHaltedError(
+                            f"runtime halted: {payload.get('reason', '')}"
+                        )
                 cursor = db.execute(
                     """
                     INSERT OR IGNORE INTO signal_events

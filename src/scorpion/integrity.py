@@ -49,6 +49,11 @@ class ReplayIntegritySentinel:
         durable_fingerprint = state_fingerprint(durable_state)
         ok = live_fingerprint == durable_fingerprint
 
+        # Durably revoke admission before any diagnostic write can fail or the
+        # process can exit. Telemetry must not be a prerequisite for the latch.
+        if not ok:
+            store.set_halt(True, "replay_integrity_divergence")
+
         store.heartbeat(
             "replay-integrity",
             status="ok" if ok else "diverged",
@@ -57,9 +62,6 @@ class ReplayIntegritySentinel:
             durable_event_count=len(events),
             cadence_commits=self.every_n_commits,
         )
-        if not ok:
-            store.set_halt(True, "replay_integrity_divergence")
-
         return IntegrityCheckResult(
             ok=ok,
             live_fingerprint=live_fingerprint,

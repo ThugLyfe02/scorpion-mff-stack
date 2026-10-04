@@ -231,7 +231,7 @@ class Store:
         with self.connect() as db:
             db.execute(
                 "UPDATE raw_processing SET status='PENDING',updated_ts_utc=?,error=? "
-                "WHERE raw_event_id=?",
+                "WHERE raw_event_id=? AND status!='DONE'",
                 (now, error[:500], raw_event_id),
             )
 

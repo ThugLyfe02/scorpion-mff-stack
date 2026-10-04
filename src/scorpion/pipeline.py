@@ -11,11 +11,8 @@ from .parser import parse_message_with_evidence
 from .reducer import reduce_book
 from .replay import replay, state_fingerprint
 from .store import Store
+from .transactional import RuntimeHaltedError as RuntimeHaltedError
 from .transactional import SQLiteTransitionCommitter, TransitionCommitter
-
-
-class RuntimeHaltedError(RuntimeError):
-    pass
 
 
 @dataclass(slots=True)
@@ -38,8 +35,11 @@ class Pipeline:
         for raw in self.store.load_pending_raw():
             try:
                 self._process(raw, persist_raw=False)
+            except RuntimeHaltedError:
+                # A halt can be latched between recovery admission and its commit.
+                # Leave this and all later revisions pending for operator recovery.
+                break
             except Exception as exc:
-                self.store.mark_raw_failed(raw.revision_id, type(exc).__name__)
                 self.store.set_halt(True, f"raw_recovery_failed:{raw.revision_id}")
                 raise RuntimeError("failed to recover pending raw Discord revision") from exc
 
@@ -95,6 +95,23 @@ class Pipeline:
                     "state_fingerprint": proposed_fingerprint,
                 },
             )
+        except RuntimeHaltedError:
+            # Admission denial is not a failed normalization attempt.
+            raise
+        except Exception as exc:
+            self.store.mark_raw_failed(raw.revision_id, type(exc).__name__)
+            self.store.heartbeat(
+                "pipeline",
+                last_message_id=raw.message_id,
+                last_revision_id=raw.revision_id,
+                status="error",
+                error=type(exc).__name__,
+            )
+            raise
+
+        # The normalized transaction, including raw DONE, has committed. Failures
+        # below must never rewrite that completion marker as a retryable failure.
+        try:
             if result.inserted:
                 self.state = proposed_state
                 effects = proposed_effects
@@ -106,14 +123,9 @@ class Pipeline:
                     assert_valid_book(self.state)
             return event, effects
         except Exception as exc:
-            self.store.mark_raw_failed(raw.revision_id, type(exc).__name__)
-            self.store.heartbeat(
-                "pipeline",
-                last_message_id=raw.message_id,
-                last_revision_id=raw.revision_id,
-                status="error",
-                error=type(exc).__name__,
-            )
+            halted, _ = self.store.runtime_halt()
+            if not halted:
+                self.store.set_halt(True, f"post_commit_verification_failed:{type(exc).__name__}")
             raise
 
     async def handle(self, raw: RawDiscordMessage) -> tuple[SignalEvent, tuple[Effect, ...]]:
