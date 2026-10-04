@@ -8,6 +8,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .domain import BookState
+from .execution_state import replay_admitted_events
+from .invariants import assert_valid_book
+from .policy_bundle import RuntimePolicyBundle
+from .processing_order import load_signals_in_processing_order
+from .replay import ReplayOrder, replay, state_fingerprint
+from .store import Store
+
 Scalar = str | int | float | bool | None
 _GENESIS = "0" * 64
 _INTEGRITY_SCHEMA = """
@@ -53,6 +61,17 @@ def canonical_payload(payload: Mapping[str, Scalar]) -> str:
 
 def _payload_hash(payload_json: str) -> str:
     return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+
+
+def effect_payload_digest(effects: Sequence[Mapping[str, object]]) -> str:
+    """Hash the complete ordered effect payload used by the execution-review boundary."""
+    payload = json.dumps(
+        [dict(effect) for effect in effects],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def compute_record_hash(
@@ -200,6 +219,38 @@ def _process_seq_bound_field(
     return {"process_seq": int(row["process_seq"])}
 
 
+def _effect_rows_digest(
+    effects: Sequence[sqlite3.Row],
+    *,
+    event_id: str,
+    failures: list[str],
+) -> str | None:
+    payloads: list[dict[str, object]] = []
+    for effect in effects:
+        try:
+            metadata = json.loads(str(effect["metadata_json"]))
+        except json.JSONDecodeError:
+            failures.append(f"effect_metadata_json_invalid:{event_id}")
+            return None
+        if not isinstance(metadata, dict):
+            failures.append(f"effect_metadata_not_object:{event_id}")
+            return None
+        payloads.append(
+            {
+                "kind": str(effect["kind"]),
+                "contract_key": str(effect["contract_key"]) if effect["contract_key"] else None,
+                "generation": int(effect["generation"]),
+                "reason": str(effect["reason"]),
+                "quantity_hint": (
+                    int(effect["quantity_hint"]) if effect["quantity_hint"] is not None else None
+                ),
+                "metadata": metadata,
+                "status": str(effect["status"]),
+            }
+        )
+    return effect_payload_digest(payloads)
+
+
 def _extended_expected_payload(
     db: sqlite3.Connection,
     *,
@@ -218,6 +269,15 @@ def _extended_expected_payload(
     if process_fields is None:
         return None
     base = {**base, **process_fields}
+    if "effects_sha256" in payload:
+        effects_sha256 = _effect_rows_digest(
+            effects,
+            event_id=event_id,
+            failures=failures,
+        )
+        if effects_sha256 is None:
+            return None
+        base = {**base, "effects_sha256": effects_sha256}
     if "decision_packet_id" not in payload:
         return base
     if not _table_exists(db, "operator_decision_packets"):
@@ -309,7 +369,8 @@ def verify_database_evidence(path: str | Path) -> DatabaseEvidenceVerification:
 
             effects = db.execute(
                 """
-                SELECT kind,status FROM proposed_effects
+                SELECT kind,status,contract_key,generation,reason,quantity_hint,metadata_json
+                FROM proposed_effects
                 WHERE source_event_id=? ORDER BY effect_id
                 """,
                 (event_id,),
@@ -433,3 +494,95 @@ class IntegrityLedger:
     def head_hash(self) -> str:
         records = self.records()
         return records[-1].record_hash if records else _GENESIS
+
+
+@dataclass(frozen=True, slots=True)
+class IntegrityCheckResult:
+    ok: bool
+    live_fingerprint: str
+    durable_fingerprint: str
+    durable_event_count: int
+    observed_live_fingerprint: str | None = None
+    observed_durable_fingerprint: str | None = None
+
+
+@dataclass(slots=True)
+class ReplayIntegritySentinel:
+    """Periodically prove that in-memory state equals replay of the durable event log.
+
+    The synchronous check runs only at its configured commit cadence. A mismatch latches
+    the runtime halt before telemetry; it never rewrites events or manufactures state.
+    """
+
+    every_n_commits: int = 64
+    _successful_commits: int = 0
+
+    def __post_init__(self) -> None:
+        if self.every_n_commits <= 0:
+            raise ValueError("every_n_commits must be positive")
+
+    def after_commit(
+        self,
+        store: Store,
+        live_state: BookState,
+        *,
+        force: bool = False,
+        observed_state: BookState | None = None,
+        runtime_policy: RuntimePolicyBundle | None = None,
+    ) -> IntegrityCheckResult | None:
+        self._successful_commits += 1
+        if not force and self._successful_commits % self.every_n_commits:
+            return None
+
+        policy = runtime_policy or RuntimePolicyBundle()
+        events = load_signals_in_processing_order(store.path)
+        # Pipeline's admitted intent book excludes durable BLOCKED dispositions.
+        # Recorded fills have a separate reconstruction path and must not be
+        # compared with a book of normalized source intent.
+        durable_state, _ = replay_admitted_events(
+            store.path,
+            events,
+            policy=policy.base,
+            order=ReplayOrder.INPUT,
+        )
+        assert_valid_book(durable_state, max_open_positions=policy.base.max_open_positions)
+        live_fingerprint = state_fingerprint(live_state)
+        durable_fingerprint = state_fingerprint(durable_state)
+        ok = live_fingerprint == durable_fingerprint
+        observed_live_fingerprint = None
+        observed_durable_fingerprint = None
+        if observed_state is not None:
+            durable_observed_state, _ = replay(events, policy.base, order=ReplayOrder.INPUT)
+            assert_valid_book(
+                durable_observed_state,
+                max_open_positions=policy.base.max_open_positions,
+            )
+            observed_live_fingerprint = state_fingerprint(observed_state)
+            observed_durable_fingerprint = state_fingerprint(durable_observed_state)
+            ok = ok and observed_live_fingerprint == observed_durable_fingerprint
+
+        # Durably revoke admission before any diagnostic write can fail or the
+        # process can exit. Telemetry must not be a prerequisite for the latch.
+        if not ok:
+            store.set_halt(True, "replay_integrity_divergence")
+
+        store.heartbeat(
+            "replay-integrity",
+            status="ok" if ok else "diverged",
+            live_fingerprint=live_fingerprint,
+            durable_fingerprint=durable_fingerprint,
+            durable_event_count=len(events),
+            cadence_commits=self.every_n_commits,
+            observed_live_fingerprint=observed_live_fingerprint,
+            observed_durable_fingerprint=observed_durable_fingerprint,
+            policy_fingerprint=policy.fingerprint,
+            replay_order="durable_process_seq",
+        )
+        return IntegrityCheckResult(
+            ok=ok,
+            live_fingerprint=live_fingerprint,
+            durable_fingerprint=durable_fingerprint,
+            durable_event_count=len(events),
+            observed_live_fingerprint=observed_live_fingerprint,
+            observed_durable_fingerprint=observed_durable_fingerprint,
+        )

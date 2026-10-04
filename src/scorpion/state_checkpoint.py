@@ -34,6 +34,8 @@ ON state_checkpoints(policy_fingerprint,checkpoint_id DESC);
 
 @dataclass(frozen=True, slots=True)
 class StateCheckpoint:
+    """Policy-bound checkpoint of all normalized observations, not admitted intent or fills."""
+
     checkpoint_id: int
     policy_fingerprint: str
     signal_count: int
@@ -246,6 +248,7 @@ def restore_state(
     *,
     runtime_policy: RuntimePolicyBundle | None = None,
 ) -> CheckpointRestore:
+    """Restore the observed book; callers must reconstruct admission/fill state separately."""
     policy = runtime_policy or RuntimePolicyBundle()
     checkpoint = load_latest_verified_checkpoint(path, signals, runtime_policy=policy)
     if checkpoint is None:

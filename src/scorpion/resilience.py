@@ -203,7 +203,7 @@ def assess_resilience(
                 )
 
     pipeline_age = _pipeline_age_seconds(health, now=now)
-    if pipeline_age is not None:
+    if pending_raw > 0 and pipeline_age is not None:
         if pipeline_age >= thresholds.pipeline_stale_critical_seconds:
             signals.append(
                 ResilienceSignal(

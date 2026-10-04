@@ -26,6 +26,41 @@ def test_operator_inbox_prioritizes_blocked_system_packet(tmp_path, raw_factory)
     assert inbox[0].disposition == "BLOCKED_SYSTEM"
 
 
+def test_priority_is_applied_before_queue_limit(tmp_path, raw_factory):
+    store = Store(tmp_path / "priority-before-limit.db")
+    normal = Pipeline(store, allowed_author_ids=frozenset({"author"}))
+    for index in range(25):
+        asyncio.run(
+            normal.handle(
+                raw_factory(
+                    "market chatter only",
+                    message_id=f"observation-{index}",
+                    minute=index,
+                )
+            )
+        )
+
+    halted = Pipeline(
+        store,
+        allowed_author_ids=frozenset({"author"}),
+        resilience_assessment=ResilienceAssessment(OperationalMode.HALTED, (), ()),
+    )
+    asyncio.run(
+        halted.handle(
+            raw_factory(
+                "AAPL 200C TODAY @ 1.01",
+                message_id="urgent",
+                minute=30,
+            )
+        )
+    )
+
+    inbox = load_operator_inbox(store.path, limit=20)
+    assert len(inbox) == 20
+    assert inbox[0].priority is QueuePriority.P0
+    assert inbox[0].event_id == halted.recent_events[-1].event_id
+
+
 def test_operator_inbox_marks_old_actionable_packet_stale(tmp_path, raw_factory):
     store = Store(tmp_path / "stale.db")
     pipeline = Pipeline(store, allowed_author_ids=frozenset({"author"}))

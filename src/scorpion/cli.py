@@ -17,16 +17,17 @@ from .causal_trace import trace_event
 from .certification import certify_runtime
 from .decision_store import unresolved_packet_count
 from .domain import EventKind, SignalEvent
+from .execution_journal import ExecutionJournal, FillSource, reconstruct_execution_state
 from .failure_quarantine import load_quarantined, requeue_quarantined
 from .fault_certification import certify_replay_faults
 from .integrity import IntegrityLedger
 from .ops_queue import load_operator_inbox
 from .policy_bundle import RuntimePolicyBundle
-from .processing_order import inspect_processing_order, load_signals_in_processing_order
+from .processing_order import inspect_processing_order
 from .provenance import canonical_json
 from .reconciliation import ExternalPositionObservation, reconcile_positions
 from .recovery import create_verified_backup
-from .replay import ReplayOrder, replay, state_fingerprint
+from .replay import replay, state_fingerprint
 from .resilience import assess_resilience
 from .schema_contract import inspect_schema
 from .stage_trace import load_stage_latency_report, storage_snapshot
@@ -249,13 +250,14 @@ def ops_main() -> None:
     resilience = assess_resilience(health, wal_bytes=storage.wal_bytes)
     latency = load_stage_latency_report(args.db, limit=args.latency_window)
     integrity = IntegrityLedger(args.db).verify_database()
+    policy = RuntimePolicyBundle()
+    execution_truth = reconstruct_execution_state(args.db, runtime_policy=policy)
     inbox = load_operator_inbox(args.db, limit=args.queue_limit)
     schema = inspect_schema(args.db)
     temporal = load_temporal_stream_report(args.db)
     processing_order = inspect_processing_order(args.db)
     feature_store = verify_feature_store(args.db)
     quarantined = load_quarantined(args.db, limit=10)
-    policy = RuntimePolicyBundle()
     payload = {
         "operational_mode": resilience.mode.value,
         "policy_fingerprint": policy.fingerprint,
@@ -296,6 +298,25 @@ def ops_main() -> None:
         "stage_latency": asdict(latency),
         "storage": asdict(storage),
         "integrity": asdict(integrity),
+        "execution_truth": {
+            "available": execution_truth.available,
+            "fills_applied": execution_truth.fills_applied,
+            "journal_integrity": asdict(execution_truth.verification),
+            "anomalies": list(execution_truth.anomalies),
+            "positions": (
+                {
+                    key: {
+                        "status": position.status.value,
+                        "quantity": position.quantity,
+                        "average_price": str(position.average_price),
+                        "generation": position.generation,
+                    }
+                    for key, position in sorted(execution_truth.state.positions.items())
+                }
+                if execution_truth.state is not None
+                else None
+            ),
+        },
     }
     print(json.dumps(payload, indent=2, sort_keys=True, default=str))
 
@@ -321,12 +342,36 @@ def reconcile_main() -> None:
         for row in rows
         if isinstance(row, dict)
     ]
-    signals = load_signals_in_processing_order(args.db)
-    state, _ = replay(signals, order=ReplayOrder.INPUT)
-    report = reconcile_positions(state, observations)
+    execution_truth = reconstruct_execution_state(args.db, runtime_policy=RuntimePolicyBundle())
+    if not execution_truth.available or execution_truth.state is None:
+        payload = {
+            "clean": False,
+            "critical": True,
+            "execution_truth_available": False,
+            "fills_applied": execution_truth.fills_applied,
+            "journal_integrity": asdict(execution_truth.verification),
+            "findings": [
+                {
+                    "code": "execution_truth_unavailable",
+                    "severity": "CRITICAL",
+                    "contract_key": "",
+                    "detail": ";".join(
+                        (*execution_truth.verification.failures, *execution_truth.anomalies)
+                    )
+                    or "execution state could not be reconstructed safely",
+                }
+            ],
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    report = reconcile_positions(execution_truth.state, observations)
     payload = {
         "clean": report.clean,
         "critical": report.critical,
+        "execution_truth_available": True,
+        "fills_applied": execution_truth.fills_applied,
+        "journal_integrity": asdict(execution_truth.verification),
         "findings": [
             {
                 "code": finding.code,
@@ -339,6 +384,70 @@ def reconcile_main() -> None:
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
 
+
+
+def record_fill_main() -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Record an already-executed paper or externally confirmed fill. "
+            "This command never submits an order."
+        )
+    )
+    parser.add_argument("event_id")
+    parser.add_argument("--db", default="scorpion.db")
+    parser.add_argument("--quantity-delta", type=int, required=True)
+    parser.add_argument("--fill-price", type=Decimal, required=True)
+    parser.add_argument(
+        "--source",
+        choices=[source.value for source in FillSource],
+        required=True,
+    )
+    parser.add_argument("--recorded-by", required=True)
+    parser.add_argument("--filled-ts")
+    parser.add_argument("--external-ref")
+    parser.add_argument("--note", default="")
+    parser.add_argument("--final", action="store_true")
+    parser.add_argument("--fill-id")
+    args = parser.parse_args()
+    if args.filled_ts:
+        parsed_fill_time = datetime.fromisoformat(args.filled_ts)
+        if parsed_fill_time.tzinfo is None or parsed_fill_time.utcoffset() is None:
+            raise ValueError("--filled-ts must include a timezone offset")
+        filled_ts = parsed_fill_time.astimezone(UTC)
+    else:
+        filled_ts = datetime.now(UTC)
+    record = ExecutionJournal(args.db, runtime_policy=RuntimePolicyBundle()).record(
+        args.event_id,
+        quantity_delta=args.quantity_delta,
+        fill_price=args.fill_price,
+        source=FillSource(args.source),
+        recorded_by=args.recorded_by,
+        filled_ts_utc=filled_ts,
+        external_ref=args.external_ref,
+        note=args.note,
+        final=args.final,
+        fill_id=args.fill_id,
+    )
+    print(
+        json.dumps(
+            {
+                "sequence": record.sequence,
+                "fill_id": record.fill.fill_id,
+                "event_id": record.fill.event_id,
+                "contract_key": record.fill.contract_key,
+                "generation": record.fill.generation,
+                "quantity_delta": record.fill.quantity_delta,
+                "fill_price": str(record.fill.fill_price),
+                "source": record.fill.source.value,
+                "external_ref": record.fill.external_ref,
+                "filled_ts_utc": record.fill.filled_ts_utc.isoformat(),
+                "record_hash": record.record_hash,
+                "note": "fill recorded; no order was submitted by Scorpion",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 def replay_main() -> None:
     parser = argparse.ArgumentParser()

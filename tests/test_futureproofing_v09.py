@@ -20,7 +20,7 @@ from scorpion.failure_quarantine import (
     requeue_quarantined,
 )
 from scorpion.fault_certification import certify_replay_faults
-from scorpion.pipeline import Pipeline
+from scorpion.pipeline import Pipeline, RuntimeHaltedError
 from scorpion.processing_order import (
     bind_event_processing_order,
     inspect_processing_order,
@@ -28,6 +28,7 @@ from scorpion.processing_order import (
 )
 from scorpion.replay import ReplayOrder, replay, state_fingerprint
 from scorpion.store import Store
+from scorpion.transactional import SQLiteTransitionCommitter
 
 
 class AlwaysFailCommitter:
@@ -188,6 +189,52 @@ def test_poison_revision_quarantines_after_retry_budget_and_can_be_requeued(
             (raw.revision_id,),
         ).fetchone()[0]
     assert status == "PENDING"
+
+
+def test_recovery_stops_at_the_first_quarantined_failure(tmp_path, raw_factory):
+    store = Store(tmp_path / "recovery-quarantine-order.db")
+    first = raw_factory("AAPL 200C TODAY @ 1.00", message_id="poison")
+    later = raw_factory("All out", message_id="later", minute=1)
+    store.append_raw(first)
+    store.append_raw(later)
+
+    Pipeline(store, committer=AlwaysFailCommitter(), maximum_raw_attempts=1)
+
+    assert store.load_signals() == []
+    assert store.runtime_halt() == (True, f"raw_quarantined:{first.revision_id}")
+    assert [raw.revision_id for raw in store.load_pending_raw()] == [later.revision_id]
+    assert load_quarantined(store.path)[0].raw_event_id == first.revision_id
+
+    # Clearing only the runtime flag does not resolve the earlier durable event.
+    store.set_halt(False, "operator cleared flag without resolving quarantine")
+    Pipeline(Store(store.path))
+    assert store.load_signals() == []
+    assert store.runtime_halt()[0] is True
+    assert [raw.revision_id for raw in store.load_pending_raw()] == [later.revision_id]
+
+
+def test_later_transition_cannot_bypass_an_earlier_failed_revision(tmp_path, raw_factory):
+    store = Store(tmp_path / "failed-before-later.db")
+    pipeline = Pipeline(store, committer=AlwaysFailCommitter())
+    first = raw_factory("AAPL 200C TODAY @ 1.00", message_id="earlier")
+    later = raw_factory("All out", message_id="later", minute=1)
+    with pytest.raises(RuntimeError, match="synthetic commit failure"):
+        asyncio.run(pipeline.handle(first))
+
+    pipeline.committer = SQLiteTransitionCommitter()
+    with pytest.raises(RuntimeHaltedError, match="earlier raw revision remains unresolved"):
+        asyncio.run(pipeline.handle(later))
+    assert store.load_signals() == []
+    assert len(store.load_pending_raw()) == 2
+    with store.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM raw_failure_events").fetchone()[0] == 1
+
+    asyncio.run(pipeline.handle(first))
+    asyncio.run(pipeline.handle(later))
+    assert [event.message_id for event in load_signals_in_processing_order(store.path)] == [
+        first.message_id,
+        later.message_id,
+    ]
 
 
 def test_fault_certification_preserves_duplicate_and_split_replay_invariants(

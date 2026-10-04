@@ -77,9 +77,7 @@ def load_operator_inbox(
             FROM operator_decision_packets
             WHERE resolved_ts_utc IS NULL
             ORDER BY created_ts_utc ASC
-            LIMIT ?
-            """,
-            (limit,),
+            """
         ).fetchall()
     finally:
         db.close()
@@ -116,9 +114,8 @@ def load_operator_inbox(
                 reason_codes=tuple(str(value) for value in payload.get("reason_codes", [])),
             )
         )
-    return tuple(
-        sorted(
-            items,
-            key=lambda item: (int(item.priority), -item.age_seconds, item.packet_id),
-        )
+    ranked = sorted(
+        items,
+        key=lambda item: (int(item.priority), -item.age_seconds, item.packet_id),
     )
+    return tuple(ranked[:limit])

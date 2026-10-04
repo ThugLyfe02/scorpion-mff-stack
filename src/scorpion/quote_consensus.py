@@ -8,6 +8,7 @@ from decimal import Decimal
 from enum import StrEnum
 
 from .broker import Quote
+from .fastpath import QuoteCacheStatus, QuoteLookup
 
 
 class QuoteConsensusStatus(StrEnum):
@@ -39,8 +40,8 @@ class ConsensusQuoteCache:
     """Thread-safe multi-provider quote cache with robust median aggregation.
 
     This is a market-data validation surface, not a broker. A fastpath can consume it through
-    the same ``get`` method as the simple quote cache. When providers materially disagree,
-    ``get`` returns None and the caller fails closed rather than choosing an arbitrary feed.
+    the same ``lookup``/``get`` contract as the simple quote cache. A rejected consensus
+    retains its diagnostic reason and cannot produce a usable execution-preparation quote.
     """
 
     def __init__(
@@ -175,3 +176,26 @@ class ConsensusQuoteCache:
         max_age: timedelta = timedelta(seconds=1),
     ) -> Quote | None:
         return self.assess(contract_key, now=now, max_age=max_age).quote
+
+    def lookup(
+        self,
+        contract_key: str,
+        *,
+        now: datetime | None = None,
+        max_age: timedelta = timedelta(seconds=1),
+    ) -> QuoteLookup:
+        timestamp = (now or datetime.now(UTC)).astimezone(UTC)
+        consensus = self.assess(contract_key, now=timestamp, max_age=max_age)
+        if consensus.quote is not None:
+            age_ms = (timestamp - consensus.quote.observed_ts_utc).total_seconds() * 1_000.0
+            return QuoteLookup(QuoteCacheStatus.FRESH, consensus.quote, age_ms, consensus.reason)
+        stale = (
+            consensus.status is QuoteConsensusStatus.NO_FRESH_QUOTES
+            and consensus.providers_seen > 0
+        )
+        return QuoteLookup(
+            QuoteCacheStatus.STALE if stale else QuoteCacheStatus.MISSING,
+            None,
+            None,
+            consensus.reason,
+        )
