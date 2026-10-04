@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .domain import EventKind, RawDiscordMessage, SignalEvent
+from .store import configure_runtime_connection
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +136,7 @@ def bind_event_processing_order(db: sqlite3.Connection, event_id: str) -> int:
 
 def register_raw_receipt(path: str | Path, raw_event_id: str) -> int:
     with sqlite3.connect(str(path), timeout=5.0, isolation_level=None) as db:
-        db.execute("PRAGMA foreign_keys=ON")
+        configure_runtime_connection(db)
         _ensure_tables_only(db)
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -166,6 +167,7 @@ def _decode_signal(payload_json: str) -> SignalEvent:
 
 def load_signals_in_processing_order(path: str | Path) -> list[SignalEvent]:
     with sqlite3.connect(str(path)) as db:
+        configure_runtime_connection(db)
         ensure_processing_order_schema(db)
         rows = db.execute(
             """
@@ -180,6 +182,7 @@ def load_signals_in_processing_order(path: str | Path) -> list[SignalEvent]:
 
 def load_pending_raw_in_receipt_order(path: str | Path) -> list[RawDiscordMessage]:
     with sqlite3.connect(str(path)) as db:
+        configure_runtime_connection(db)
         db.row_factory = sqlite3.Row
         ensure_processing_order_schema(db)
         rows = db.execute(
@@ -224,6 +227,7 @@ def _contiguous(values: list[int]) -> bool:
 
 def inspect_processing_order(path: str | Path) -> ProcessingOrderReport:
     with sqlite3.connect(str(path)) as db:
+        configure_runtime_connection(db)
         ensure_processing_order_schema(db)
         raw_count = int(db.execute("SELECT COUNT(*) FROM raw_discord_events").fetchone()[0])
         signal_count = int(db.execute("SELECT COUNT(*) FROM signal_events").fetchone()[0])

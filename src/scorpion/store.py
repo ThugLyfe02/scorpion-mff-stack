@@ -133,6 +133,19 @@ CREATE TABLE IF NOT EXISTS runtime_flags (
 """
 
 
+def configure_runtime_connection(db: sqlite3.Connection) -> None:
+    """Apply connection-scoped durability before runtime writes or schema migration.
+
+    WAL mode is persistent database configuration; these three settings are not. Historical
+    archives have a separate policy and must not inherit this runtime-writer policy implicitly.
+    """
+    if db.in_transaction:
+        raise ValueError("runtime connection must be configured before a transaction")
+    db.execute("PRAGMA busy_timeout=5000")
+    db.execute("PRAGMA foreign_keys=ON")
+    db.execute("PRAGMA synchronous=FULL")
+
+
 class Store:
     def __init__(self, path: str | pathlib.Path) -> None:
         self.path = str(path)
@@ -144,9 +157,7 @@ class Store:
         db = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
         db.row_factory = sqlite3.Row
         try:
-            db.execute("PRAGMA busy_timeout=5000")
-            db.execute("PRAGMA foreign_keys=ON")
-            db.execute("PRAGMA synchronous=FULL")
+            configure_runtime_connection(db)
             yield db
         finally:
             db.close()

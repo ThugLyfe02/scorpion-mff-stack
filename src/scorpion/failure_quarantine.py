@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
+from .store import configure_runtime_connection
+
 
 class FailureDisposition(StrEnum):
     RETRY = "RETRY"
@@ -83,7 +85,7 @@ def record_processing_failure(
     now = datetime.now(UTC).isoformat()
     clean_error = error[:500]
     with sqlite3.connect(str(path), timeout=5.0, isolation_level=None) as db:
-        db.execute("PRAGMA foreign_keys=ON")
+        configure_runtime_connection(db)
         _ensure_schema(db)
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -149,7 +151,7 @@ def requeue_quarantined(
         raise ValueError("operator is required")
     now = datetime.now(UTC).isoformat()
     with sqlite3.connect(str(path), timeout=5.0, isolation_level=None) as db:
-        db.execute("PRAGMA foreign_keys=ON")
+        configure_runtime_connection(db)
         _ensure_schema(db)
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -187,6 +189,7 @@ def load_quarantined(path: str | Path, *, limit: int = 100) -> tuple[Quarantined
     db = sqlite3.connect(str(path))
     db.row_factory = sqlite3.Row
     try:
+        configure_runtime_connection(db)
         _ensure_schema(db)
         rows = db.execute(
             """
@@ -219,6 +222,7 @@ def load_quarantined(path: str | Path, *, limit: int = 100) -> tuple[Quarantined
 
 def quarantined_count(path: str | Path) -> int:
     with sqlite3.connect(str(path)) as db:
+        configure_runtime_connection(db)
         _ensure_schema(db)
         row = db.execute(
             "SELECT COUNT(*) FROM raw_failure_state WHERE state='QUARANTINED'"
