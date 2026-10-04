@@ -23,6 +23,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[dev]"
+      - name: Verify sealed Program A evidence bytes
+        run: python tools/verify_apex_evidence.py
       - run: ruff check src tests
       - run: mypy src/scorpion
       - run: pytest

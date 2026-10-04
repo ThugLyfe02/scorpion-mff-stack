@@ -1,0 +1,811 @@
+{
+  "authority_added": false,
+  "baseline_gate": "BLOCKED_COMPANION_RESEARCH_CI",
+  "ci": [
+    {
+      "artifact": "ci/mff3.json.gz",
+      "evidence_lines": [
+        "2026-10-04T07:41:03.2685389Z   ref: 00c594fb2b9b477c8ae9286d8aa2d4d6f64cfcf5",
+        "2026-10-04T07:41:03.4439421Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin 00c594fb2b9b477c8ae9286d8aa2d4d6f64cfcf5",
+        "2026-10-04T07:41:04.0667871Z  * branch            00c594fb2b9b477c8ae9286d8aa2d4d6f64cfcf5 -> FETCH_HEAD",
+        "2026-10-04T07:41:04.0747868Z [command]/usr/bin/git checkout --progress --force 00c594fb2b9b477c8ae9286d8aa2d4d6f64cfcf5",
+        "2026-10-04T07:41:04.0966524Z Note: switching to '00c594fb2b9b477c8ae9286d8aa2d4d6f64cfcf5'.",
+        "2026-10-04T07:41:04.1017424Z 00c594fb2b9b477c8ae9286d8aa2d4d6f64cfcf5",
+        "2026-10-04T07:41:12.2655594Z All checks passed!",
+        "2026-10-04T07:41:15.7297724Z Success: no issues found in 31 source files",
+        "2026-10-04T07:41:17.8892342Z 78 passed in 1.34s"
+      ],
+      "job": 111389510239,
+      "job_url": "https://github.com/ThugLyfe02/scorpion-mff-stack/actions/runs/37186529897/job/111389510239",
+      "key": "mff3",
+      "observed_conclusion": "success",
+      "raw_log_sha256": "7409c14c84459d66749c287bc3b463c3bac8bf7b2fd8cfb5962c103e53549356",
+      "repo": "ThugLyfe02/scorpion-mff-stack",
+      "run": 37186529897,
+      "run_url": "https://github.com/ThugLyfe02/scorpion-mff-stack/actions/runs/37186529897",
+      "sha": "00c594fb2b9b477c8ae9286d8aa2d4d6f64cfcf5",
+      "test_result_lines": [
+        "2026-10-04T07:41:17.8892342Z 78 passed in 1.34s"
+      ]
+    },
+    {
+      "artifact": "ci/mff4.json.gz",
+      "evidence_lines": [
+        "2026-10-04T07:45:54.9150059Z   ref: 8f41fadac3bcac545246119aca08e83fed4a9fa4",
+        "2026-10-04T07:45:55.1560828Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin 8f41fadac3bcac545246119aca08e83fed4a9fa4",
+        "2026-10-04T07:45:55.5746581Z  * branch            8f41fadac3bcac545246119aca08e83fed4a9fa4 -> FETCH_HEAD",
+        "2026-10-04T07:45:55.5834920Z [command]/usr/bin/git checkout --progress --force 8f41fadac3bcac545246119aca08e83fed4a9fa4",
+        "2026-10-04T07:45:55.6190420Z Note: switching to '8f41fadac3bcac545246119aca08e83fed4a9fa4'.",
+        "2026-10-04T07:45:55.6270889Z 8f41fadac3bcac545246119aca08e83fed4a9fa4",
+        "2026-10-04T07:46:06.3297365Z All checks passed!",
+        "2026-10-04T07:46:12.6416999Z Success: no issues found in 56 source files",
+        "2026-10-04T07:46:16.5488310Z 168 passed in 3.37s"
+      ],
+      "job": 111390261065,
+      "job_url": "https://github.com/ThugLyfe02/scorpion-mff-stack/actions/runs/37186778700/job/111390261065",
+      "key": "mff4",
+      "observed_conclusion": "success",
+      "raw_log_sha256": "11b61858f313c9198c704da88d969893c2cd72b523d4eeb3cf495ddb5faf03d3",
+      "repo": "ThugLyfe02/scorpion-mff-stack",
+      "run": 37186778700,
+      "run_url": "https://github.com/ThugLyfe02/scorpion-mff-stack/actions/runs/37186778700",
+      "sha": "8f41fadac3bcac545246119aca08e83fed4a9fa4",
+      "test_result_lines": [
+        "2026-10-04T07:46:16.5488310Z 168 passed in 3.37s"
+      ]
+    },
+    {
+      "artifact": "ci/mff5.json.gz",
+      "evidence_lines": [
+        "2026-10-04T08:06:06.9577289Z   ref: c75afb7b08730e7cc7cd6fba67760d550645e67d",
+        "2026-10-04T08:06:07.4616447Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin c75afb7b08730e7cc7cd6fba67760d550645e67d",
+        "2026-10-04T08:06:08.4424289Z  * branch            c75afb7b08730e7cc7cd6fba67760d550645e67d -> FETCH_HEAD",
+        "2026-10-04T08:06:08.4847840Z [command]/usr/bin/git checkout --progress --force c75afb7b08730e7cc7cd6fba67760d550645e67d",
+        "2026-10-04T08:06:08.5732231Z Note: switching to 'c75afb7b08730e7cc7cd6fba67760d550645e67d'.",
+        "2026-10-04T08:06:08.5794712Z c75afb7b08730e7cc7cd6fba67760d550645e67d",
+        "2026-10-04T08:06:20.1095022Z All checks passed!",
+        "2026-10-04T08:06:24.7667933Z Success: no issues found in 199 source files",
+        "2026-10-04T08:06:39.6300379Z 482 passed in 13.73s"
+      ],
+      "job": 111393461527,
+      "job_url": "https://github.com/ThugLyfe02/scorpion-mff-stack/actions/runs/37187826994/job/111393461527",
+      "key": "mff5",
+      "observed_conclusion": "success",
+      "raw_log_sha256": "56146196030055a9baffe265574673906517d14316b3cf96c4959fa3ca9f344f",
+      "repo": "ThugLyfe02/scorpion-mff-stack",
+      "run": 37187826994,
+      "run_url": "https://github.com/ThugLyfe02/scorpion-mff-stack/actions/runs/37187826994",
+      "sha": "c75afb7b08730e7cc7cd6fba67760d550645e67d",
+      "test_result_lines": [
+        "2026-10-04T08:06:39.6300379Z 482 passed in 13.73s"
+      ]
+    },
+    {
+      "artifact": "ci/mff6.json.gz",
+      "evidence_lines": [
+        "2026-10-04T08:06:07.5015405Z   ref: 7942c0ff59689c7d11a78c972c22a65da7c54626",
+        "2026-10-04T08:06:07.7613888Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin 7942c0ff59689c7d11a78c972c22a65da7c54626",
+        "2026-10-04T08:06:08.3553461Z  * branch            7942c0ff59689c7d11a78c972c22a65da7c54626 -> FETCH_HEAD",
+        "2026-10-04T08:06:08.3662473Z [command]/usr/bin/git checkout --progress --force 7942c0ff59689c7d11a78c972c22a65da7c54626",
+        "2026-10-04T08:06:08.4229886Z Note: switching to '7942c0ff59689c7d11a78c972c22a65da7c54626'.",
+        "2026-10-04T08:06:08.4326182Z 7942c0ff59689c7d11a78c972c22a65da7c54626",
+        "2026-10-04T08:06:21.1233570Z All checks passed!",
+        "2026-10-04T08:06:30.9481411Z Success: no issues found in 205 source files",
+        "2026-10-04T08:06:47.0091966Z 536 passed in 14.86s"
+      ],
+      "job": 111393460315,
+      "job_url": "https://github.com/ThugLyfe02/scorpion-mff-stack/actions/runs/37187826632/job/111393460315",
+      "key": "mff6",
+      "observed_conclusion": "success",
+      "raw_log_sha256": "a8a83b7480c6ac5267e0cedcdd535e35934778cb9aaea3356caf38253ec214f3",
+      "repo": "ThugLyfe02/scorpion-mff-stack",
+      "run": 37187826632,
+      "run_url": "https://github.com/ThugLyfe02/scorpion-mff-stack/actions/runs/37187826632",
+      "sha": "7942c0ff59689c7d11a78c972c22a65da7c54626",
+      "test_result_lines": [
+        "2026-10-04T08:06:47.0091966Z 536 passed in 14.86s"
+      ]
+    }
+  ],
+  "limits": [
+    "Semantic equality includes one named incomplete case per pair.",
+    "320 observations cannot certify production tails or active-position workload latency.",
+    "Shared scanner protocol acceptance is distinct from causal eligibility and execution authority.",
+    "A byte-valid evidence pack is not approval to promote or deploy."
+  ],
+  "measurement_date_utc": "2026-10-04",
+  "program": "A",
+  "prospective_performance_claim": false,
+  "repository": "ThugLyfe02/scorpion-mff-stack",
+  "schema_version": 1,
+  "source_pairs": [
+    {
+      "original": {
+        "benchmarks": {
+          "comparable_core_compute": {
+            "distribution": {
+              "max": 2035.872,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 18.467,
+              "p90": 23.626,
+              "p95": 30.696,
+              "p99": 57.185,
+              "p99.9": 2035.872,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "parse/association/reduce/invariant compute; perf_counter_ns"
+          },
+          "comparable_durable_pipeline": {
+            "distribution": {
+              "max": 10923.361,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 1233.35,
+              "p90": 1428.901,
+              "p95": 1816.536,
+              "p99": 4575.822,
+              "p99.9": 10923.361,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "await Pipeline.handle from call to durable return; perf_counter_ns"
+          }
+        },
+        "capture_status": "VALID_CAPTURE",
+        "corpus_sha256": "dc27c31bc0e18ef28f289945be92ebe09e72986367ef04f128085f357291d1a5",
+        "probe_sha256": "0a3d5be865f021629054838e43278fc5dad270c70da8f98bd4c1d65ebe105633",
+        "source": {
+          "head_sha": "bfa36a3a1e5512b18e3e3906e535231fd9a65805",
+          "parser_source_sha256": "d401105d37fdbd32aab2a712920d493ae1e8670c5e4c928bf8a161e0e003e92c",
+          "parser_version": "v2",
+          "repo": "/workspace/scratch/d875014e1871/mff-original-pr3",
+          "runtime_policy": {
+            "payload": {
+              "first_entry_quantity": 1,
+              "live_submission_enabled": false,
+              "max_dislocation_from_reference": "0.25",
+              "max_open_positions": 2,
+              "price_limit_markup": "0.15",
+              "skip_fridays": true
+            },
+            "scope": "DEFAULT_POLICY only; no RuntimePolicyBundle in head"
+          },
+          "runtime_policy_payload_sha256": "74d82ce3d8805e1c8510cab1314d14eecbf81b0d1b7fb089f2a7edddc194fb7e",
+          "source_manifest_sha256": "e381afdd9e33e33b44285126799285c82de4e24cefd0ec8f0785a62013f03e6c",
+          "strategy_sha256": "b5a132d73ebe52cfb12e4903966cdf170428306940b5fa5d12c24b0717a8c1e0",
+          "tracked_changes": "",
+          "tree_sha": "b76358d7cde5c2ddbcf6cae77077367f0992e22d"
+        }
+      },
+      "pr": 3,
+      "reconciled": {
+        "benchmarks": {
+          "comparable_core_compute": {
+            "distribution": {
+              "max": 140.929,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 18.588,
+              "p90": 24.617,
+              "p95": 32.729,
+              "p99": 123.824,
+              "p99.9": 140.929,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "parse/association/reduce/invariant compute; perf_counter_ns"
+          },
+          "comparable_durable_pipeline": {
+            "distribution": {
+              "max": 48863.367,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 1593.645,
+              "p90": 2255.978,
+              "p95": 2974.144,
+              "p99": 6123.949,
+              "p99.9": 48863.367,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "await Pipeline.handle from call to durable return; perf_counter_ns"
+          }
+        },
+        "capture_status": "VALID_CAPTURE",
+        "corpus_sha256": "dc27c31bc0e18ef28f289945be92ebe09e72986367ef04f128085f357291d1a5",
+        "probe_sha256": "0a3d5be865f021629054838e43278fc5dad270c70da8f98bd4c1d65ebe105633",
+        "source": {
+          "head_sha": "00c594fb2b9b477c8ae9286d8aa2d4d6f64cfcf5",
+          "parser_source_sha256": "d401105d37fdbd32aab2a712920d493ae1e8670c5e4c928bf8a161e0e003e92c",
+          "parser_version": "v2",
+          "repo": "/workspace/scratch/d875014e1871/mff-pr3",
+          "runtime_policy": {
+            "payload": {
+              "first_entry_quantity": 1,
+              "live_submission_enabled": false,
+              "max_dislocation_from_reference": "0.25",
+              "max_open_positions": 2,
+              "price_limit_markup": "0.15",
+              "skip_fridays": true
+            },
+            "scope": "DEFAULT_POLICY only; no RuntimePolicyBundle in head"
+          },
+          "runtime_policy_payload_sha256": "74d82ce3d8805e1c8510cab1314d14eecbf81b0d1b7fb089f2a7edddc194fb7e",
+          "source_manifest_sha256": "4adb60c3413ea8036c002ab98ed644648c0bf173a51bdf1cdf243fb7e071f34d",
+          "strategy_sha256": "b5a132d73ebe52cfb12e4903966cdf170428306940b5fa5d12c24b0717a8c1e0",
+          "tracked_changes": "",
+          "tree_sha": "2b4aff5dde5f255ee726946fe21248d6f3b7fe16"
+        }
+      },
+      "semantic_differential": {
+        "after_incomplete_cases": [
+          "malformed_expiry"
+        ],
+        "after_semantic_sha256": "ed201ede235d37d2afd2dde8fc25eb349716edee05b6fbae80a66dc7c09fe45c",
+        "after_sha": "00c594fb2b9b477c8ae9286d8aa2d4d6f64cfcf5",
+        "before_incomplete_cases": [
+          "malformed_expiry"
+        ],
+        "before_semantic_sha256": "ed201ede235d37d2afd2dde8fc25eb349716edee05b6fbae80a66dc7c09fe45c",
+        "before_sha": "bfa36a3a1e5512b18e3e3906e535231fd9a65805",
+        "case_count_after": 40,
+        "case_count_before": 40,
+        "cases": [],
+        "category_counts": {},
+        "changed_cases": 0,
+        "limits": "Differences are classified, never auto-approved. Equality covers this finite corpus only.",
+        "same_corpus": true,
+        "same_probe": true,
+        "semantic_cases_complete": false,
+        "stable_sources": true,
+        "status": "IDENTICAL_WITH_INCOMPLETE_CASES"
+      }
+    },
+    {
+      "original": {
+        "benchmarks": {
+          "comparable_core_compute": {
+            "distribution": {
+              "max": 141.119,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 29.134,
+              "p90": 35.152,
+              "p95": 57.446,
+              "p99": 94.34,
+              "p99.9": 141.119,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "parse/association/reduce/invariant compute; perf_counter_ns"
+          },
+          "comparable_durable_pipeline": {
+            "distribution": {
+              "max": 86565.665,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 1564.151,
+              "p90": 1918.247,
+              "p95": 2061.079,
+              "p99": 3590.609,
+              "p99.9": 86565.665,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "await Pipeline.handle from call to durable return; perf_counter_ns"
+          }
+        },
+        "capture_status": "VALID_CAPTURE",
+        "corpus_sha256": "dc27c31bc0e18ef28f289945be92ebe09e72986367ef04f128085f357291d1a5",
+        "probe_sha256": "0a3d5be865f021629054838e43278fc5dad270c70da8f98bd4c1d65ebe105633",
+        "source": {
+          "head_sha": "35d37388fc3b182f2e167c9a6abdecf66bcf6c45",
+          "parser_source_sha256": "ef94460e71f7bdfe3dbaec2df2e0ea67e8e4b421924bebb2a60bedef4510829b",
+          "parser_version": "v3",
+          "repo": "/workspace/scratch/d875014e1871/mff-original-pr4",
+          "runtime_policy": {
+            "payload": {
+              "first_entry_quantity": 1,
+              "live_submission_enabled": false,
+              "max_dislocation_from_reference": "0.25",
+              "max_open_positions": 2,
+              "price_limit_markup": "0.15",
+              "skip_fridays": true
+            },
+            "scope": "DEFAULT_POLICY only; no RuntimePolicyBundle in head"
+          },
+          "runtime_policy_payload_sha256": "74d82ce3d8805e1c8510cab1314d14eecbf81b0d1b7fb089f2a7edddc194fb7e",
+          "source_manifest_sha256": "01a7ff29dcc6fa319d54cff9ec2da58b0878dce20282deede9b6c9f0c6ce0330",
+          "strategy_sha256": "b5a132d73ebe52cfb12e4903966cdf170428306940b5fa5d12c24b0717a8c1e0",
+          "tracked_changes": "",
+          "tree_sha": "f9eabddf98616f8c88dcb7e37d835155d2eb92f3"
+        }
+      },
+      "pr": 4,
+      "reconciled": {
+        "benchmarks": {
+          "comparable_core_compute": {
+            "distribution": {
+              "max": 136.122,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 29.674,
+              "p90": 36.705,
+              "p95": 48.622,
+              "p99": 101.381,
+              "p99.9": 136.122,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "parse/association/reduce/invariant compute; perf_counter_ns"
+          },
+          "comparable_durable_pipeline": {
+            "distribution": {
+              "max": 8792.079,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 1880.37,
+              "p90": 2313.012,
+              "p95": 2676.462,
+              "p99": 5507.945,
+              "p99.9": 8792.079,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "await Pipeline.handle from call to durable return; perf_counter_ns"
+          }
+        },
+        "capture_status": "VALID_CAPTURE",
+        "corpus_sha256": "dc27c31bc0e18ef28f289945be92ebe09e72986367ef04f128085f357291d1a5",
+        "probe_sha256": "0a3d5be865f021629054838e43278fc5dad270c70da8f98bd4c1d65ebe105633",
+        "source": {
+          "head_sha": "8f41fadac3bcac545246119aca08e83fed4a9fa4",
+          "parser_source_sha256": "ef94460e71f7bdfe3dbaec2df2e0ea67e8e4b421924bebb2a60bedef4510829b",
+          "parser_version": "v3",
+          "repo": "/workspace/scratch/d875014e1871/mff-pr4",
+          "runtime_policy": {
+            "payload": {
+              "first_entry_quantity": 1,
+              "live_submission_enabled": false,
+              "max_dislocation_from_reference": "0.25",
+              "max_open_positions": 2,
+              "price_limit_markup": "0.15",
+              "skip_fridays": true
+            },
+            "scope": "DEFAULT_POLICY only; no RuntimePolicyBundle in head"
+          },
+          "runtime_policy_payload_sha256": "74d82ce3d8805e1c8510cab1314d14eecbf81b0d1b7fb089f2a7edddc194fb7e",
+          "source_manifest_sha256": "da9d4015307b5ec02e28a64cd866f5f405ef35414f305c2536abb2b07974b875",
+          "strategy_sha256": "b5a132d73ebe52cfb12e4903966cdf170428306940b5fa5d12c24b0717a8c1e0",
+          "tracked_changes": "",
+          "tree_sha": "74923f5cbd95cb0178d67454c32f0085d379ff8e"
+        }
+      },
+      "semantic_differential": {
+        "after_incomplete_cases": [
+          "malformed_expiry"
+        ],
+        "after_semantic_sha256": "ddc3dfc088ceb54b1a34be7ca83001877dd193d8a532a60af2625a756a9e124a",
+        "after_sha": "8f41fadac3bcac545246119aca08e83fed4a9fa4",
+        "before_incomplete_cases": [
+          "malformed_expiry"
+        ],
+        "before_semantic_sha256": "ddc3dfc088ceb54b1a34be7ca83001877dd193d8a532a60af2625a756a9e124a",
+        "before_sha": "35d37388fc3b182f2e167c9a6abdecf66bcf6c45",
+        "case_count_after": 40,
+        "case_count_before": 40,
+        "cases": [],
+        "category_counts": {},
+        "changed_cases": 0,
+        "limits": "Differences are classified, never auto-approved. Equality covers this finite corpus only.",
+        "same_corpus": true,
+        "same_probe": true,
+        "semantic_cases_complete": false,
+        "stable_sources": true,
+        "status": "IDENTICAL_WITH_INCOMPLETE_CASES"
+      }
+    },
+    {
+      "original": {
+        "benchmarks": {
+          "comparable_core_compute": {
+            "distribution": {
+              "max": 238.794,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 37.014,
+              "p90": 45.037,
+              "p95": 68.332,
+              "p99": 129.352,
+              "p99.9": 238.794,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "parse/association/reduce/invariant compute; perf_counter_ns"
+          },
+          "comparable_durable_pipeline": {
+            "distribution": {
+              "max": 15837.666,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 1626.354,
+              "p90": 2328.886,
+              "p95": 2453.772,
+              "p99": 5535.776,
+              "p99.9": 15837.666,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "await Pipeline.handle from call to durable return; perf_counter_ns"
+          }
+        },
+        "capture_status": "VALID_CAPTURE",
+        "corpus_sha256": "dc27c31bc0e18ef28f289945be92ebe09e72986367ef04f128085f357291d1a5",
+        "probe_sha256": "0a3d5be865f021629054838e43278fc5dad270c70da8f98bd4c1d65ebe105633",
+        "source": {
+          "head_sha": "79faaabf1ff33e37c8d31b72b28ef2744d478598",
+          "parser_source_sha256": "31dffaaf7a2e9e3b0c0023b4c1d424190e59a3f8d0eb37c35a9ef9715eed98eb",
+          "parser_version": "v3",
+          "repo": "/workspace/scratch/d875014e1871/mff-original-pr5",
+          "runtime_policy": {
+            "native_fingerprint": "c13fdc64c5a49b455a7a3b5544e51b8699d7636d9f059013bc9c3fe4b61bacfb",
+            "payload": {
+              "base": {
+                "first_entry_quantity": 1,
+                "live_submission_enabled": false,
+                "max_dislocation_from_reference": "0.25",
+                "max_open_positions": 2,
+                "price_limit_markup": "0.15",
+                "skip_fridays": true
+              },
+              "eligibility": {
+                "block_lotto_language": true,
+                "etf_symbols": [
+                  "ARKK",
+                  "DIA",
+                  "IWM",
+                  "QQQ",
+                  "SOXL",
+                  "SPY",
+                  "TQQQ",
+                  "TSLL",
+                  "UPRO",
+                  "XLF",
+                  "XLK"
+                ],
+                "research_only_channel_ids": [
+                  "1231301953972207667"
+                ]
+              },
+              "policy_version": "runtime-policy-v1",
+              "selective_review": {
+                "minimum_association_confidence": 0.95,
+                "minimum_parser_confidence": 0.97,
+                "suspicious_source_shift_score": 1.0
+              }
+            },
+            "scope": "RuntimePolicyBundle"
+          },
+          "runtime_policy_payload_sha256": "63ad5fdd5ac582a067959c409cd75ccb23e4cad6cdebbd03b8ea84f099a24a87",
+          "source_manifest_sha256": "7c88119022c1742d1155f35dca931afa5bf140d256ab1b5ba502471b60b6923c",
+          "strategy_sha256": "b5a132d73ebe52cfb12e4903966cdf170428306940b5fa5d12c24b0717a8c1e0",
+          "tracked_changes": "",
+          "tree_sha": "9d6221a27510db7e5f99721683d4f39b1326df42"
+        }
+      },
+      "pr": 5,
+      "reconciled": {
+        "benchmarks": {
+          "comparable_core_compute": {
+            "distribution": {
+              "max": 163.853,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 29.724,
+              "p90": 38.327,
+              "p95": 53.53,
+              "p99": 111.476,
+              "p99.9": 163.853,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "parse/association/reduce/invariant compute; perf_counter_ns"
+          },
+          "comparable_durable_pipeline": {
+            "distribution": {
+              "max": 9370.137,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 2086.727,
+              "p90": 2834.687,
+              "p95": 4298.389,
+              "p99": 7151.845,
+              "p99.9": 9370.137,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "await Pipeline.handle from call to durable return; perf_counter_ns"
+          }
+        },
+        "capture_status": "VALID_CAPTURE",
+        "corpus_sha256": "dc27c31bc0e18ef28f289945be92ebe09e72986367ef04f128085f357291d1a5",
+        "probe_sha256": "0a3d5be865f021629054838e43278fc5dad270c70da8f98bd4c1d65ebe105633",
+        "source": {
+          "head_sha": "c75afb7b08730e7cc7cd6fba67760d550645e67d",
+          "parser_source_sha256": "ef94460e71f7bdfe3dbaec2df2e0ea67e8e4b421924bebb2a60bedef4510829b",
+          "parser_version": "v3",
+          "repo": "/workspace/scratch/d875014e1871/mff-pr5",
+          "runtime_policy": {
+            "native_fingerprint": "c13fdc64c5a49b455a7a3b5544e51b8699d7636d9f059013bc9c3fe4b61bacfb",
+            "payload": {
+              "base": {
+                "first_entry_quantity": 1,
+                "live_submission_enabled": false,
+                "max_dislocation_from_reference": "0.25",
+                "max_open_positions": 2,
+                "price_limit_markup": "0.15",
+                "skip_fridays": true
+              },
+              "eligibility": {
+                "block_lotto_language": true,
+                "etf_symbols": [
+                  "ARKK",
+                  "DIA",
+                  "IWM",
+                  "QQQ",
+                  "SOXL",
+                  "SPY",
+                  "TQQQ",
+                  "TSLL",
+                  "UPRO",
+                  "XLF",
+                  "XLK"
+                ],
+                "research_only_channel_ids": [
+                  "1231301953972207667"
+                ]
+              },
+              "policy_version": "runtime-policy-v1",
+              "selective_review": {
+                "minimum_association_confidence": 0.95,
+                "minimum_parser_confidence": 0.97,
+                "suspicious_source_shift_score": 1.0
+              }
+            },
+            "scope": "RuntimePolicyBundle"
+          },
+          "runtime_policy_payload_sha256": "63ad5fdd5ac582a067959c409cd75ccb23e4cad6cdebbd03b8ea84f099a24a87",
+          "source_manifest_sha256": "10e3f1ec57fab55a66110aa27e37fa51a26a845da6e606c0100470a69f0ff86d",
+          "strategy_sha256": "b5a132d73ebe52cfb12e4903966cdf170428306940b5fa5d12c24b0717a8c1e0",
+          "tracked_changes": "",
+          "tree_sha": "8454ff6431864f8426d113b7570b2c0bfc1de77b"
+        }
+      },
+      "semantic_differential": {
+        "after_incomplete_cases": [
+          "malformed_expiry"
+        ],
+        "after_semantic_sha256": "1be4594a436e8c9a668af76d03f3b887323b7fed6a5d62a44040980d9304397e",
+        "after_sha": "c75afb7b08730e7cc7cd6fba67760d550645e67d",
+        "before_incomplete_cases": [
+          "malformed_expiry"
+        ],
+        "before_semantic_sha256": "1be4594a436e8c9a668af76d03f3b887323b7fed6a5d62a44040980d9304397e",
+        "before_sha": "79faaabf1ff33e37c8d31b72b28ef2744d478598",
+        "case_count_after": 40,
+        "case_count_before": 40,
+        "cases": [],
+        "category_counts": {},
+        "changed_cases": 0,
+        "limits": "Differences are classified, never auto-approved. Equality covers this finite corpus only.",
+        "same_corpus": true,
+        "same_probe": true,
+        "semantic_cases_complete": false,
+        "stable_sources": true,
+        "status": "IDENTICAL_WITH_INCOMPLETE_CASES"
+      }
+    },
+    {
+      "original": {
+        "benchmarks": {
+          "comparable_core_compute": {
+            "distribution": {
+              "max": 241.137,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 38.067,
+              "p90": 68.191,
+              "p95": 107.129,
+              "p99": 211.304,
+              "p99.9": 241.137,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "parse/association/reduce/invariant compute; perf_counter_ns"
+          },
+          "comparable_durable_pipeline": {
+            "distribution": {
+              "max": 14970.209,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 1755.225,
+              "p90": 2334.345,
+              "p95": 2705.475,
+              "p99": 5782.202,
+              "p99.9": 14970.209,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "await Pipeline.handle from call to durable return; perf_counter_ns"
+          }
+        },
+        "capture_status": "VALID_CAPTURE",
+        "corpus_sha256": "dc27c31bc0e18ef28f289945be92ebe09e72986367ef04f128085f357291d1a5",
+        "probe_sha256": "0a3d5be865f021629054838e43278fc5dad270c70da8f98bd4c1d65ebe105633",
+        "source": {
+          "head_sha": "9f17d43f3f70d508278370b33e44b014d3cadfa4",
+          "parser_source_sha256": "31dffaaf7a2e9e3b0c0023b4c1d424190e59a3f8d0eb37c35a9ef9715eed98eb",
+          "parser_version": "v3",
+          "repo": "/workspace/scratch/d875014e1871/mff-original-pr6",
+          "runtime_policy": {
+            "native_fingerprint": "c13fdc64c5a49b455a7a3b5544e51b8699d7636d9f059013bc9c3fe4b61bacfb",
+            "payload": {
+              "base": {
+                "first_entry_quantity": 1,
+                "live_submission_enabled": false,
+                "max_dislocation_from_reference": "0.25",
+                "max_open_positions": 2,
+                "price_limit_markup": "0.15",
+                "skip_fridays": true
+              },
+              "eligibility": {
+                "block_lotto_language": true,
+                "etf_symbols": [
+                  "ARKK",
+                  "DIA",
+                  "IWM",
+                  "QQQ",
+                  "SOXL",
+                  "SPY",
+                  "TQQQ",
+                  "TSLL",
+                  "UPRO",
+                  "XLF",
+                  "XLK"
+                ],
+                "research_only_channel_ids": [
+                  "1231301953972207667"
+                ]
+              },
+              "policy_version": "runtime-policy-v1",
+              "selective_review": {
+                "minimum_association_confidence": 0.95,
+                "minimum_parser_confidence": 0.97,
+                "suspicious_source_shift_score": 1.0
+              }
+            },
+            "scope": "RuntimePolicyBundle"
+          },
+          "runtime_policy_payload_sha256": "63ad5fdd5ac582a067959c409cd75ccb23e4cad6cdebbd03b8ea84f099a24a87",
+          "source_manifest_sha256": "f98714381f63268128715397f26280da235cde841601a7c2fd656396c59b8c93",
+          "strategy_sha256": "b5a132d73ebe52cfb12e4903966cdf170428306940b5fa5d12c24b0717a8c1e0",
+          "tracked_changes": "",
+          "tree_sha": "1548355b92af748fb0b1967d1b17623325dccc1d"
+        }
+      },
+      "pr": 6,
+      "reconciled": {
+        "benchmarks": {
+          "comparable_core_compute": {
+            "distribution": {
+              "max": 237.012,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 30.465,
+              "p90": 84.185,
+              "p95": 124.926,
+              "p99": 202.371,
+              "p99.9": 237.012,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "parse/association/reduce/invariant compute; perf_counter_ns"
+          },
+          "comparable_durable_pipeline": {
+            "distribution": {
+              "max": 38039.639,
+              "method": "nearest_rank: sorted[ceil(q*n)-1]",
+              "p50": 2381.825,
+              "p90": 3509.458,
+              "p95": 5946.075,
+              "p99": 10146.37,
+              "p99.9": 38039.639,
+              "samples": 320,
+              "tail_resolution_note": "At 300-999 samples p99.9 equals max; not a stable tail estimate",
+              "unit": "microseconds"
+            },
+            "measurement": "await Pipeline.handle from call to durable return; perf_counter_ns"
+          }
+        },
+        "capture_status": "VALID_CAPTURE",
+        "corpus_sha256": "dc27c31bc0e18ef28f289945be92ebe09e72986367ef04f128085f357291d1a5",
+        "probe_sha256": "0a3d5be865f021629054838e43278fc5dad270c70da8f98bd4c1d65ebe105633",
+        "source": {
+          "head_sha": "7942c0ff59689c7d11a78c972c22a65da7c54626",
+          "parser_source_sha256": "ef94460e71f7bdfe3dbaec2df2e0ea67e8e4b421924bebb2a60bedef4510829b",
+          "parser_version": "v3",
+          "repo": "/workspace/scratch/d875014e1871/mff-pr6",
+          "runtime_policy": {
+            "native_fingerprint": "c13fdc64c5a49b455a7a3b5544e51b8699d7636d9f059013bc9c3fe4b61bacfb",
+            "payload": {
+              "base": {
+                "first_entry_quantity": 1,
+                "live_submission_enabled": false,
+                "max_dislocation_from_reference": "0.25",
+                "max_open_positions": 2,
+                "price_limit_markup": "0.15",
+                "skip_fridays": true
+              },
+              "eligibility": {
+                "block_lotto_language": true,
+                "etf_symbols": [
+                  "ARKK",
+                  "DIA",
+                  "IWM",
+                  "QQQ",
+                  "SOXL",
+                  "SPY",
+                  "TQQQ",
+                  "TSLL",
+                  "UPRO",
+                  "XLF",
+                  "XLK"
+                ],
+                "research_only_channel_ids": [
+                  "1231301953972207667"
+                ]
+              },
+              "policy_version": "runtime-policy-v1",
+              "selective_review": {
+                "minimum_association_confidence": 0.95,
+                "minimum_parser_confidence": 0.97,
+                "suspicious_source_shift_score": 1.0
+              }
+            },
+            "scope": "RuntimePolicyBundle"
+          },
+          "runtime_policy_payload_sha256": "63ad5fdd5ac582a067959c409cd75ccb23e4cad6cdebbd03b8ea84f099a24a87",
+          "source_manifest_sha256": "2a3d26f814da2dad2ea207d3019b55e7d05edbda5f08ce4516185cd6c59a237d",
+          "strategy_sha256": "b5a132d73ebe52cfb12e4903966cdf170428306940b5fa5d12c24b0717a8c1e0",
+          "tracked_changes": "",
+          "tree_sha": "b4d7c6a7392cf62aa980aaa5644b822a1da96a64"
+        }
+      },
+      "semantic_differential": {
+        "after_incomplete_cases": [
+          "malformed_expiry"
+        ],
+        "after_semantic_sha256": "1be4594a436e8c9a668af76d03f3b887323b7fed6a5d62a44040980d9304397e",
+        "after_sha": "7942c0ff59689c7d11a78c972c22a65da7c54626",
+        "before_incomplete_cases": [
+          "malformed_expiry"
+        ],
+        "before_semantic_sha256": "1be4594a436e8c9a668af76d03f3b887323b7fed6a5d62a44040980d9304397e",
+        "before_sha": "9f17d43f3f70d508278370b33e44b014d3cadfa4",
+        "case_count_after": 40,
+        "case_count_before": 40,
+        "cases": [],
+        "category_counts": {},
+        "changed_cases": 0,
+        "limits": "Differences are classified, never auto-approved. Equality covers this finite corpus only.",
+        "same_corpus": true,
+        "same_probe": true,
+        "semantic_cases_complete": false,
+        "stable_sources": true,
+        "status": "IDENTICAL_WITH_INCOMPLETE_CASES"
+      }
+    }
+  ]
+}
