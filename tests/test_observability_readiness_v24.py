@@ -136,6 +136,41 @@ def test_hot_path_benchmark_separates_compute_receipt_and_full_path(tmp_path):
     assert report.durable_receipt.p95_us > 0
     assert report.full_path.p95_us >= report.durable_receipt.p50_us
     assert report.db_precommit_p95_us >= 0
+    assert dict(report.core_event_kind_counts) == {"ENTRY": 3, "AMBIGUOUS": 3, "IGNORE": 2}
+
+
+def test_hot_path_core_fixture_exercises_entry_followup_and_rejection():
+    from scorpion.hot_path_benchmark import _core_corpus
+    from scorpion.profiling import profile_messages
+
+    profile = profile_messages(
+        _core_corpus(6, NOW),
+        allowed_author_ids=frozenset({"benchmark-author"}),
+    )
+    assert [sample.kind.value for sample in profile.samples] == [
+        "ENTRY", "AMBIGUOUS", "IGNORE", "ENTRY", "AMBIGUOUS", "IGNORE",
+    ]
+
+
+def test_hot_path_benchmark_refuses_success_for_wrong_guild_core(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from scorpion import hot_path_benchmark
+
+    corpus = hot_path_benchmark._core_corpus
+    monkeypatch.setattr(
+        hot_path_benchmark,
+        "_core_corpus",
+        lambda samples, when: tuple(
+            replace(raw, guild_id="wrong-guild") for raw in corpus(samples, when)
+        ),
+    )
+    report = benchmark_hot_path(
+        samples=8, workspace=tmp_path, now=NOW, policy=_wide_benchmark_policy(),
+    )
+    assert report.passed is False
+    assert "core_fixture_did_not_exercise_entry" in report.failures
+    assert dict(report.core_event_kind_counts) == {"IGNORE": 8}
 
 
 def test_operator_observability_exposes_exact_release_safety_and_consumer_health(tmp_path):

@@ -8,11 +8,13 @@ import sqlite3
 import sys
 import tempfile
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .accuracy import percentile
+from .config import GUILD_ID
 from .domain import RawDiscordMessage
 from .durable_ingress import append_raw_with_receipt
 from .pipeline import Pipeline
@@ -73,6 +75,7 @@ class HotPathBenchmarkReport:
     synchronous_mode: int
     passed: bool
     failures: tuple[str, ...]
+    core_event_kind_counts: tuple[tuple[str, int], ...]
 
 
 def _summary(values: list[int]) -> BenchmarkPercentiles:
@@ -96,7 +99,7 @@ def _message(
     timestamp = when + timedelta(milliseconds=index)
     return RawDiscordMessage(
         message_id=f"benchmark-{index}",
-        guild_id="benchmark-guild",
+        guild_id=GUILD_ID,
         channel_id=channel_id,
         author_id="benchmark-author",
         content=content,
@@ -180,6 +183,9 @@ def benchmark_hot_path(
         _core_corpus(samples, timestamp),
         allowed_author_ids=frozenset({"benchmark-author"}),
     )
+    core_counts = Counter(sample.kind.value for sample in core_profile.samples)
+    if core_counts.get("ENTRY", 0) == 0:
+        failures.append("core_fixture_did_not_exercise_entry")
     core = BenchmarkPercentiles(
         p50_us=core_profile.total.p50_us,
         p95_us=core_profile.total.p95_us,
@@ -242,10 +248,11 @@ def benchmark_hot_path(
         failures.append("benchmark_store_not_full_sync")
 
     material = {
-        "version": "hot-path-benchmark-v1",
+        "version": "hot-path-benchmark-v2",
         "generated_ts_utc": timestamp.isoformat(),
         "samples": samples,
         "core": asdict(core),
+        "core_event_kind_counts": sorted(core_counts.items()),
         "durable_receipt": asdict(receipt),
         "full_path": asdict(full_path),
         "db_precommit_p95_us": db_precommit_p95_us,
@@ -277,4 +284,5 @@ def benchmark_hot_path(
         synchronous_mode=synchronous_mode,
         passed=not failures,
         failures=tuple(failures),
+        core_event_kind_counts=tuple(sorted(core_counts.items())),
     )
