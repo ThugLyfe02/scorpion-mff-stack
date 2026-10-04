@@ -336,3 +336,20 @@ def test_unknown_schema_is_rejected() -> None:
     _rehash(payload)
     with pytest.raises(ScannerContextError, match="unsupported scanner schema"):
         parse_scanner_observation(payload)
+
+
+@pytest.mark.parametrize("quality", [None, {}, {"blocking_reasons": None}])
+def test_absent_quality_attestation_cannot_appear_clean(quality: object) -> None:
+    payload = _payload()
+    payload["quality"] = quality
+    _rehash(payload)
+    with pytest.raises(ScannerContextError, match="quality"):
+        parse_scanner_observation(payload)
+
+
+def test_omitted_quality_attestation_is_rejected() -> None:
+    payload = _payload()
+    del payload["quality"]
+    _rehash(payload)
+    with pytest.raises(ScannerContextError, match="quality"):
+        parse_scanner_observation(payload)

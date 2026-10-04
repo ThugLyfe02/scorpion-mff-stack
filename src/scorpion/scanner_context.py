@@ -160,17 +160,16 @@ def _required_bool(
 
 
 def _quality(payload: Mapping[str, object]) -> Mapping[str, object]:
-    quality_value = payload.get("quality")
-    if quality_value is None:
-        return {}
-    return _mapping(quality_value, "quality")
+    # A missing attestation is not an attestation with zero blockers. The v1
+    # producer supplies this object even when the underlying evidence is unknown.
+    return _mapping(payload.get("quality"), "quality")
 
 
 def _quality_blockers(payload: Mapping[str, object]) -> tuple[str, ...]:
     quality = _quality(payload)
     raw = quality.get("blocking_reasons")
     if raw is None:
-        return ()
+        raise ScannerContextError("quality.blocking_reasons is required")
     if not isinstance(raw, (list, tuple)):
         raise ScannerContextError("quality.blocking_reasons must be an array")
     blockers: list[str] = []
