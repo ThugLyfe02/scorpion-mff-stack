@@ -101,7 +101,7 @@ def test_post_commit_check_failure_preserves_done_and_halts_new_work(
 ):
     store = Store(tmp_path / f"post-commit-{failure_site}.db")
     pipeline = Pipeline(store, integrity_sentinel=ReplayIntegritySentinel(every_n_commits=1))
-    raw = raw_factory("QQQ 719C TODAY @ 1.01")
+    raw = raw_factory("AAPL 200C TODAY @ 1.01")
 
     def fail(*args, **kwargs):
         raise RuntimeError("post-commit check failed")
@@ -161,3 +161,55 @@ def test_recovery_post_commit_failure_does_not_repend_committed_raw(
             (first.revision_id,),
         ).fetchone()
         assert tuple(row) == ("DONE", "")
+
+
+def test_sentinel_replays_admitted_and_observed_books_without_conflating_them(
+    tmp_path, raw_factory
+):
+    store = Store(tmp_path / "admitted-observed.db")
+    sentinel = ReplayIntegritySentinel(every_n_commits=1)
+    pipeline = Pipeline(store, integrity_sentinel=sentinel)
+
+    research, _ = asyncio.run(
+        pipeline.handle(raw_factory("QQQ 719C TODAY @ 1.01", message_id="research"))
+    )
+    eligible, _ = asyncio.run(
+        pipeline.handle(raw_factory("AAPL 200C TODAY @ 1.01", message_id="eligible", minute=1))
+    )
+
+    assert store.runtime_halt() == (False, "")
+    assert research.contract_key not in pipeline.state.positions
+    assert research.contract_key in pipeline.observed_state.positions
+    assert eligible.contract_key in pipeline.state.positions
+    result = sentinel.after_commit(
+        store,
+        pipeline.state,
+        observed_state=pipeline.observed_state,
+        force=True,
+    )
+    assert result is not None
+    assert result.ok is True
+    assert result.live_fingerprint == result.durable_fingerprint
+    assert result.observed_live_fingerprint == result.observed_durable_fingerprint
+    assert result.live_fingerprint != result.observed_live_fingerprint
+
+
+def test_sentinel_detects_observation_divergence_even_when_admitted_book_matches(
+    tmp_path, raw_factory
+):
+    store = Store(tmp_path / "observed-divergence.db")
+    pipeline = Pipeline(store)
+    asyncio.run(pipeline.handle(raw_factory("QQQ 719C TODAY @ 1.01")))
+
+    result = pipeline.integrity_sentinel.after_commit(
+        store,
+        pipeline.state,
+        observed_state=replace(pipeline.observed_state, halted=True),
+        force=True,
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert result.live_fingerprint == result.durable_fingerprint
+    assert result.observed_live_fingerprint != result.observed_durable_fingerprint
+    assert store.runtime_halt() == (True, "replay_integrity_divergence")
