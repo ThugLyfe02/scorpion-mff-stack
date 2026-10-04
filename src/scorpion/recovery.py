@@ -13,6 +13,8 @@ from .replay import ReplayOrder, replay, state_fingerprint
 
 @dataclass(frozen=True, slots=True)
 class RecoverySnapshot:
+    """Observed-book replay and evidence snapshot; not a snapshot of confirmed fills."""
+
     signal_count: int
     state_fingerprint: str
     integrity_head: str

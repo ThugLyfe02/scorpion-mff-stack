@@ -219,7 +219,7 @@ def test_verified_checkpoint_restores_only_tail_events(tmp_path, raw_factory):
     restored = restore_state(store.path, signals, runtime_policy=pipeline.runtime_policy)
     assert restored.used_checkpoint is True
     assert restored.tail_events == 1
-    assert restored.state.seen_event_ids == pipeline.state.seen_event_ids
+    assert restored.state.seen_event_ids == pipeline.observed_state.seen_event_ids
 
 
 def test_checkpoint_policy_mismatch_falls_back_to_full_replay(tmp_path, raw_factory):

@@ -1,5 +1,7 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+
+import pytest
 
 from scorpion.association import associate_followup_with_evidence
 from scorpion.broker import ExecutionMode
@@ -7,6 +9,7 @@ from scorpion.decision_packet import DecisionDisposition, build_decision_packet
 from scorpion.domain import BookState
 from scorpion.fastpath import FastPathPreparer, FastPathStatus, QuoteCache
 from scorpion.parser import parse_message_with_evidence
+from scorpion.quote_consensus import ConsensusQuoteCache
 from scorpion.reducer import reduce_book
 from scorpion.resilience import OperationalMode, ResilienceAssessment
 from scorpion.sequence_guard import assess_sequence
@@ -84,6 +87,32 @@ def test_fastpath_blocks_etf_strategy_before_quote_use(raw_factory):
     assert intent.status is FastPathStatus.BLOCKED_STRATEGY
 
 
+def test_fastpath_distinguishes_stale_quote_from_missing_quote(raw_factory):
+    event, effect, packet = _event_effect_packet(raw_factory("TSLA 345C TODAY @ 1.00"))
+    cache = QuoteCache()
+    now = datetime(2026, 9, 8, 14, 0, tzinfo=UTC)
+    cache.update(
+        event.contract_key or "",
+        bid=Decimal("1.00"),
+        ask=Decimal("1.05"),
+        observed_ts_utc=now - timedelta(seconds=2),
+    )
+    stale = FastPathPreparer(cache).prepare(event, effect, packet, quantity=1, now=now)
+    assert stale.status is FastPathStatus.QUOTE_STALE
+    assert stale.quote is not None
+    assert "age_ms=" in stale.note
+
+    missing = FastPathPreparer(QuoteCache()).prepare(
+        event,
+        effect,
+        packet,
+        quantity=1,
+        now=now,
+    )
+    assert missing.status is FastPathStatus.QUOTE_UNAVAILABLE
+    assert missing.quote is None
+
+
 def test_fastpath_rejects_25_percent_entry_dislocation(raw_factory):
     event, effect, packet = _event_effect_packet(raw_factory("TSLA 345C TODAY @ 1.00"))
     cache = QuoteCache()
@@ -102,3 +131,38 @@ def test_fastpath_rejects_25_percent_entry_dislocation(raw_factory):
         now=now,
     )
     assert intent.status is FastPathStatus.ENTRY_DISLOCATION
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_status"),
+    (
+        ("fresh", FastPathStatus.AWAITING_HUMAN_AUTHORIZATION),
+        ("missing", FastPathStatus.QUOTE_UNAVAILABLE),
+        ("stale", FastPathStatus.QUOTE_STALE),
+        ("disagreement", FastPathStatus.QUOTE_UNAVAILABLE),
+    ),
+)
+def test_consensus_quote_source_preserves_fastpath_quality_boundary(
+    raw_factory, case, expected_status
+):
+    event, effect, packet = _event_effect_packet(raw_factory("TSLA 345C TODAY @ 1.00"))
+    cache = ConsensusQuoteCache(minimum_providers=2, maximum_midpoint_dispersion=0.02)
+    now = datetime(2026, 9, 8, 14, 0, tzinfo=UTC)
+    if case != "missing":
+        observed = now - timedelta(seconds=2) if case == "stale" else now
+        cache.update(
+            "first", event.contract_key, bid=Decimal("1.00"), ask=Decimal("1.04"),
+            observed_ts_utc=observed,
+        )
+        second_bid = Decimal("1.50") if case == "disagreement" else Decimal("1.00")
+        cache.update(
+            "second", event.contract_key, bid=second_bid, ask=second_bid + Decimal("0.04"),
+            observed_ts_utc=observed,
+        )
+
+    intent = FastPathPreparer(cache).prepare(event, effect, packet, quantity=1, now=now)
+
+    assert intent.status is expected_status
+    if case != "fresh":
+        assert intent.limit_price is None
+        assert intent.note

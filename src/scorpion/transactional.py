@@ -13,10 +13,14 @@ from .accuracy import AssociationEvidence, DecisionEvidence
 from .decision_packet import DecisionDisposition, OperatorDecisionPacket
 from .decision_store import append_decision_packet
 from .domain import Effect, SignalEvent
-from .integrity import append_integrity_record
+from .integrity import append_integrity_record, effect_payload_digest
 from .processing_order import bind_event_processing_order
 from .stage_trace import append_stage_trace
 from .store import Store
+
+
+class RuntimeHaltedError(RuntimeError):
+    """Normalization admission is blocked by durable runtime state."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +80,33 @@ class SQLiteTransitionCommitter:
         with store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
+                # Serialize admission with Store.set_halt(), which uses the same SQLite
+                # writer lock. A pre-transaction check alone leaves a halt/commit race.
+                halt = db.execute(
+                    "SELECT value FROM runtime_flags WHERE key='halt'"
+                ).fetchone()
+                if halt is not None:
+                    payload = json.loads(halt["value"])
+                    if payload.get("halted", False):
+                        raise RuntimeHaltedError(
+                            f"runtime halted: {payload.get('reason', '')}"
+                        )
+                earlier = db.execute(
+                    """
+                    SELECT prior.raw_event_id
+                    FROM raw_processing p
+                    JOIN raw_receipt_order prior ON prior.raw_event_id=p.raw_event_id
+                    JOIN raw_receipt_order current ON current.raw_event_id=?
+                    WHERE p.status IN ('PENDING','QUARANTINED')
+                      AND prior.receipt_seq < current.receipt_seq
+                    ORDER BY prior.receipt_seq LIMIT 1
+                    """,
+                    (raw_revision_id,),
+                ).fetchone()
+                if earlier is not None:
+                    raise RuntimeHaltedError(
+                        f"earlier raw revision remains unresolved: {earlier['raw_event_id']}"
+                    )
                 cursor = db.execute(
                     """
                     INSERT OR IGNORE INTO signal_events
@@ -149,6 +180,20 @@ class SQLiteTransitionCommitter:
                 if inserted:
                     append_decision_packet(db, decision_packet)
                     effect_kinds = ",".join(effect.kind.value for effect in effects)
+                    effects_sha256 = effect_payload_digest(
+                        [
+                            {
+                                "kind": effect.kind.value,
+                                "contract_key": effect.contract_key,
+                                "generation": effect.generation,
+                                "reason": effect.reason,
+                                "quantity_hint": effect.quantity_hint,
+                                "metadata": dict(effect.metadata),
+                                "status": effect_status,
+                            }
+                            for effect in effects
+                        ]
+                    )
                     append_integrity_record(
                         db,
                         event.event_id,
@@ -164,6 +209,7 @@ class SQLiteTransitionCommitter:
                             "effect_count": effect_count,
                             "effect_kinds": effect_kinds,
                             "effect_status": effect_status,
+                            "effects_sha256": effects_sha256,
                             "decision_packet_id": decision_packet.packet_id,
                             "decision_disposition": decision_packet.disposition.value,
                             "operational_mode": decision_packet.system_mode.value,

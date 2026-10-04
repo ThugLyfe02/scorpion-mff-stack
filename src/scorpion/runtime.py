@@ -65,6 +65,7 @@ class _HeartbeatPublisher:
 async def run_discord() -> None:
     settings = RuntimeSettings.from_env()
     store = Store(settings.database_path)
+    store.heartbeat("pipeline", status="starting", phase="runtime_boot")
     controller = ResilienceController(
         store=store,
         allowed_author_ids=settings.allowed_author_ids,

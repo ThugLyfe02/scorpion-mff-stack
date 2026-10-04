@@ -24,6 +24,8 @@ class CertificationCheck:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeCertificationReport:
+    """Evidence checks whose state fingerprint/checkpoint refer to the observed book."""
+
     checks: tuple[CertificationCheck, ...]
     state_fingerprint: str
     temporal: TemporalStreamReport
