@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
+from typing import Protocol
 
 from .broker import ExecutionMode, ExecutionResult, PaperBroker, Quote, ReviewOnlyBroker
 from .decision_packet import DecisionDisposition, OperatorDecisionPacket
@@ -24,6 +25,7 @@ class QuoteLookup:
     status: QuoteCacheStatus
     quote: Quote | None
     age_ms: float | None
+    reason: str = ""
 
 
 class FastPathStatus(StrEnum):
@@ -51,6 +53,24 @@ class PreparedExecutionIntent:
     prepared_ts_utc: datetime
     preparation_latency_us: int
     note: str = ""
+
+
+class QuoteSource(Protocol):
+    def lookup(
+        self,
+        contract_key: str,
+        *,
+        now: datetime | None = None,
+        max_age: timedelta = timedelta(seconds=1),
+    ) -> QuoteLookup: ...
+
+    def get(
+        self,
+        contract_key: str,
+        *,
+        now: datetime | None = None,
+        max_age: timedelta = timedelta(seconds=1),
+    ) -> Quote | None: ...
 
 
 class QuoteCache:
@@ -114,7 +134,7 @@ class FastPathPreparer:
 
     def __init__(
         self,
-        quote_cache: QuoteCache,
+        quote_cache: QuoteSource,
         *,
         mode: ExecutionMode = ExecutionMode.REVIEW_ONLY,
         quote_max_age: timedelta = timedelta(seconds=1),
@@ -182,7 +202,7 @@ class FastPathPreparer:
             max_age=self.quote_max_age,
         )
         if lookup.status is QuoteCacheStatus.MISSING:
-            return finish(FastPathStatus.QUOTE_UNAVAILABLE)
+            return finish(FastPathStatus.QUOTE_UNAVAILABLE, note=lookup.reason)
         if lookup.status is QuoteCacheStatus.STALE:
             return finish(
                 FastPathStatus.QUOTE_STALE,
@@ -190,7 +210,7 @@ class FastPathPreparer:
                 note=(
                     f"cached quote age_ms={lookup.age_ms:.1f}"
                     if lookup.age_ms is not None
-                    else ""
+                    else lookup.reason
                 ),
             )
         quote = lookup.quote

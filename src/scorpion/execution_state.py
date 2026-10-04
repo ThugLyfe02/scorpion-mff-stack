@@ -4,8 +4,9 @@ import sqlite3
 from collections.abc import Sequence
 from pathlib import Path
 
+from .config import DEFAULT_POLICY, Policy
 from .domain import BookState, Effect, SignalEvent
-from .replay import replay
+from .replay import ReplayOrder, replay
 
 _BLOCKING_DISPOSITIONS = frozenset({"BLOCKED_STRATEGY", "BLOCKED_SYSTEM"})
 
@@ -39,9 +40,12 @@ def admitted_events(
 def replay_admitted_events(
     path: str | Path,
     events: Sequence[SignalEvent],
+    *,
+    policy: Policy = DEFAULT_POLICY,
+    order: ReplayOrder = ReplayOrder.SOURCE_TIME,
 ) -> tuple[BookState, tuple[Effect, ...]]:
     """Replay only events that were not durably blocked from execution admission.
 
     Legacy signals without an operator decision packet remain admitted for backwards compatibility.
     """
-    return replay(admitted_events(path, events))
+    return replay(admitted_events(path, events), policy, order=order)

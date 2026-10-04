@@ -12,11 +12,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .domain import BookState, EventKind, SignalEvent
+from .policy_bundle import RuntimePolicyBundle
 from .reducer import apply_fill
-from .replay import replay
+from .replay import ReplayOrder, replay
 
 _GENESIS = "0" * 64
 _ACTION_EFFECTS = frozenset(
@@ -146,6 +147,24 @@ def ensure_execution_journal_schema(db: sqlite3.Connection) -> None:
         db.execute(statement)
 
 
+def _connect(
+    path: str | Path,
+    *,
+    isolation_level: Literal["DEFERRED", "EXCLUSIVE", "IMMEDIATE"] | None = "DEFERRED",
+) -> sqlite3.Connection:
+    db = sqlite3.connect(str(path), timeout=5.0, isolation_level=isolation_level)
+    db.row_factory = sqlite3.Row
+    try:
+        # These settings belong to each connection, not to the database file.
+        db.execute("PRAGMA busy_timeout=5000")
+        db.execute("PRAGMA foreign_keys=ON")
+        db.execute("PRAGMA synchronous=FULL")
+    except Exception:
+        db.close()
+        raise
+    return db
+
+
 def _table_exists(db: sqlite3.Connection, table: str) -> bool:
     return (
         db.execute(
@@ -271,11 +290,36 @@ def _decode_signal(payload_json: str) -> SignalEvent:
     return SignalEvent(**payload)
 
 
-def _admitted_state(db: sqlite3.Connection) -> BookState:
-    signal_rows = db.execute(
-        "SELECT event_id,payload_json FROM signal_events "
-        "ORDER BY source_ts_utc,received_ts_utc,event_id"
-    ).fetchall()
+def _admitted_state(
+    db: sqlite3.Connection,
+    runtime_policy: RuntimePolicyBundle,
+    *,
+    events: list[SignalEvent] | tuple[SignalEvent, ...] | None = None,
+) -> BookState:
+    if _table_exists(db, "event_processing_order"):
+        signal_rows = db.execute(
+            """
+            SELECT s.event_id,s.payload_json,o.process_seq
+            FROM signal_events s
+            LEFT JOIN event_processing_order o ON o.event_id=s.event_id
+            ORDER BY o.process_seq
+            """
+        ).fetchall()
+        if any(row["process_seq"] is None for row in signal_rows):
+            raise ValueError("admitted event is missing durable process order")
+        # Persisted process order is authoritative even when a legacy caller supplies an
+        # independently sorted event list. Never create or backfill that order during a read.
+        ordered_events = [_decode_signal(str(row["payload_json"])) for row in signal_rows]
+        order = ReplayOrder.INPUT
+    else:
+        # Before durable process order existed, source order was the replay contract. Keep
+        # that compatibility fallback explicit; a caller's list order is not arrival evidence.
+        if events is None:
+            signal_rows = db.execute("SELECT payload_json FROM signal_events").fetchall()
+            ordered_events = [_decode_signal(str(row["payload_json"])) for row in signal_rows]
+        else:
+            ordered_events = list(events)
+        order = ReplayOrder.SOURCE_TIME
     blocked: set[str] = set()
     if _table_exists(db, "operator_decision_packets"):
         blocked = {
@@ -285,12 +329,11 @@ def _admitted_state(db: sqlite3.Connection) -> BookState:
                 "WHERE disposition IN ('BLOCKED_STRATEGY','BLOCKED_SYSTEM')"
             ).fetchall()
         }
-    events = [
-        _decode_signal(str(row["payload_json"]))
-        for row in signal_rows
-        if str(row["event_id"]) not in blocked
-    ]
-    state, _ = replay(events)
+    state, _ = replay(
+        [event for event in ordered_events if event.event_id not in blocked],
+        runtime_policy.base,
+        order=order,
+    )
     return state
 
 
@@ -418,28 +461,33 @@ def _records_from_rows(rows: list[sqlite3.Row]) -> list[ExecutionFillRecord]:
 def reconstruct_execution_state(
     path: str | Path,
     events: list[SignalEvent] | tuple[SignalEvent, ...] | None = None,
+    *,
+    runtime_policy: RuntimePolicyBundle | None = None,
 ) -> ExecutionTruthSnapshot:
-    db = sqlite3.connect(str(path))
-    db.row_factory = sqlite3.Row
+    """Apply confirmed fills to admitted intent under the explicit runtime reducer policy.
+
+    Durable process order and stored signals take precedence over ``events``. The optional
+    event list is retained for legacy databases without a durable processing-order table;
+    those databases retain their historical source-time replay contract.
+    """
+    policy = runtime_policy or RuntimePolicyBundle()
+    db = _connect(path)
     try:
         ensure_execution_journal_schema(db)
+        db.execute("BEGIN")
         rows = _rows(db)
         verification = _verify_rows(rows)
         if not verification.ok:
             return ExecutionTruthSnapshot(None, 0, verification, verification.failures)
-        if events is None:
-            base_state = _admitted_state(db)
-        else:
-            blocked: set[str] = set()
-            if _table_exists(db, "operator_decision_packets"):
-                blocked = {
-                    str(row[0])
-                    for row in db.execute(
-                        "SELECT event_id FROM operator_decision_packets "
-                        "WHERE disposition IN ('BLOCKED_STRATEGY','BLOCKED_SYSTEM')"
-                    ).fetchall()
-                }
-            base_state, _ = replay([event for event in events if event.event_id not in blocked])
+        try:
+            base_state = _admitted_state(db, policy, events=events)
+        except (KeyError, TypeError, ValueError, decimal.InvalidOperation) as exc:
+            return ExecutionTruthSnapshot(
+                None,
+                0,
+                verification,
+                (f"admission_replay_failed:{type(exc).__name__}:{exc}",),
+            )
         records = _records_from_rows(rows)
         state, anomalies = _apply_records(db, base_state, records)
         return ExecutionTruthSnapshot(
@@ -460,9 +508,15 @@ class ExecutionJournal:
     protection against an attacker rewriting the entire database requires external head anchoring.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        runtime_policy: RuntimePolicyBundle | None = None,
+    ) -> None:
         self.path = str(path)
-        db = sqlite3.connect(self.path)
+        self.runtime_policy = runtime_policy or RuntimePolicyBundle()
+        db = _connect(self.path)
         try:
             ensure_execution_journal_schema(db)
             db.commit()
@@ -470,16 +524,14 @@ class ExecutionJournal:
             db.close()
 
     def verify(self) -> ExecutionJournalVerification:
-        db = sqlite3.connect(self.path)
-        db.row_factory = sqlite3.Row
+        db = _connect(self.path)
         try:
             return _verify_rows(_rows(db))
         finally:
             db.close()
 
     def records(self) -> tuple[ExecutionFillRecord, ...]:
-        db = sqlite3.connect(self.path)
-        db.row_factory = sqlite3.Row
+        db = _connect(self.path)
         try:
             rows = _rows(db)
             verification = _verify_rows(rows)
@@ -515,10 +567,8 @@ class ExecutionJournal:
         if source is FillSource.EXTERNAL_CONFIRMATION and not (external_ref or "").strip():
             raise ValueError("external_ref is required for external confirmations")
 
-        db = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
-        db.row_factory = sqlite3.Row
+        db = _connect(self.path, isolation_level=None)
         try:
-            db.execute("PRAGMA busy_timeout=5000")
             ensure_execution_journal_schema(db)
             db.execute("BEGIN IMMEDIATE")
             rows = _rows(db)
@@ -577,7 +627,7 @@ class ExecutionJournal:
                 recorded_ts_utc=recorded,
             )
 
-            base_state = _admitted_state(db)
+            base_state = _admitted_state(db, self.runtime_policy)
             existing_records = _records_from_rows(rows)
             candidate_sequence = len(rows) + 1
             candidate_record = ExecutionFillRecord(

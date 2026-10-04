@@ -11,6 +11,7 @@ from .resilience import (
     SignalSeverity,
     assess_resilience,
 )
+from .slo import ModeHysteresis
 from .source_intelligence import (
     SourceBehaviorShift,
     compare_source_behavior,
@@ -30,6 +31,7 @@ class ResilienceController:
     allowed_author_ids: frozenset[str] | None = None
     interval_seconds: float = 1.0
     assessment: ResilienceAssessment = field(default_factory=_normal)
+    hysteresis: ModeHysteresis = field(default_factory=ModeHysteresis)
     _source_shifts: dict[tuple[str, str], SourceBehaviorShift] = field(default_factory=dict)
 
     def current(self) -> ResilienceAssessment:
@@ -37,6 +39,24 @@ class ResilienceController:
 
     def source_shift(self, author_id: str, channel_id: str) -> SourceBehaviorShift | None:
         return self._source_shifts.get((author_id, channel_id))
+
+    def _apply_hysteresis(self, proposed: ResilienceAssessment) -> ResilienceAssessment:
+        stable_mode = self.hysteresis.update(proposed.mode)
+        if stable_mode is proposed.mode:
+            return proposed
+        return ResilienceAssessment(
+            stable_mode,
+            proposed.signals
+            + (
+                ResilienceSignal(
+                    "mode_hysteresis_hold",
+                    SignalSeverity.WARNING,
+                    f"proposed={proposed.mode.value};held={stable_mode.value}",
+                ),
+            ),
+            proposed.recommended_actions
+            + ("require sustained healthy checks before de-escalating mode",),
+        )
 
     def refresh(self) -> ResilienceAssessment:
         health = self.store.health_snapshot()
@@ -79,6 +99,7 @@ class ResilienceController:
                 assessment.recommended_actions
                 + ("force shifted source events through explicit review",),
             )
+        assessment = self._apply_hysteresis(assessment)
         self.assessment = assessment
         self.store.heartbeat(
             "resilience-watchdog",
@@ -95,11 +116,13 @@ class ResilienceController:
             raise ValueError("interval_seconds must be positive")
         while True:
             try:
-                self.refresh()
+                # health_snapshot/source profiling perform synchronous SQLite work. Keep those
+                # scans off the Discord gateway event loop while preserving one watchdog refresh.
+                await asyncio.to_thread(self.refresh)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self.assessment = ResilienceAssessment(
+                proposed = ResilienceAssessment(
                     OperationalMode.DEGRADED,
                     (
                         ResilienceSignal(
@@ -110,9 +133,12 @@ class ResilienceController:
                     ),
                     ("force actionable events through explicit review",),
                 )
-                self.store.heartbeat(
+                self.assessment = self._apply_hysteresis(proposed)
+                await asyncio.to_thread(
+                    self.store.heartbeat,
                     "resilience-watchdog",
                     status="error",
                     error=type(exc).__name__,
+                    mode=self.assessment.mode.value,
                 )
             await asyncio.sleep(self.interval_seconds)

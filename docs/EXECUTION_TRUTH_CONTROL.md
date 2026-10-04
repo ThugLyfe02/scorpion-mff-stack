@@ -126,3 +126,30 @@ The command's output explicitly states that Scorpion did not submit an order.
 - exact reconstructed quantities, average prices, statuses, and generations.
 
 That gives the operator one place to see whether source interpretation, durable evidence, and actual executed state still agree.
+
+## Reconciliation with durable processing order
+
+The current runtime preserves three separate reconstructions:
+
+- `Pipeline.observed_state` contains all normalized observations. Existing policy-bound
+  checkpoints restore this book and report `checkpoint_state_scope=OBSERVED`.
+- `Pipeline.state` reconstructs admitted intent from durable packet dispositions. A blocked
+  observation cannot enter this book through checkpoint recovery.
+- The execution journal applies recorded fills to admitted intent. Its quantities are never
+  substituted for normalized source intent during replay-integrity checks.
+
+Both pipeline books and the integrity sentinel use the effective `runtime_policy.base` and
+durable `process_seq` order. Re-sorting by source timestamps can change capacity and follow-up
+semantics, so it is reserved for explicitly requested historical diagnostics. The journal's
+record/reconstruction APIs accept the same runtime-policy bundle. Without a durable-order
+table, the journal retains the documented legacy source-time fallback; if that table exists
+but an event lacks a binding, reconstruction is unavailable and no binding is fabricated.
+
+Normalized admission rechecks the halt under SQLite's writer lock and refuses to bypass an
+earlier pending or quarantined receipt. Recovery stops at the first quarantined failure.
+Clearing the halt flag alone does not resolve a quarantined revision; an operator must resolve
+or explicitly requeue that revision before recovery can progress.
+
+Post-commit verification failures preserve the committed `DONE` marker and do not consume
+the raw revision's retry budget. Startup verifies evidence and halts on inconsistent or
+uncovered history instead of reconstructing missing effects into the durable effect table.
