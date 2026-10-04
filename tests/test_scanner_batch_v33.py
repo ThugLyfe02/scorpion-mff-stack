@@ -291,6 +291,33 @@ def test_bundle_rejects_probability_like_confidence_semantics(tmp_path: Path) ->
         load_scanner_observation_bundle(batch_path=batch, manifest_path=manifest)
 
 
+@pytest.mark.parametrize("confidence", [float("nan"), float("inf"), float("-inf")])
+def test_bundle_rejects_nonfinite_confidence_even_if_rehashed(
+    tmp_path: Path, confidence: float,
+) -> None:
+    row = _observation("AENT", "run-1")
+    row["confidence"] = confidence
+    row["observation_id"] = canonical_scanner_observation_hash(row)
+    # Recompute the batch hash and manifest identity as well, so the semantic
+    # confidence check must reject this otherwise correctly bound payload.
+    batch, manifest = _write_bundle(tmp_path, rows=[row])
+    with pytest.raises(ScannerContextError, match="scanner confidence must be finite"):
+        load_scanner_observation_bundle(batch_path=batch, manifest_path=manifest)
+
+
+@pytest.mark.parametrize("confidence", [0.0, 1.0])
+def test_bundle_accepts_finite_confidence_boundaries(
+    tmp_path: Path, confidence: float,
+) -> None:
+    row = _observation("AENT", "run-1")
+    row["confidence"] = confidence
+    row["observation_id"] = canonical_scanner_observation_hash(row)
+    batch, manifest = _write_bundle(tmp_path, rows=[row])
+    loaded = load_scanner_observation_bundle(batch_path=batch, manifest_path=manifest)
+    assert loaded.row_metadata[0].confidence == confidence
+    assert loaded.row_metadata[0].confidence_semantics == "RANKING_HEURISTIC"
+
+
 def test_bundle_rejects_truncation(tmp_path: Path) -> None:
     batch, manifest = _write_bundle(tmp_path)
     first = batch.read_text(encoding="utf-8").splitlines()[0]

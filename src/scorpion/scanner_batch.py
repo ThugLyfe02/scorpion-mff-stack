@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -131,6 +132,8 @@ def _required_confidence(payload: Mapping[str, object]) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ScannerContextError("scanner confidence must be numeric")
     confidence = float(value)
+    if not math.isfinite(confidence):
+        raise ScannerContextError("scanner confidence must be finite")
     if confidence < 0.0 or confidence > 1.0:
         raise ScannerContextError("scanner confidence must be in [0,1]")
     return confidence
