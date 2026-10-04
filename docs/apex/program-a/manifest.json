@@ -1,0 +1,264 @@
+{
+  "artifacts": [
+    {
+      "bytes": 21327,
+      "format": "text",
+      "path": "docs/APEX_BASELINE_ATTESTATION.md",
+      "sha256": "0c97817cfcd42911a4ccde16f3bdc2c09065375979c7cfbbf20dfeb473800226"
+    },
+    {
+      "bytes": 16805,
+      "format": "text",
+      "path": "docs/APEX_BASELINE_PROBE.md",
+      "sha256": "a06214d38eb98e2286a800db8f73591309e51750c425a2fd76a74960b94dc076"
+    },
+    {
+      "bytes": 48707,
+      "format": "text",
+      "path": "docs/APEX_IMPLEMENTATION_MAP.md",
+      "sha256": "1573ff2c7ce06b566bf0028f1bf460a98deed88ee0e3ca3f01ad9a694924cfa4"
+    },
+    {
+      "bytes": 11290,
+      "format": "text",
+      "path": "docs/APEX_SQLITE_BOUNDARY_AUDIT.md",
+      "sha256": "3ed9ec5ac1931796998ea95ab50de97afa0d4bcd8bbc06e99c30c623da70f561"
+    },
+    {
+      "bytes": 56709,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/captures/original-pr3.json.gz",
+      "sha256": "826e3c02a2cffe1322896544c4a1d379efdbe9bcc0babdc6b78c8ffe6f4ca75f",
+      "uncompressed_bytes": 569655,
+      "uncompressed_sha256": "bdb0866a1efdf1dcc75837b2112e1fd6e53ce966728a3ef6a6d4e9aa3d17f9d6"
+    },
+    {
+      "bytes": 57928,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/captures/original-pr4.json.gz",
+      "sha256": "33d5e1aeb09046c25e6dfa5e987864c23e3abb3bc271f490c2a32fa2f627e2fc",
+      "uncompressed_bytes": 570221,
+      "uncompressed_sha256": "8e2e3e97e7c0fd6942425defd7e3e89bc379434c4f25798f0674d828b2115498"
+    },
+    {
+      "bytes": 67132,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/captures/original-pr5.json.gz",
+      "sha256": "803e74ff2ed3a487a2690d8ef535ecbec102366d7c1bea3b8d8e3d13d158c250",
+      "uncompressed_bytes": 649815,
+      "uncompressed_sha256": "79a1b414c185e0001c7eac8f7150fd89edb83e08efac347cc5f5c81a9f96f352"
+    },
+    {
+      "bytes": 67466,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/captures/original-pr6.json.gz",
+      "sha256": "533ea0228b2b19381be17ff618d942760bea66d3264c5d0e52bad7a1b90a2d3d",
+      "uncompressed_bytes": 650517,
+      "uncompressed_sha256": "33ad50b8f684bf449a874f58186e88ef414c898832cb366f1f67a28b5558376d"
+    },
+    {
+      "bytes": 56810,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/captures/reconciled-pr3.json.gz",
+      "sha256": "204382709d10dc41d4174d5329be9480c55940e4cd34c34d9f153f07654802fc",
+      "uncompressed_bytes": 569648,
+      "uncompressed_sha256": "8645fa5075fb21ceb808f39fb135443706db04e2000a0743444d37ae9653dcd1"
+    },
+    {
+      "bytes": 57945,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/captures/reconciled-pr4.json.gz",
+      "sha256": "a967af257e0dbaf7f5c838c35e744622fef330b318c5e5a819e3d525fe205584",
+      "uncompressed_bytes": 570206,
+      "uncompressed_sha256": "0673635cf6291606e616164c1f280b38deae83c558d7a185b77f8d7f6599bd17"
+    },
+    {
+      "bytes": 67386,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/captures/reconciled-pr5.json.gz",
+      "sha256": "16150909bc261021375e71af787718e6c76d12acf455bb72fa72976d6cc97b66",
+      "uncompressed_bytes": 650362,
+      "uncompressed_sha256": "655291f49de1814bb1b76c214e7d705a1c02cd3920cf5cd818461e32b0224f6e"
+    },
+    {
+      "bytes": 67716,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/captures/reconciled-pr6.json.gz",
+      "sha256": "1869c9cf76125e874bd022fe2f2344dfc81dfd44c3bb1f229669ad4ee6517199",
+      "uncompressed_bytes": 651069,
+      "uncompressed_sha256": "aa32a6dfdb42582070b72cb113493ba5a3ab52d5e3e89f5a2fd9130e131d5c46"
+    },
+    {
+      "bytes": 6687,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/ci/mff3.json.gz",
+      "sha256": "51682c4fd42069a6f6d53468ce1b2fb6b36b91159dc7e012347d1f2e36a62a1f",
+      "uncompressed_bytes": 30639,
+      "uncompressed_sha256": "f628f97b938334ddf8036f0acdb3bc176729763e9102a3b28d66e633c4190634"
+    },
+    {
+      "bytes": 6756,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/ci/mff4.json.gz",
+      "sha256": "90c6e2c3db2c4f9e79993fd5ee8fbcac76b9582cfdf12f92d9854c4ca4e677b1",
+      "uncompressed_bytes": 30749,
+      "uncompressed_sha256": "cc412aba3c56fa17e4692dce511c96945a6ccd0e3f964511c61ec7ce3fca430c"
+    },
+    {
+      "bytes": 6792,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/ci/mff5.json.gz",
+      "sha256": "89a03a5ddb7576939b09769e364699200a79128c7786d62d0a91d211bc2c5e53",
+      "uncompressed_bytes": 31218,
+      "uncompressed_sha256": "a336a629eca6db816e4a66cba00114ed307782182c1dfdc35a0bc2801a2b0380"
+    },
+    {
+      "bytes": 6832,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/ci/mff6.json.gz",
+      "sha256": "531fbe7186e88548277bfda66d8e4440b0513cfdf21abace0404375a7d7b654b",
+      "uncompressed_bytes": 31361,
+      "uncompressed_sha256": "6c2613329042721e19c3af9047d05d2954ec34dac336329a616c20d3438a5e9b"
+    },
+    {
+      "bytes": 17182,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/initial-branch-dag.json.gz",
+      "sha256": "5f4c873e7bee60ea1dcf6b1498608ded67c8f81fc47d56facb0118b42260b9fd",
+      "uncompressed_bytes": 61511,
+      "uncompressed_sha256": "6dd41338b03ed61e91414ea673edc37e77b4f8e94ba257935922a0347257026f"
+    },
+    {
+      "bytes": 20188,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/post-branch-dag.json.gz",
+      "sha256": "4e2338e765dff62789a1b9e8268075201a62421f1d36fcfc82ce09aab2bc329e",
+      "uncompressed_bytes": 66903,
+      "uncompressed_sha256": "a130efe32a16bcf5b216b86c8cee4a987d1f28a5f15da3183b890232c7202133"
+    },
+    {
+      "bytes": 10403,
+      "compression": "gzip",
+      "format": "text",
+      "path": "docs/apex/program-a/probes/apex_baseline_probe.py.gz",
+      "sha256": "400453d46e7d6eaa7f03f3f44e63c2b0bdf1693c84ea9bf739fc8c0915415fa4",
+      "uncompressed_bytes": 35108,
+      "uncompressed_sha256": "0a3d5be865f021629054838e43278fc5dad270c70da8f98bd4c1d65ebe105633"
+    },
+    {
+      "bytes": 8666,
+      "format": "json",
+      "path": "docs/apex/program-a/review-findings.json",
+      "sha256": "3da0925696917e7f3b3b36bf742ed9b29f7e718a8cd896c74ff7bf522960e911"
+    },
+    {
+      "bytes": 804,
+      "format": "json",
+      "path": "docs/apex/program-a/semantic-diff-pr3.json",
+      "sha256": "e821ad6506f75a502594f418a4fe6954a8419b8a14b5ea70467b0656b33d653e"
+    },
+    {
+      "bytes": 804,
+      "format": "json",
+      "path": "docs/apex/program-a/semantic-diff-pr4.json",
+      "sha256": "f470644851187f2d030177e454609ba9f241236a49f896fa17f58e9f5559dd67"
+    },
+    {
+      "bytes": 804,
+      "format": "json",
+      "path": "docs/apex/program-a/semantic-diff-pr5.json",
+      "sha256": "9510eedaa3d348d17cdb17a8bdf05c3f920b77e6b6a7b1ff2fb4027d4d254af8"
+    },
+    {
+      "bytes": 804,
+      "format": "json",
+      "path": "docs/apex/program-a/semantic-diff-pr6.json",
+      "sha256": "1ffc21a13c004c40aae96c027154fd3ca9ae09feb3a7e40da4b86c837466e15a"
+    },
+    {
+      "bytes": 10785,
+      "compression": "gzip",
+      "format": "text",
+      "path": "docs/apex/program-a/sqlite/mff-pr5-sqlite-collection.log.gz",
+      "sha256": "1a4cec69e4a640e7a4231d892e6cacd6d6d2fd4422a7aab52c7230b1f4b32c6e",
+      "uncompressed_bytes": 45911,
+      "uncompressed_sha256": "3e5454117122c9c812ff59fa3df394e02f89b3d889767c4edab682141b71fd1d"
+    },
+    {
+      "bytes": 63,
+      "compression": "gzip",
+      "format": "text",
+      "path": "docs/apex/program-a/sqlite/mff-pr5-sqlite-full-pytest.log.gz",
+      "sha256": "ce38c2b411cf042711a54e3d168709859afa92bb0ae5499a79208610d6b07ff6",
+      "uncompressed_bytes": 560,
+      "uncompressed_sha256": "b25f498e3da18a520e78181aaf7e8fa99f03d8b6277ff179194682983c6d5e35"
+    },
+    {
+      "bytes": 626,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/sqlite/sqlite_boundary_probe.json.gz",
+      "sha256": "34aae37d22c901df0b82a86ec266ddc467bf9137416cfde54f5d4837fed73684",
+      "uncompressed_bytes": 10491,
+      "uncompressed_sha256": "5640b481e17c6b3ef2d088dc42535eabccec0de4661214c30c09013e0eab1879"
+    },
+    {
+      "bytes": 1837,
+      "compression": "gzip",
+      "format": "text",
+      "path": "docs/apex/program-a/sqlite/sqlite_boundary_probe.py.gz",
+      "sha256": "5bd312a85aa3e783d1795f6c34ffc46322cce488a64b903914daf9919713d655",
+      "uncompressed_bytes": 5523,
+      "uncompressed_sha256": "68de5b88c904d6c0d55409774facfdc255c399dbcfb27e12adcf5b6b87309f74"
+    },
+    {
+      "bytes": 594,
+      "compression": "gzip",
+      "format": "json",
+      "path": "docs/apex/program-a/sqlite/sqlite_boundary_probe_after.json.gz",
+      "sha256": "15f1ea1686a893c2f4849201b408b3daf6a37e8bb771861b0312b7fbb1f2421e",
+      "uncompressed_bytes": 10518,
+      "uncompressed_sha256": "c3bf3f394d427efcd69385893de543792037b920cf7d3f75a584fd4c11ff7800"
+    },
+    {
+      "bytes": 266,
+      "compression": "gzip",
+      "format": "text",
+      "path": "docs/apex/program-a/sqlite/sqlite_runtime_red.log.gz",
+      "sha256": "ddf46e64f2abb0ad98dbba13b0005bfb440c608916fbb0a363ff3466f14bf3fe",
+      "uncompressed_bytes": 1722,
+      "uncompressed_sha256": "3f40db544c3f3add486ebb24bd9b0b49f27f8adff53131e3763e5c8942d01132"
+    },
+    {
+      "bytes": 35835,
+      "format": "json",
+      "path": "docs/apex/program-a/summary.json",
+      "sha256": "d6293f1b457e797d2eca95231d6f83927da75586d6b0686ce7ad3690db7b7b8e"
+    },
+    {
+      "bytes": 3087,
+      "format": "text",
+      "path": "tools/verify_apex_evidence.py",
+      "sha256": "7cf13e1877ae89b904b3f3c9951ac1f03be573a70ea6c726af24270f4d6ed10a"
+    }
+  ],
+  "baseline_gate": "BLOCKED_COMPANION_RESEARCH_CI",
+  "recorded_at_utc": "2026-10-04T08:52:58.695957+00:00",
+  "schema_version": 1,
+  "scope": "Frozen evidence bytes and documents; manifest excludes itself to avoid circular identity.",
+  "signature_status": "UNSIGNED_LOCAL_MANIFEST; source CI and Git identities are separately recorded."
+}

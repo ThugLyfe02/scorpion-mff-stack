@@ -1,0 +1,258 @@
+{
+  "schema_version": 1,
+  "observed_at_utc": "2026-10-04",
+  "scope": "Review-thread UI state and source-audited dispositions are distinct; no thread was auto-resolved.",
+  "records": [
+    {
+      "pr": 3,
+      "url": "https://github.com/ThugLyfe02/scorpion-mff-stack/pull/3",
+      "total_threads": 5,
+      "unresolved_threads": [
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6ntYTU",
+          "path": "src/scorpion/transactional.py",
+          "is_outdated": false,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 4149297486,
+              "created_at": "2026-09-30T21:00:33Z",
+              "heading": "Validate the halt flag after taking the write lock"
+            }
+          ],
+          "source_disposition": "REPAIRED_WITH_PROGRAM_A_REGRESSIONS"
+        },
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6ntYTa",
+          "path": "src/scorpion/integrity.py",
+          "is_outdated": false,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 4149297493,
+              "created_at": "2026-09-30T21:00:33Z",
+              "heading": "Latch a detected divergence before emitting telemetry"
+            }
+          ],
+          "source_disposition": "REPAIRED_WITH_PROGRAM_A_REGRESSIONS"
+        },
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6ntYTe",
+          "path": "src/scorpion/pipeline.py",
+          "is_outdated": false,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 4149297499,
+              "created_at": "2026-09-30T21:00:33Z",
+              "heading": "Do not re-pend a transition after it has committed"
+            }
+          ],
+          "source_disposition": "REPAIRED_WITH_PROGRAM_A_REGRESSIONS"
+        }
+      ]
+    },
+    {
+      "pr": 4,
+      "url": "https://github.com/ThugLyfe02/scorpion-mff-stack/pull/4",
+      "total_threads": 12,
+      "unresolved_threads": [
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6gYu9z",
+          "path": "src/scorpion/parser.py",
+          "is_outdated": true,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 3961634359,
+              "created_at": "2026-09-08T19:46:31Z",
+              "heading": "Match inflected verbs in the negation guard"
+            }
+          ],
+          "source_disposition": "REPAIRED_IN_AUDITED_LOWER_LAYER_AND_INHERITED"
+        },
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6gYu91",
+          "path": "src/scorpion/evidence_bridge.py",
+          "is_outdated": true,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 3961634361,
+              "created_at": "2026-09-08T19:46:31Z",
+              "heading": "Include adjudicated contracts in correctness"
+            }
+          ],
+          "source_disposition": "REPAIRED_IN_AUDITED_LOWER_LAYER_AND_INHERITED"
+        },
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6gYu97",
+          "path": "src/scorpion/counterfactual.py",
+          "is_outdated": true,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 3961634369,
+              "created_at": "2026-09-08T19:46:31Z",
+              "heading": "Exclude event IDs from semantic state fingerprints"
+            }
+          ],
+          "source_disposition": "REPAIRED_IN_AUDITED_LOWER_LAYER_AND_INHERITED"
+        },
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6gYu98",
+          "path": "src/scorpion/counterfactual.py",
+          "is_outdated": true,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 3961634372,
+              "created_at": "2026-09-08T19:46:31Z",
+              "heading": "Preserve effect multiplicity when comparing runs"
+            }
+          ],
+          "source_disposition": "REPAIRED_IN_AUDITED_LOWER_LAYER_AND_INHERITED"
+        },
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6gZxW8",
+          "path": "src/scorpion/resilience.py",
+          "is_outdated": false,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 3962045600,
+              "created_at": "2026-09-08T20:38:22Z",
+              "heading": "Base liveness on a periodic heartbeat"
+            }
+          ],
+          "source_disposition": "REPAIRED_IN_AUDITED_LOWER_LAYER_AND_INHERITED"
+        },
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6gZxW_",
+          "path": "src/scorpion/integrity.py",
+          "is_outdated": false,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 3962045605,
+              "created_at": "2026-09-08T20:38:22Z",
+              "heading": "Bind effect details into integrity verification"
+            }
+          ],
+          "source_disposition": "REPAIRED_IN_AUDITED_LOWER_LAYER_AND_INHERITED"
+        },
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6gZxXC",
+          "path": "src/scorpion/ops_queue.py",
+          "is_outdated": true,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 3962045613,
+              "created_at": "2026-09-08T20:38:22Z",
+              "heading": "Apply queue priority before limiting results"
+            }
+          ],
+          "source_disposition": "REPAIRED_IN_AUDITED_LOWER_LAYER_AND_INHERITED"
+        },
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6gZxXF",
+          "path": "src/scorpion/cli.py",
+          "is_outdated": true,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 3962045617,
+              "created_at": "2026-09-08T20:38:22Z",
+              "heading": "Replay persisted fills for reconciliation"
+            }
+          ],
+          "source_disposition": "REPAIRED_IN_AUDITED_LOWER_LAYER_AND_INHERITED"
+        },
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6gbhcW",
+          "path": "src/scorpion/pipeline.py",
+          "is_outdated": true,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 3962743717,
+              "created_at": "2026-09-08T22:16:43Z",
+              "heading": "Keep blocked strategies out of execution capacity"
+            }
+          ],
+          "source_disposition": "REPAIRED_IN_AUDITED_LOWER_LAYER_AND_INHERITED"
+        },
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6gbhca",
+          "path": "src/scorpion/parser.py",
+          "is_outdated": true,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 3962743724,
+              "created_at": "2026-09-08T22:16:43Z",
+              "heading": "Cover every action family in contextual guards"
+            }
+          ],
+          "source_disposition": "REPAIRED_IN_AUDITED_LOWER_LAYER_AND_INHERITED"
+        },
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6gbhcg",
+          "path": "src/scorpion/history_sync.py",
+          "is_outdated": true,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 3962743731,
+              "created_at": "2026-09-08T22:16:44Z",
+              "heading": "Finalize sync runs when startup fails"
+            }
+          ],
+          "source_disposition": "REPAIRED_IN_AUDITED_LOWER_LAYER_AND_INHERITED"
+        },
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6gbhcj",
+          "path": "src/scorpion/fastpath.py",
+          "is_outdated": true,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 3962743735,
+              "created_at": "2026-09-08T22:16:44Z",
+              "heading": "Distinguish stale cached quotes from missing quotes"
+            }
+          ],
+          "source_disposition": "REPAIRED_IN_AUDITED_LOWER_LAYER_AND_INHERITED"
+        }
+      ]
+    },
+    {
+      "pr": 5,
+      "url": "https://github.com/ThugLyfe02/scorpion-mff-stack/pull/5",
+      "total_threads": 10,
+      "unresolved_threads": []
+    },
+    {
+      "pr": 6,
+      "url": "https://github.com/ThugLyfe02/scorpion-mff-stack/pull/6",
+      "total_threads": 1,
+      "unresolved_threads": [
+        {
+          "thread_id": "PRRT_kwDOUSnsQs6hoeig",
+          "path": "src/scorpion/scanner_context.py",
+          "is_outdated": true,
+          "is_resolved": false,
+          "comments": [
+            {
+              "comment_id": 3993260762,
+              "created_at": "2026-09-11T20:46:32Z",
+              "heading": "Reject observations that omit quality metadata"
+            }
+          ],
+          "source_disposition": "REPAIRED_WITH_MISSING_QUALITY_REGRESSIONS"
+        }
+      ]
+    }
+  ]
+}

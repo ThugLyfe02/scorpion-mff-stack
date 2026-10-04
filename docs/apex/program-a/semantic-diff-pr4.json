@@ -1,0 +1,23 @@
+{
+  "after_incomplete_cases": [
+    "malformed_expiry"
+  ],
+  "after_semantic_sha256": "ddc3dfc088ceb54b1a34be7ca83001877dd193d8a532a60af2625a756a9e124a",
+  "after_sha": "8f41fadac3bcac545246119aca08e83fed4a9fa4",
+  "before_incomplete_cases": [
+    "malformed_expiry"
+  ],
+  "before_semantic_sha256": "ddc3dfc088ceb54b1a34be7ca83001877dd193d8a532a60af2625a756a9e124a",
+  "before_sha": "35d37388fc3b182f2e167c9a6abdecf66bcf6c45",
+  "case_count_after": 40,
+  "case_count_before": 40,
+  "cases": [],
+  "category_counts": {},
+  "changed_cases": 0,
+  "limits": "Differences are classified, never auto-approved. Equality covers this finite corpus only.",
+  "same_corpus": true,
+  "same_probe": true,
+  "semantic_cases_complete": false,
+  "stable_sources": true,
+  "status": "IDENTICAL_WITH_INCOMPLETE_CASES"
+}
