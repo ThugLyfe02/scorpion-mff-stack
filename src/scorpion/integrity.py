@@ -14,7 +14,7 @@ from .invariants import assert_valid_book
 from .policy_bundle import RuntimePolicyBundle
 from .processing_order import load_signals_in_processing_order
 from .replay import ReplayOrder, replay, state_fingerprint
-from .store import Store
+from .store import Store, configure_runtime_connection
 
 Scalar = str | int | float | bool | None
 _GENESIS = "0" * 64
@@ -320,6 +320,7 @@ def verify_database_evidence(path: str | Path) -> DatabaseEvidenceVerification:
     db.row_factory = sqlite3.Row
     failures: list[str] = []
     try:
+        configure_runtime_connection(db)
         ensure_integrity_schema(db)
         rows = db.execute(
             "SELECT sequence,record_id,previous_hash,payload_sha256,payload_json,record_hash "
@@ -450,6 +451,11 @@ class IntegrityLedger:
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, isolation_level=None)
         db.row_factory = sqlite3.Row
+        try:
+            configure_runtime_connection(db)
+        except Exception:
+            db.close()
+            raise
         return db
 
     def append(self, record_id: str, payload: Mapping[str, Scalar]) -> IntegrityRecord:
