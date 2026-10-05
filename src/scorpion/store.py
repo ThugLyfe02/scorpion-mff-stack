@@ -133,6 +133,18 @@ CREATE TABLE IF NOT EXISTS runtime_flags (
 """
 
 
+class SafetyLatchClearError(RuntimeError):
+    """A fail-closed integrity halt requires explicit verified recovery."""
+
+
+_SAFETY_LATCH_PREFIXES = (
+    "replay_integrity_divergence",
+    "durable_integrity_violation",
+    "post_commit_verification_failed:",
+    "raw_recovery_failed:",
+)
+
+
 class Store:
     def __init__(self, path: str | pathlib.Path) -> None:
         self.path = str(path)
@@ -145,6 +157,8 @@ class Store:
         db.row_factory = sqlite3.Row
         try:
             db.execute("PRAGMA busy_timeout=5000")
+            db.execute("PRAGMA foreign_keys=ON")
+            db.execute("PRAGMA synchronous=FULL")
             yield db
         finally:
             db.close()
@@ -229,7 +243,7 @@ class Store:
         with self.connect() as db:
             db.execute(
                 "UPDATE raw_processing SET status='PENDING',updated_ts_utc=?,error=? "
-                "WHERE raw_event_id=?",
+                "WHERE raw_event_id=? AND status!='DONE'",
                 (now, error[:500], raw_event_id),
             )
 
@@ -482,7 +496,13 @@ class Store:
                 (component, now, json.dumps(metadata, sort_keys=True)),
             )
 
-    def set_halt(self, halted: bool, reason: str) -> None:
+    def set_halt(self, halted: bool, reason: str, *, verified: bool = False) -> None:
+        if not halted and not verified:
+            current_halted, current_reason = self.runtime_halt()
+            if current_halted and current_reason.startswith(_SAFETY_LATCH_PREFIXES):
+                raise SafetyLatchClearError(
+                    f"safety latch requires verified recovery: {current_reason}"
+                )
         now = datetime.datetime.now(datetime.UTC).isoformat()
         value = json.dumps({"halted": halted, "reason": reason}, sort_keys=True)
         with self.connect() as db:
@@ -495,6 +515,14 @@ class Store:
                 """,
                 (value, now),
             )
+
+    def runtime_halt(self) -> tuple[bool, str]:
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM runtime_flags WHERE key='halt'").fetchone()
+        if row is None:
+            return False, ""
+        payload = json.loads(row["value"])
+        return bool(payload.get("halted", False)), str(payload.get("reason", ""))
 
     def health_snapshot(self) -> dict[str, object]:
         with self.connect() as db:
