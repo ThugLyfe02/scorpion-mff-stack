@@ -184,3 +184,55 @@ def test_done_receipt_cannot_be_reinterpreted_into_new_event(tmp_path, raw_facto
 
     assert len(store.load_signals()) == 1
     assert store.load_pending_raw() == []
+
+
+
+@pytest.mark.parametrize(
+    ("trigger_sql", "expected_error"),
+    [
+        (
+            """
+            CREATE TRIGGER fault_effect_insert
+            BEFORE INSERT ON proposed_effects
+            BEGIN
+                SELECT RAISE(ABORT, 'fault_effect_insert');
+            END
+            """,
+            "fault_effect_insert",
+        ),
+        (
+            """
+            CREATE TRIGGER fault_raw_done
+            BEFORE UPDATE OF status ON raw_processing
+            WHEN NEW.status='DONE'
+            BEGIN
+                SELECT RAISE(ABORT, 'fault_raw_done');
+            END
+            """,
+            "fault_raw_done",
+        ),
+    ],
+)
+def test_mid_transaction_sqlite_fault_rolls_back_entire_normalized_bundle(
+    tmp_path, raw_factory, trigger_sql, expected_error
+):
+    store = Store(tmp_path / f"{expected_error}.db")
+    pipeline = Pipeline(store)
+    raw = raw_factory("QQQ 719C TODAY @ 1.01")
+    with store.connect() as db:
+        db.execute(trigger_sql)
+
+    with pytest.raises(Exception, match=expected_error):
+        asyncio.run(pipeline.handle(raw))
+
+    assert pipeline.state.positions == {}
+    assert store.load_signals() == []
+    with store.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM proposed_effects").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM decision_audit").fetchone()[0] == 0
+        journal = db.execute(
+            "SELECT status,error FROM raw_processing WHERE raw_event_id=?",
+            (raw.revision_id,),
+        ).fetchone()
+        assert journal["status"] == "PENDING"
+        assert journal["error"]
