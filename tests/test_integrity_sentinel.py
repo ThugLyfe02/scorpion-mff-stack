@@ -3,7 +3,7 @@ from dataclasses import replace
 
 import pytest
 
-from scorpion.integrity import ReplayIntegritySentinel
+from scorpion.integrity import ReplayIntegritySentinel, audit_durable_integrity
 from scorpion.pipeline import Pipeline, RuntimeHaltedError
 from scorpion.store import Store
 
@@ -161,3 +161,108 @@ def test_recovery_post_commit_failure_does_not_repend_committed_raw(
             (first.revision_id,),
         ).fetchone()
         assert tuple(row) == ("DONE", "")
+
+
+
+def test_durable_integrity_audit_detects_missing_decision_bundle(tmp_path, raw_factory):
+    store = Store(tmp_path / "missing-audit.db")
+    pipeline = Pipeline(store)
+    asyncio.run(pipeline.handle(raw_factory("QQQ 719C TODAY @ 1.01")))
+
+    with store.connect() as db:
+        db.execute("DELETE FROM decision_audit")
+
+    report = audit_durable_integrity(store)
+    assert report.ok is False
+    assert report.signals_missing_audit == 1
+    assert report.reason_codes == ("signal_missing_decision_audit",)
+
+    result = ReplayIntegritySentinel(every_n_commits=1).after_commit(
+        store, pipeline.state, force=True
+    )
+    assert result is not None
+    assert result.ok is False
+    assert result.live_fingerprint == result.durable_fingerprint
+    assert store.runtime_halt() == (True, "durable_integrity_violation")
+
+
+def test_durable_integrity_audit_detects_orphan_effect_and_invalid_journal_status(
+    tmp_path, raw_factory
+):
+    store = Store(tmp_path / "bundle-corruption.db")
+    pipeline = Pipeline(store)
+    raw = raw_factory("QQQ 719C TODAY @ 1.01")
+    asyncio.run(pipeline.handle(raw))
+
+    with store.connect() as db:
+        db.execute(
+            """
+            INSERT INTO proposed_effects
+            (source_event_id,kind,contract_key,generation,reason,quantity_hint,
+             metadata_json,created_ts_utc,status)
+            VALUES ('ghost-event','REVIEW',NULL,0,'fault-injected',NULL,'{}',
+                    '2026-09-08T14:00:00+00:00','PENDING_REVIEW')
+            """
+        )
+        db.execute(
+            "UPDATE raw_processing SET status='CORRUPTED' WHERE raw_event_id=?",
+            (raw.revision_id,),
+        )
+
+    report = audit_durable_integrity(store)
+    assert report.ok is False
+    assert report.orphan_effects == 1
+    assert report.invalid_raw_statuses == 1
+    assert set(report.reason_codes) == {"invalid_raw_status", "orphan_effect"}
+
+
+def test_durable_integrity_audit_detects_audit_kind_tampering(tmp_path, raw_factory):
+    store = Store(tmp_path / "audit-kind.db")
+    pipeline = Pipeline(store)
+    asyncio.run(pipeline.handle(raw_factory("QQQ 719C TODAY @ 1.01")))
+
+    with store.connect() as db:
+        db.execute("UPDATE decision_audit SET kind='EXIT'")
+
+    report = audit_durable_integrity(store)
+    assert report.ok is False
+    assert report.audit_kind_mismatches == 1
+    assert "audit_kind_mismatch" in report.reason_codes
+
+
+def test_halt_recovery_round_trip_preserves_exact_replay_identity(tmp_path, raw_factory):
+    store = Store(tmp_path / "halt-recovery-roundtrip.db")
+    pipeline = Pipeline(store)
+    first = raw_factory("QQQ 719C TODAY @ 1.01", message_id="first")
+    asyncio.run(pipeline.handle(first))
+
+    store.set_halt(True, "operator_hold")
+    queued = [
+        raw_factory("SPY 600C TODAY @ 1.00", message_id="second", minute=1),
+        raw_factory("IWM 250C TODAY @ 1.00", message_id="third", minute=2),
+    ]
+    for raw in queued:
+        with pytest.raises(RuntimeHaltedError):
+            asyncio.run(pipeline.handle(raw))
+
+    assert len(store.load_pending_raw()) == 2
+    before_recovery_count = len(store.load_signals())
+
+    # A restart while halted is capture-only; clearing the operator hold then
+    # restarting must recover each pending revision exactly once and in order.
+    halted_restart = Pipeline(store)
+    assert len(halted_restart.state.seen_event_ids) == before_recovery_count
+    assert len(store.load_pending_raw()) == 2
+
+    store.set_halt(False, "operator_released")
+    recovered = Pipeline(store)
+
+    assert store.load_pending_raw() == []
+    events = store.load_signals()
+    assert len(events) == before_recovery_count + 2
+    assert len({event.event_id for event in events}) == len(events)
+
+    from scorpion.replay import replay, state_fingerprint
+
+    durable_state, _ = replay(events)
+    assert state_fingerprint(recovered.state) == state_fingerprint(durable_state)
