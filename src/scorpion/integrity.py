@@ -173,3 +173,26 @@ class ReplayIntegritySentinel:
             durable_event_count=len(events),
             durable_integrity=durable_integrity,
         )
+
+
+
+def clear_integrity_halt_if_safe(store: Store) -> DurableIntegrityReport:
+    """Clear a safety latch only after the durable substrate re-passes integrity checks.
+
+    A restart reconstructs live state from the durable log, so durable structural integrity
+    is the authoritative prerequisite for releasing an integrity-originated halt.
+    """
+    report = audit_durable_integrity(store)
+    if not report.ok:
+        raise RuntimeError(
+            "cannot clear integrity halt while durable invariants fail: "
+            + ",".join(report.reason_codes)
+        )
+    store.set_halt(False, "integrity_verified", verified=True)
+    store.heartbeat(
+        "replay-integrity",
+        status="recovered",
+        durable_integrity_ok=True,
+        durable_integrity_reasons=(),
+    )
+    return report
