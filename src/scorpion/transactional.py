@@ -18,6 +18,10 @@ class RuntimeHaltedError(RuntimeError):
     """Normalization was denied by the durable runtime halt."""
 
 
+class RawReceiptInvariantError(RuntimeError):
+    """The normalized transition is not causally anchored to a valid raw receipt."""
+
+
 @dataclass(frozen=True, slots=True)
 class TransitionCommitResult:
     inserted: bool
@@ -77,6 +81,33 @@ class SQLiteTransitionCommitter:
                         raise RuntimeHaltedError(
                             f"runtime halted: {payload.get('reason', '')}"
                         )
+                receipt = db.execute(
+                    """
+                    SELECT p.status,r.message_id
+                    FROM raw_processing p
+                    JOIN raw_discord_events r ON r.raw_event_id=p.raw_event_id
+                    WHERE p.raw_event_id=?
+                    """,
+                    (raw_revision_id,),
+                ).fetchone()
+                if receipt is None:
+                    raise RawReceiptInvariantError("missing raw receipt")
+                if receipt["message_id"] != event.message_id:
+                    raise RawReceiptInvariantError("raw receipt message mismatch")
+                if receipt["status"] not in {"PENDING", "DONE"}:
+                    raise RawReceiptInvariantError(
+                        f"invalid raw processing status: {receipt['status']}"
+                    )
+                if receipt["status"] == "DONE":
+                    existing = db.execute(
+                        "SELECT payload_json FROM signal_events WHERE event_id=?",
+                        (event.event_id,),
+                    ).fetchone()
+                    if existing is None or existing["payload_json"] != store._signal_payload(event):
+                        raise RawReceiptInvariantError(
+                            "completed raw receipt does not match committed signal"
+                        )
+
                 cursor = db.execute(
                     """
                     INSERT OR IGNORE INTO signal_events
