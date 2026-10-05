@@ -3,9 +3,13 @@ from dataclasses import replace
 
 import pytest
 
-from scorpion.integrity import ReplayIntegritySentinel, audit_durable_integrity
+from scorpion.integrity import (
+    ReplayIntegritySentinel,
+    audit_durable_integrity,
+    clear_integrity_halt_if_safe,
+)
 from scorpion.pipeline import Pipeline, RuntimeHaltedError
-from scorpion.store import Store
+from scorpion.store import SafetyLatchClearError, Store
 
 
 def test_replay_integrity_sentinel_latches_halt_on_divergence(tmp_path):
@@ -266,3 +270,46 @@ def test_halt_recovery_round_trip_preserves_exact_replay_identity(tmp_path, raw_
 
     durable_state, _ = replay(events)
     assert state_fingerprint(recovered.state) == state_fingerprint(durable_state)
+
+
+
+def test_integrity_safety_latch_cannot_be_cleared_without_verification(tmp_path):
+    store = Store(tmp_path / "protected-clear.db")
+    store.set_halt(True, "durable_integrity_violation")
+
+    with pytest.raises(SafetyLatchClearError, match="verified recovery"):
+        store.set_halt(False, "operator_override")
+
+    assert store.runtime_halt() == (True, "durable_integrity_violation")
+
+
+def test_verified_integrity_recovery_clears_clean_safety_latch(tmp_path):
+    store = Store(tmp_path / "verified-clear.db")
+    store.set_halt(True, "replay_integrity_divergence")
+
+    report = clear_integrity_halt_if_safe(store)
+
+    assert report.ok is True
+    assert store.runtime_halt() == (False, "integrity_verified")
+    heartbeat = store.health_snapshot()["heartbeats"]["replay-integrity"]
+    assert heartbeat["metadata"]["status"] == "recovered"
+
+
+def test_verified_integrity_recovery_refuses_corrupt_substrate(tmp_path):
+    store = Store(tmp_path / "refuse-corrupt-clear.db")
+    store.set_halt(True, "durable_integrity_violation")
+    with store.connect() as db:
+        db.execute(
+            """
+            INSERT INTO proposed_effects
+            (source_event_id,kind,contract_key,generation,reason,quantity_hint,
+             metadata_json,created_ts_utc,status)
+            VALUES ('ghost-event','REVIEW',NULL,0,'fault-injected',NULL,'{}',
+                    '2026-09-08T14:00:00+00:00','PENDING_REVIEW')
+            """
+        )
+
+    with pytest.raises(RuntimeError, match="orphan_effect"):
+        clear_integrity_halt_if_safe(store)
+
+    assert store.runtime_halt() == (True, "durable_integrity_violation")
