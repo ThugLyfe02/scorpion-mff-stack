@@ -137,7 +137,12 @@ def test_normalized_commit_rejects_raw_message_identity_tampering(
         asyncio.run(pipeline.handle(raw))
 
     assert store.load_signals() == []
-    assert [row.revision_id for row in store.load_pending_raw()] == [raw.revision_id]
+    with store.connect() as db:
+        pending = db.execute(
+            "SELECT raw_event_id,status FROM raw_processing WHERE raw_event_id=?",
+            (raw.revision_id,),
+        ).fetchone()
+        assert tuple(pending) == (raw.revision_id, "PENDING")
 
 
 def test_exact_redelivery_of_done_raw_is_idempotent(tmp_path, raw_factory):
