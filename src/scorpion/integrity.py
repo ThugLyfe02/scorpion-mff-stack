@@ -75,7 +75,10 @@ def audit_durable_integrity(store: Store) -> DurableIntegrityReport:
                 ),
                 referenced_message_id=row["referenced_message_id"],
             )
-            if raw.revision_id != row["raw_event_id"] or raw.content_sha256 != row["content_sha256"]:
+            if (
+                raw.revision_id != row["raw_event_id"]
+                or raw.content_sha256 != row["content_sha256"]
+            ):
                 raw_revision_mismatches += 1
         orphan_effects = db.execute(
             """
