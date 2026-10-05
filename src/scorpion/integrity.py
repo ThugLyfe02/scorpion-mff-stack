@@ -9,19 +9,114 @@ from .store import Store
 
 
 @dataclass(frozen=True, slots=True)
+class DurableIntegrityReport:
+    ok: bool
+    quick_check: str
+    foreign_key_violations: int
+    invalid_raw_statuses: int
+    orphan_effects: int
+    orphan_audits: int
+    signals_missing_audit: int
+    audit_kind_mismatches: int
+
+    @property
+    def reason_codes(self) -> tuple[str, ...]:
+        reasons: list[str] = []
+        if self.quick_check != "ok":
+            reasons.append("sqlite_quick_check")
+        if self.foreign_key_violations:
+            reasons.append("foreign_key_violation")
+        if self.invalid_raw_statuses:
+            reasons.append("invalid_raw_status")
+        if self.orphan_effects:
+            reasons.append("orphan_effect")
+        if self.orphan_audits:
+            reasons.append("orphan_decision_audit")
+        if self.signals_missing_audit:
+            reasons.append("signal_missing_decision_audit")
+        if self.audit_kind_mismatches:
+            reasons.append("audit_kind_mismatch")
+        return tuple(reasons)
+
+
+def audit_durable_integrity(store: Store) -> DurableIntegrityReport:
+    """Check structural invariants that replay equivalence alone cannot prove.
+
+    This intentionally runs on the sentinel cadence rather than the message hot path.
+    It detects database corruption plus partial/manual mutations that can leave the
+    event log apparently replayable while its audit/effect bundle is inconsistent.
+    """
+    with store.connect() as db:
+        quick_rows = db.execute("PRAGMA quick_check").fetchall()
+        quick_check = "ok" if len(quick_rows) == 1 and quick_rows[0][0] == "ok" else "failed"
+        foreign_key_violations = len(db.execute("PRAGMA foreign_key_check").fetchall())
+        invalid_raw_statuses = db.execute(
+            "SELECT COUNT(*) FROM raw_processing WHERE status NOT IN ('PENDING','DONE')"
+        ).fetchone()[0]
+        orphan_effects = db.execute(
+            """
+            SELECT COUNT(*) FROM proposed_effects e
+            LEFT JOIN signal_events s ON s.event_id=e.source_event_id
+            WHERE s.event_id IS NULL
+            """
+        ).fetchone()[0]
+        orphan_audits = db.execute(
+            """
+            SELECT COUNT(*) FROM decision_audit a
+            LEFT JOIN signal_events s ON s.event_id=a.event_id
+            WHERE s.event_id IS NULL
+            """
+        ).fetchone()[0]
+        signals_missing_audit = db.execute(
+            """
+            SELECT COUNT(*) FROM signal_events s
+            LEFT JOIN decision_audit a ON a.event_id=s.event_id
+            WHERE a.event_id IS NULL
+            """
+        ).fetchone()[0]
+        audit_kind_mismatches = db.execute(
+            """
+            SELECT COUNT(*) FROM signal_events s
+            JOIN decision_audit a ON a.event_id=s.event_id
+            WHERE s.kind != a.kind
+            """
+        ).fetchone()[0]
+
+    counts = (
+        foreign_key_violations,
+        invalid_raw_statuses,
+        orphan_effects,
+        orphan_audits,
+        signals_missing_audit,
+        audit_kind_mismatches,
+    )
+    return DurableIntegrityReport(
+        ok=quick_check == "ok" and not any(counts),
+        quick_check=quick_check,
+        foreign_key_violations=foreign_key_violations,
+        invalid_raw_statuses=invalid_raw_statuses,
+        orphan_effects=orphan_effects,
+        orphan_audits=orphan_audits,
+        signals_missing_audit=signals_missing_audit,
+        audit_kind_mismatches=audit_kind_mismatches,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class IntegrityCheckResult:
     ok: bool
     live_fingerprint: str
     durable_fingerprint: str
     durable_event_count: int
+    durable_integrity: DurableIntegrityReport
 
 
 @dataclass(slots=True)
 class ReplayIntegritySentinel:
-    """Periodically prove that in-memory state equals replay of the durable event log.
+    """Periodically prove live/replay identity and durable bundle integrity.
 
-    The check is intentionally off the per-message hot path. A mismatch latches the runtime
-    halt flag and emits a heartbeat, but does not rewrite the event log or fabricate state.
+    The check is intentionally off the per-message hot path. Any structural or
+    replay mismatch durably revokes admission before diagnostic telemetry is emitted.
     """
 
     every_n_commits: int = 64
@@ -42,17 +137,24 @@ class ReplayIntegritySentinel:
         if not force and self._successful_commits % self.every_n_commits:
             return None
 
+        durable_integrity = audit_durable_integrity(store)
         events = store.load_signals()
         durable_state, _ = replay(events)
         assert_valid_book(durable_state)
         live_fingerprint = state_fingerprint(live_state)
         durable_fingerprint = state_fingerprint(durable_state)
-        ok = live_fingerprint == durable_fingerprint
+        replay_ok = live_fingerprint == durable_fingerprint
+        ok = replay_ok and durable_integrity.ok
 
-        # Durably revoke admission before any diagnostic write can fail or the
-        # process can exit. Telemetry must not be a prerequisite for the latch.
+        # Revoke admission before telemetry. Once a bad state is observed, no
+        # diagnostic failure may allow subsequent normalized progression.
         if not ok:
-            store.set_halt(True, "replay_integrity_divergence")
+            reason = (
+                "durable_integrity_violation"
+                if not durable_integrity.ok
+                else "replay_integrity_divergence"
+            )
+            store.set_halt(True, reason)
 
         store.heartbeat(
             "replay-integrity",
@@ -61,10 +163,13 @@ class ReplayIntegritySentinel:
             durable_fingerprint=durable_fingerprint,
             durable_event_count=len(events),
             cadence_commits=self.every_n_commits,
+            durable_integrity_ok=durable_integrity.ok,
+            durable_integrity_reasons=durable_integrity.reason_codes,
         )
         return IntegrityCheckResult(
             ok=ok,
             live_fingerprint=live_fingerprint,
             durable_fingerprint=durable_fingerprint,
             durable_event_count=len(events),
+            durable_integrity=durable_integrity,
         )
