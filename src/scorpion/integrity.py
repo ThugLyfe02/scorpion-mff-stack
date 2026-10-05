@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
-from .domain import BookState
+from .domain import BookState, RawDiscordMessage
 from .invariants import assert_valid_book
 from .replay import replay, state_fingerprint
 from .store import Store
@@ -14,6 +15,7 @@ class DurableIntegrityReport:
     quick_check: str
     foreign_key_violations: int
     invalid_raw_statuses: int
+    raw_revision_mismatches: int
     orphan_effects: int
     orphan_audits: int
     signals_missing_audit: int
@@ -28,6 +30,8 @@ class DurableIntegrityReport:
             reasons.append("foreign_key_violation")
         if self.invalid_raw_statuses:
             reasons.append("invalid_raw_status")
+        if self.raw_revision_mismatches:
+            reasons.append("raw_revision_mismatch")
         if self.orphan_effects:
             reasons.append("orphan_effect")
         if self.orphan_audits:
@@ -53,6 +57,26 @@ def audit_durable_integrity(store: Store) -> DurableIntegrityReport:
         invalid_raw_statuses = db.execute(
             "SELECT COUNT(*) FROM raw_processing WHERE status NOT IN ('PENDING','DONE')"
         ).fetchone()[0]
+        raw_rows = db.execute("SELECT * FROM raw_discord_events").fetchall()
+        raw_revision_mismatches = 0
+        for row in raw_rows:
+            raw = RawDiscordMessage(
+                message_id=row["message_id"],
+                guild_id=row["guild_id"],
+                channel_id=row["channel_id"],
+                author_id=row["author_id"],
+                content=row["content"],
+                source_ts_utc=datetime.fromisoformat(row["source_ts_utc"]),
+                received_ts_utc=datetime.fromisoformat(row["received_ts_utc"]),
+                edited_ts_utc=(
+                    datetime.fromisoformat(row["edited_ts_utc"])
+                    if row["edited_ts_utc"]
+                    else None
+                ),
+                referenced_message_id=row["referenced_message_id"],
+            )
+            if raw.revision_id != row["raw_event_id"] or raw.content_sha256 != row["content_sha256"]:
+                raw_revision_mismatches += 1
         orphan_effects = db.execute(
             """
             SELECT COUNT(*) FROM proposed_effects e
@@ -85,6 +109,7 @@ def audit_durable_integrity(store: Store) -> DurableIntegrityReport:
     counts = (
         foreign_key_violations,
         invalid_raw_statuses,
+        raw_revision_mismatches,
         orphan_effects,
         orphan_audits,
         signals_missing_audit,
@@ -95,6 +120,7 @@ def audit_durable_integrity(store: Store) -> DurableIntegrityReport:
         quick_check=quick_check,
         foreign_key_violations=foreign_key_violations,
         invalid_raw_statuses=invalid_raw_statuses,
+        raw_revision_mismatches=raw_revision_mismatches,
         orphan_effects=orphan_effects,
         orphan_audits=orphan_audits,
         signals_missing_audit=signals_missing_audit,
