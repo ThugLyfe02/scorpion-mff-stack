@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 
 import pytest
 
@@ -222,7 +223,7 @@ def test_mid_transaction_sqlite_fault_rolls_back_entire_normalized_bundle(
     with store.connect() as db:
         db.execute(trigger_sql)
 
-    with pytest.raises(Exception, match=expected_error):
+    with pytest.raises(sqlite3.IntegrityError, match=expected_error):
         asyncio.run(pipeline.handle(raw))
 
     assert pipeline.state.positions == {}
