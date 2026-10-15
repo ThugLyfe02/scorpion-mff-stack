@@ -67,6 +67,7 @@ class Engine:
     positions: dict[str, Position] = field(default_factory=dict)
     closed: set[str] = field(default_factory=set)
     halted: bool = False
+    day: str = ""
 
     # ── book helpers ─────────────────────────────────────────────────────────
     def _quote_for(self, key: str, explicit: Quote | None) -> Quote | None:
@@ -117,10 +118,37 @@ class Engine:
                 return in_channel[0]
         return None
 
+    def _roll_day(self, ts: float) -> None:
+        """Reset the daily bookkeeping when the UTC day changes.
+
+        Without this, "never chase a closed contract" would block a 0DTE key
+        forever: the same `QQQ|CALL|719|0DTE` string recurs on any day the
+        contract trades, and the day's first trade must be a pipe test again.
+        The roll is logged so the trace shows where the boundary was.
+        """
+        day = time.strftime("%Y-%m-%d", time.gmtime(ts))
+        if not self.day:
+            self.day = day
+            return
+        if day == self.day:
+            return
+        self.day = day
+        self.closed.clear()
+        self.stats.trades_today = 0
+        self.fills.record(event="day_roll", contract_key="", qty=0, price=0.0,
+                          reason=f"new_day:{day}", ts=ts)
+
+    def _ambiguous_exit(self, signal: Signal) -> bool:
+        """An exit that names no contract while two positions sit in its channel."""
+        if signal.contract_key or not signal.channel:
+            return False
+        return len([p for p in self.open_positions if p.channel == signal.channel]) > 1
+
     # ── the entry point ──────────────────────────────────────────────────────
     def on_signal(self, signal: Signal, quote: Quote | None = None,
                   now: float | None = None, latency_ms: int | None = None) -> list[OrderIntent]:
         ts = self.clock() if now is None else now
+        self._roll_day(ts)
         if not signal.actionable:
             self._skip(signal, ts, f"ignored:{signal.ignore_reason.value if signal.ignore_reason else 'unknown'}",
                        latency_ms)
@@ -235,6 +263,8 @@ class Engine:
         position = self._resolve(signal)
         key = signal.contract_key or (position.contract_key if position else "")
         if position is None:
+            if self._ambiguous_exit(signal):
+                return self._alert(signal, ts, "ambiguous_exit:named_no_contract", latency_ms)
             return self._skip(signal, ts, "trim_without_position", latency_ms, key)
         qty = position.contracts - self.config.trim_target
         if qty <= 0:
@@ -266,6 +296,8 @@ class Engine:
         position = self._resolve(signal)
         key = signal.contract_key or (position.contract_key if position else "")
         if position is None:
+            if self._ambiguous_exit(signal):
+                return self._alert(signal, ts, "ambiguous_exit:named_no_contract", latency_ms)
             closed_note = "already_closed:never_chase" if signal.contract_key in self.closed else "close_without_position"
             return self._skip(signal, ts, closed_note, latency_ms, key)
         qty = position.contracts
@@ -299,6 +331,16 @@ class Engine:
                 key: str = "") -> list[OrderIntent]:
         self.stats.rejected += 1
         self.fills.record(event="reject", contract_key=key or signal.contract_key, qty=0,
+                          price=0.0, reason=reason, ts=ts, latency_ms=latency_ms,
+                          accepted=False, note=signal.raw[:120])
+        return []
+
+    def _alert(self, signal: Signal, ts: float, reason: str,
+               latency_ms: int | None) -> list[OrderIntent]:
+        """Something a human must resolve. Logged as its own event so it is
+        greppable rather than buried in the skip stream - and never guessed at."""
+        self.stats.skipped += 1
+        self.fills.record(event="alert", contract_key=signal.contract_key, qty=0,
                           price=0.0, reason=reason, ts=ts, latency_ms=latency_ms,
                           accepted=False, note=signal.raw[:120])
         return []

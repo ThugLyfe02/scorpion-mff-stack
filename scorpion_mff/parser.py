@@ -68,12 +68,19 @@ _EXP_STOPWORDS = (
     "THE", "OLD", "MESSAGES", "PRINTING",
 )
 
-_FINAL_WORDS = ("CLOSED", "FLATTEN", "SOLD")
-_TRIM_WORDS = ("TRIM", "RUNNER", "RUNNERS", "SCALE", "HALF", "PARTIAL",
+_FINAL_PHRASES = ("CLOSED FULLY", "FULLY CLOSED", "FLATTEN", "FLATTENED", "ALL OUT")
+_TRIM_WORDS = ("TRIM", "RUNNER", "RUNNERS", "SCALE OUT", "SCALING OUT", "HALF", "PARTIAL",
                "SET SL", "SL AT", "BREAKEVEN", "STOP LOSS", "SET STOP")
-_ADD_WORDS = ("ADDING", "ADDED", "ADD MORE", "NEW AVG", "AVG AT", "AVERAGE", "AVG ")
+# "scaling in" BUILDS a position; only "scale out" cuts one. Getting this
+# backwards cuts a position when he says he is adding.
+_ADD_WORDS = ("ADDING", "ADDED", "ADD MORE", "NEW AVG", "AVG AT", "AVERAGE", "AVG ",
+              "SCALING IN", "SCALE IN", "SCALE HERE", "SCALING UP")
 _STANDDOWN_WORDS = ("STAND DOWN", "STAND-DOWN", "STANDDOWN", "DO NOT BUY", "HALT", "KILL SWITCH")
 _EXPLICIT_CLOSE_RE = re.compile(r"\b(CLOSE|CLOSING|CLOSED|SOLD|EXIT|FLATTEN)\b")
+# "don't add", "do not close", "not closing yet": a negated verb is not an
+# instruction to do the verb. A keyword-only classifier fires on these.
+_NEGATED_VERB_RE = re.compile(
+    r"\b(?:DON'?T|DO\s+NOT|NOT|NO)\s+(?:ADD|ADDING|CLOSE|CLOSING|EXIT|EXITING|TRIM|TRIMMING|SELL|SELLING|BUY|BUYING)\b")
 
 
 def normalise(text: str) -> str:
@@ -131,16 +138,27 @@ def _kind(t: str, side: Side | None, strike: float | None) -> AlertKind:
 
         Discord close/trim/%/stop/sold runners -> trim to 1 + BE or flatten last
 
-    So: stated finality ("closed", "flatten", "sold") flattens; a scale-out
-    (runners, trim, SL) keeps a runner; a "%" alone is a level, not an
-    instruction - it trims and protects rather than flattening blind.
+    Precedence, and why (an independent review caught the first version getting
+    this backwards):
+
+      1. stand-down            -> STOP (a halt, not an exit)
+      2. a negated verb        -> IGNORE ("don't add", "not closing yet")
+      3. an unambiguous final  -> CLOSE ("closed fully", "flatten", "all out")
+      4. any scale-out word    -> TRIM. "SOLD RUNNERS" belongs HERE, not in (3):
+                                  the lock lists "sold runners" under trim-to-1+BE.
+      5. an explicit close verb-> CLOSE ("close at 2.65", "close remaining for 10%")
+      6. a bare "%"            -> TRIM (a level, so protect; see HOTPATH.md for
+                                  the commentary trade-off this accepts)
+      7. add/avg words         -> ADD ("scaling in" is an add, never a trim)
+      8. side + strike         -> ENTRY
+      9. otherwise             -> IGNORE
     """
-    if any(w in t for w in _STANDDOWN_WORDS):
-        return AlertKind.STOP
-    if any(w in t for w in _FINAL_WORDS):
-        return AlertKind.CLOSE
+    if any(w in t for w in _STANDDOWN_WORDS) or _NEGATED_VERB_RE.search(t):
+        return AlertKind.STOP if any(w in t for w in _STANDDOWN_WORDS) else AlertKind.IGNORE
+    if any(p in t for p in _FINAL_PHRASES):
+        return AlertKind.CLOSE         # "Runners at $3.00 closed fully"
     if any(w in t for w in _TRIM_WORDS):
-        return AlertKind.TRIM          # "Runners @ 25% close or keep as lotto"
+        return AlertKind.TRIM          # "Sold runners at 3.90", "Runners @ 25%"
     if _EXPLICIT_CLOSE_RE.search(t):
         return AlertKind.CLOSE         # "Close at 2.65", "Close remaining for 10%"
     if _PCT_RE.search(t):

@@ -105,11 +105,45 @@ the HTTP order shape (against a real local server: idempotency key, retry ladder
    excluded; whether a LOTTO-flagged post inside `options-king` is also out is a
    house call. Flip it in `parser.parse` when you decide.
 
-## Bugs the replay harness caught (why it exists)
+## Defects found and fixed (why the replay harness and a second opinion exist)
+
+**Caught by the replay harness:**
 
 * `Close at 19%` parsed **19.00 as a price** and sold a $3.13 contract for $19 —
-  a $8,146 "profit" that was pure parser error. Price extraction now refuses a
-  number followed by `%`, and refuses `$240 strike` (a strike mention).
-* An exit post that does not restate the contract (`Close remaining for 10%`)
-  got **no quote**, so a legitimate close was rejected. The engine now resolves
-  the position first and prices *that*.
+  an $8,146 phantom profit that was pure parser error. Price extraction now
+  refuses a number followed by `%`, and refuses `$240 strike` (a strike mention).
+* An exit that restates no contract (`Close remaining for 10%`) got **no quote**,
+  so a legitimate close was rejected. The engine now resolves the position first
+  and prices *that*.
+
+**Caught by an independent review** (`just fh-stack .pi/fusion-harness/model-stack-lean.yaml -p …`,
+architect deepseek-v4-pro · main deepseek-v4-flash), all now regression-tested in
+`tests/test_review_fixes.py`:
+
+| Finding | Fix |
+|---|---|
+| `SOLD RUNNERS` flattened the position, but the lock lists "sold runners" under trim-to-1+BE | precedence inverted: unambiguous finality phrases ("closed fully", "flatten") first, then any scale-out word |
+| `SCALE` meant trim, so "scaling in" cut a position he was building | `SCALING IN`/`SCALE IN` are ADDs; only `SCALE OUT`/`SCALING OUT` trim |
+| A negated verb still fired: "don't add", "not closing yet", "no adds above 1.50" | a negated verb is IGNORE; `DO NOT BUY` stays a stand-down |
+| No dedup: a Gateway RESUME redelivery would trade the same post twice, and the second buy has a fresh idempotency key so the broker cannot catch it | the listener drops a repeated `message_id` (bounded 5,000) and logs `duplicate` |
+| `closed` never reset, so a 0DTE key could never be re-traded on a later day | daily roll on the UTC date: clears `closed`, resets the pipe counter, logs `day_roll` |
+| An ambiguous exit (two positions in one channel, no contract named) was a silent skip | logged as an `alert` event — a human decides; the automation still refuses to guess |
+
+**Raised by the review and deliberately NOT changed** (your call, not mine):
+
+1. **A bare `%` post still trims.** "up 15% today" is commentary that will trim a
+   runner. The lock says a Discord `%` is an exit signal, and missing a real exit
+   is the 9/8 failure mode — so the bias is deliberate. If loud commentary becomes
+   a nuisance, require an exit verb or a runner word on `%` posts.
+2. **An exit is a quote-priced limit with no market fallback.** If the quote is
+   stale or the feed is down, the exit can sit unfilled. The engine fails closed
+   (`no_quote`) rather than guessing a price; a marketable-limit fallback needs a
+   risk decision you should make.
+3. **A rejected entry is silent beyond the fill log.** The signal is dropped, not
+   retried. That is the log's job — `live/fills.jsonl` carries every reject with
+   its reason — but nothing pages you.
+4. **A channel-only exit can still close the "wrong" single position** when he
+   posts an exit in a channel whose only open position is not the one he means.
+   Named contracts and ambiguity handling cover most of it; the rest needs his
+   actual posting habit.
+

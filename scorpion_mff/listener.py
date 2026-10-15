@@ -64,6 +64,8 @@ class Listener:
     fills: FillLog | None = None
     clock: Callable[[], float] = time.time
     processed: int = 0
+    seen: dict[str, None] = field(default_factory=dict)   # message_id -> nothing
+    seen_max: int = 5000                                  # bounded; oldest evicted
 
     def __post_init__(self) -> None:
         if self.fills is None:
@@ -83,6 +85,22 @@ class Listener:
     def handle(self, message: RawMessage) -> list[OrderIntent]:
         """One event, handled end to end, synchronously. Returns the intents."""
         started = self.clock()
+
+        # A Gateway RESUME can redeliver a MESSAGE_CREATE. Without this the same
+        # post trades twice - and the second buy carries a fresh idempotency key,
+        # so the broker cannot catch it either.
+        mid = message.message_id
+        if mid:
+            if mid in self.seen:
+                if self.fills is not None:
+                    self.fills.record(event="duplicate", contract_key="", qty=0, price=0.0,
+                                      reason="redelivered_message_id", ts=self.clock(),
+                                      accepted=False, note=mid)
+                return []
+            self.seen[mid] = None
+            while len(self.seen) > self.seen_max:
+                self.seen.pop(next(iter(self.seen)))
+
         signal = parse(message)
         # No pre-fetch here: the engine resolves the target position first and
         # prices THAT, so an exit post which does not restate the contract is
