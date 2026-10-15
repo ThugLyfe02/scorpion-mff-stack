@@ -1,9 +1,10 @@
+# local environment (never the code)
 .venv/
 __pycache__/
 *.pyc
-.DS_Store
-.env
-.env.*
-*.pem
-secrets/
-raw_hist/
+.pytest_cache/
+
+# live runtime state: this is machine state, not source. The kill switch file is
+# deliberately NOT ignored - an arm-blocking file must be visible in the tree.
+live/fills.jsonl
+live/heartbeat.json

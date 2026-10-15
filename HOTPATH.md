@@ -1,0 +1,115 @@
+# Hot path — coded, event-driven, no LLM in the exit
+
+Built 2026-10-15 against the 9/8 post-mortem in `docs/HANDOFF.md` and the locked
+rules in `live/RULES.lock.md`. This is the "**Code missing (build this)**" list
+from the handoff, implemented:
+
+| Handoff asked for | Where it lives |
+|---|---|
+| Discord Gateway listener | `scorpion_mff/listener.py` (`WebsocketGateway`) |
+| deterministic parser | `scorpion_mff/parser.py` |
+| state machine off the chat queue | `scorpion_mff/engine.py` |
+| RH adapter | `scorpion_mff/broker.py` (`RobinhoodAgenticBroker`) |
+| fill log | `scorpion_mff/fills.py` |
+| healthcheck | `scorpion_mff/health.py` (latency budget + deadman heartbeat) |
+| kill switch | `scorpion_mff/killswitch.py` + `live/NO_TRADE` |
+
+Zero third-party dependencies for everything except the live websocket transport
+(optional `websockets`). No shell, ever: argv lists and `urllib` only.
+
+## Why this shape
+
+The 9/8 failure was not a bad trade. The arm cron woke **31 minutes late**
+(09:56:26 for a 9:25 arm), a deadman job starved the queue for 579s, 2 of 15
+five-minute slots fired, and the day filled **$0** against a **~$295-315**
+counterfactual. Two alerts went by: QQQ 719C 0DTE (+10% by 09:56) and NVDA 227.5P
+Sep11 (+19% by ~10:05).
+
+Everything here exists to remove that failure mode: one websocket event is
+parsed, decided and sent inline, on the same tick, with the latency measured per
+event rather than hoped for. There is no agent turn, no shared chat queue, no
+scheduler to be starved.
+
+## Locked rules, as implemented
+
+| Rule (live/RULES.lock.md) | Implementation | Test |
+|---|---|---|
+| `limit = min(live_ask, his_bid * 1.15)` | `pricing.marketable_limit` (floored to the cent) | `test_pricing.py` |
+| skip if `> +25%` off his bid | `pricing.far_off_bid` (strictly greater; boundary tested) | `test_pricing.py` |
+| first trade of day = 1 contract pipe test | `sizing.contracts_for` + `EngineConfig.pipe_test` | `test_engine.py` |
+| king/etf/platinum $1500 (add $2250) | `sizing.clip_budget` | `test_plumbing.py` |
+| high-confidence $3000 (add $4500) | `sizing.clip_budget` | `test_plumbing.py` |
+| max 2 concurrent | `engine._on_entry` | `test_engine.py` |
+| add once, only on an added/avg post | `engine._on_add` | `test_engine.py` |
+| close/trim/%/runners → trim to 1 + BE | `engine._on_trim` | `test_engine.py` |
+| never chase a closed contract | `engine.closed` set | `test_engine.py` |
+| STOP/stand-down = halt (exits still allowed) | `engine._on_stop` / `halted` | `test_engine.py` |
+| event-driven, not cron | `listener.Listener.handle` | `test_listener.py` |
+
+## Run it
+
+```bash
+python -m venv .venv
+.venv/Scripts/python -m pip install pytest            # tests only
+.venv/Scripts/python -m pytest tests -q               # 99 tests, offline
+
+.venv/Scripts/python -m scorpion_mff.cli doctor       # rules, switches, broker mode
+.venv/Scripts/python -m scorpion_mff.cli replay tapes/sep8.json
+.venv/Scripts/python -m scorpion_mff.cli arm          # DRY: decides, places nothing
+.venv/Scripts/python -m scorpion_mff.cli status       # kill switch + fill-log tail
+```
+
+`arm` refuses without `DISCORD_BOT_TOKEN`. `--live` additionally needs
+`MFF_RH_TOKEN` **and** a configured quote feed. Dry is the default everywhere:
+`RobinhoodAgenticBroker(dry_run=True)`.
+
+### The 9/8 replay (the proof)
+
+```
+replay tapes/sep8.json  (pipe_test=True)
+events 4 | buys 2 (6 contracts) | sells 2 | realised $211.00
+latency worst 0ms  budget 10000ms  breaches 0
+  buy   1x QQQ|CALL|719|0DTE         @ 1.05   entry:pipe
+  sell  1x QQQ|CALL|719|0DTE         @ 1.11   close:pct=10%
+  buy   5x NVDA|PUT|227.5|2026-09-11 @ 2.72   entry:standard
+  sell  5x NVDA|PUT|227.5|2026-09-11 @ 3.13   close:pct=19%
+```
+
+`--no-pipe-test` reproduces **$289** on the same tape, which is the post-mortem's
+~$295-315 counterfactual: **the pipe test is what costs the ~$78 difference.** That
+is a fact about the rules, not a bug — worth deciding on deliberately.
+
+## Status, honestly
+
+**Proven offline:** parser against 23 real posts (including the OCR junk the
+backtest corpus is full of), pricing boundaries, the full sizing table, every
+state-machine transition, the fill log, the kill switch, the latency budget,
+the HTTP order shape (against a real local server: idempotency key, retry ladder,
+429 honouring `retry_after`, token never in an error), and the 9/8 replay.
+
+**Not yet proven — needs your credentials or a decision:**
+
+1. **The Robinhood Agentic order endpoint.** `POST {base}/orders` with a JSON
+   body is what the adapter sends; the real path and field names are yours to
+   confirm (`MFF_RH_BASE`). I did not invent a vendor schema.
+2. **The quote feed.** `HttpQuoteProvider` takes a URL template plus the dotted
+   JSON paths to bid/ask (`MFF_QUOTE_URL_TEMPLATE`, `MFF_QUOTE_BID_PATH`,
+   `MFF_QUOTE_ASK_PATH`). Unconfigured, every entry fails closed with `no_quote`
+   — correct, but useless until it points at a real feed. `arm --live` refuses
+   without it.
+3. **The Gateway.** Needs a bot token with the **MESSAGE_CONTENT** privileged
+   intent enabled in the Discord developer portal, plus guild membership for the
+   four channel ids.
+4. **LOTTO policy.** Posts flagged LOTTO (a lottery play, e.g. `CALL/ ODTE LOTTO
+   TICKER TSLA`) are IGNORED by default. The lock names lotto-* CHANNELS as
+   excluded; whether a LOTTO-flagged post inside `options-king` is also out is a
+   house call. Flip it in `parser.parse` when you decide.
+
+## Bugs the replay harness caught (why it exists)
+
+* `Close at 19%` parsed **19.00 as a price** and sold a $3.13 contract for $19 —
+  a $8,146 "profit" that was pure parser error. Price extraction now refuses a
+  number followed by `%`, and refuses `$240 strike` (a strike mention).
+* An exit post that does not restate the contract (`Close remaining for 10%`)
+  got **no quote**, so a legitimate close was rejected. The engine now resolves
+  the position first and prices *that*.

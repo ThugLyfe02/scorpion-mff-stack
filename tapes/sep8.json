@@ -1,0 +1,52 @@
+{
+  "name": "sep8",
+  "source": "live/misses/2026-09-08.json - the post-mortem of the two alerts the cron+browser path lost (arm woke 09:56:26 ET, ~31m late; fills $0, counterfactual $295-315)",
+  "et_note": "ts values are an arbitrary but ordered epoch base; ET wall-clock is in `time_et`",
+  "messages": [
+    {
+      "channel": "etf-options",
+      "channel_id": "1231301953972207667",
+      "time_et": "09:50",
+      "ts": 1000.0,
+      "text": "CALL TICKER QQQ STRIKE $719 Exp Today Current BID Price $1.01"
+    },
+    {
+      "channel": "etf-options",
+      "channel_id": "1231301953972207667",
+      "time_et": "09:56",
+      "ts": 1360.0,
+      "text": "Close remaining for 10%"
+    },
+    {
+      "channel": "options-king",
+      "channel_id": "968352649437126676",
+      "time_et": "10:02",
+      "ts": 1720.0,
+      "text": "PUT TICKER NVDA STRIKE $227.5 Exp 2026-09-11 Current BID Price $2.63"
+    },
+    {
+      "channel": "options-king",
+      "channel_id": "968352649437126676",
+      "time_et": "10:05",
+      "ts": 1900.0,
+      "text": "Close at 19%"
+    }
+  ],
+  "quotes": {
+    "QQQ|CALL|719|0DTE": [[1.01, 1.05], [1.11, 1.14]],
+    "NVDA|PUT|227.5|2026-09-11": [[2.63, 2.72], [3.13, 3.20]]
+  },
+  "quotes_note": "entry quote then exit quote. The exit mark is the miss record's exit_pct applied to his posted bid: QQQ 1.01*1.10 = 1.11, NVDA 2.63*1.19 = 3.13",
+  "expected_with_lock": {
+    "buys": 2,
+    "sells": 2,
+    "contracts_bought": 6,
+    "realized_usd": 211.0,
+    "note": "first trade of the day is the 1-contract pipe test per live/RULES.lock.md"
+  },
+  "expected_without_pipe_test": {
+    "contracts_bought": 19,
+    "realized_usd": 289.0,
+    "note": "both trades at full clip size - this reproduces the ~$295-315 counterfactual in the post-mortem, so the pipe test rule is what costs the difference"
+  }
+}
