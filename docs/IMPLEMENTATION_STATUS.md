@@ -44,6 +44,15 @@ Implemented in this change:
       zero size, live disabled) and a generation-specific idempotency key
 - [x] risk state carried in `BookState`, so replay reproduces the drawdown and a restart
       cannot forget a stand-down
+- [x] durable outbox dispatcher (`outbox.py` + `outbox_state`/`executions` tables): leased
+      claims inside `BEGIN IMMEDIATE`, attempts counted at claim, exponential backoff with a
+      ceiling, dead-letter after the budget, refusals terminal, idempotent execution records
+- [x] reconciliation (`reconciliation.py`): both directions of drift - phantom local and
+      unhedged remote - with a per-contract explicit tolerance; drift halts the book and
+      emits a HALT effect rather than a log line
+- [x] TCA on realised fills (`tca.py`): limit vs fill in bps and dollars, partial-fill share,
+      latency p90, and a `suggested_multiple` (p90 of fill/reference, rounded up) that
+      refuses to answer below ten priced fills
 
 Still requires environment/operator work:
 
@@ -54,7 +63,7 @@ Still requires environment/operator work:
 - [ ] validate parser precision/recall on that raw corpus
 - [ ] shadow run through live sessions before any operational reliance
 - [ ] external reviewed brokerage integration, if desired, behind human authorization
-- [ ] durable outbox dispatcher (claim/retry/dead-letter) consuming `OrderEnvelope` payloads
-- [ ] reconciliation: broker-reported positions and fills vs the local book, fail closed on drift
-- [ ] TCA from realised fills: limit vs fill in bps, partial-fill ratio, latency distribution
+- [ ] a concrete venue `Sender` behind `Dispatcher` (protocol is defined; no vendor is wired)
+- [ ] position/cash snapshot feed for reconciliation (the comparison is built, the source is not)
 - [ ] pre-market bars so exit levels and path statistics can be verified rather than assumed
+- [ ] operator surface: a CLI that dispatches, reconciles, and prints TCA over the store
