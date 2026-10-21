@@ -289,6 +289,17 @@ class Store:
                 (value, now),
             )
 
+    def halt_state(self) -> tuple[bool, str]:
+        """The persisted halt, so a restart cannot forget a stand-down."""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT value FROM runtime_flags WHERE key='halt'"
+            ).fetchone()
+        if not row:
+            return False, ""
+        payload = json.loads(row["value"])
+        return bool(payload.get("halted", False)), str(payload.get("reason", ""))
+
     def health_snapshot(self) -> dict[str, object]:
         with self.connect() as db:
             beats = {

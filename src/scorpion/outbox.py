@@ -20,7 +20,7 @@ reverse) is worse than one that moved neither.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -114,6 +114,10 @@ class Dispatcher:
     policy: Policy = field(default_factory=Policy)
     config: DispatchConfig = field(default_factory=DispatchConfig)
     owner: str = "dispatcher"
+    # Called the instant a send succeeds. The book must move before the NEXT effect in the
+    # same batch is authorized, or a close can be authorized against a position the open in
+    # that batch has not filled yet.
+    on_filled: Callable[[Dispatched], None] | None = None
 
     def dispatch_once(
         self,
@@ -131,10 +135,11 @@ class Dispatcher:
         )
         report = DispatchReport(attempted=len(claims))
         for claim in claims:
-            report.items.append(
-                self._dispatch_one(claim, state=state, now=moment, quotes=quotes,
-                                   references=references)
-            )
+            item = self._dispatch_one(claim, state=state, now=moment, quotes=quotes,
+                                      references=references)
+            report.items.append(item)
+            if item.outcome == "SENT" and self.on_filled is not None:
+                self.on_filled(item)
         for item in report.items:
             if item.outcome == "SENT":
                 report.sent += 1

@@ -53,6 +53,14 @@ Implemented in this change:
 - [x] TCA on realised fills (`tca.py`): limit vs fill in bps and dollars, partial-fill share,
       latency p90, and a `suggested_multiple` (p90 of fill/reference, rounded up) that
       refuses to answer below ten priced fills
+- [x] paper venue (`paper.py`): a real `Sender` implementation, deterministic, with scripted
+      failure injection - so the whole loop runs without credentials or network
+- [x] vertical slice (`scenario.py`) + operator CLI (`scorpion demo|dispatch|outbox|tca|
+      reconcile|health`): one command drives parse -> risk -> authorize -> dispatch -> settle
+      -> TCA and prints the trail; the same runner is the shadow harness when a real Sender
+      is wired
+- [x] a persisted halt is read back on start (`Store.halt_state`), so a restart resumes
+      halted instead of quietly trading
 
 Still requires environment/operator work:
 
@@ -66,4 +74,5 @@ Still requires environment/operator work:
 - [ ] a concrete venue `Sender` behind `Dispatcher` (protocol is defined; no vendor is wired)
 - [ ] position/cash snapshot feed for reconciliation (the comparison is built, the source is not)
 - [ ] pre-market bars so exit levels and path statistics can be verified rather than assumed
-- [ ] operator surface: a CLI that dispatches, reconciles, and prints TCA over the store
+- [ ] operator surface beyond the CLI: a long-running dispatcher loop with backoff jitter
+- [ ] structured metrics/export for the dispatcher and reconciliation (counts exist, series do not)

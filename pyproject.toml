@@ -27,6 +27,7 @@ dev = [
 scorpion-replay = "scorpion.cli:replay_main"
 scorpion-health = "scorpion.cli:health_main"
 scorpion-ingest = "scorpion.runtime:ingest_main"
+scorpion = "scorpion.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/scorpion"]

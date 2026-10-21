@@ -26,6 +26,11 @@ class Pipeline:
         # Event-sourced crash recovery: rebuild deterministic book state from
         # durable normalized events.
         self.state, historical_effects = replay(self.store.load_signals())
+        # A halt is durable state, so a restart resumes halted rather than quietly trading.
+        halted, reason = self.store.halt_state()
+        if halted and not self.state.halted:
+            self.state = replace(self.state, halted=True)
+            self.store.heartbeat("halt_recovered", reason=reason)
         self.last_market_day = self.state.risk.market_day
         # INSERT OR IGNORE re-materializes any effect lost by a crash after signal persistence.
         self.store.append_effects(historical_effects)
