@@ -332,3 +332,127 @@ def allocation_drift(first: Mapping[str, Any], last: Mapping[str, Any]) -> dict[
             max(drift, key=lambda k: abs(drift[k])) if drift else None
         ),
     }
+
+
+# ── contextual weighting: the same rules, different weights per condition ───
+# A single weight vector assumes one best rule for all conditions. The corpus says otherwise: the
+# premium-band work found the edge concentrated in one band, and the regime work found sessions that
+# do not resemble each other. So the allocator runs one Hedge PER CONTEXT and asks the current
+# context which allocator to listen to. This is the sleeping-experts construction, restricted to a
+# partition we can observe rather than one we have to infer.
+
+def by_context(
+    returns_by_expert: Mapping[str, Sequence[float]],
+    contexts: Sequence[str],
+    **kwargs: Any,
+) -> dict[str, Result]:
+    """One blended allocator per context. Returns name -> Result."""
+    names = list(returns_by_expert)
+    if not names:
+        raise ExpertsError("no_experts", "empty mapping")
+    lengths = {len(returns_by_expert[n]) for n in names}
+    if len(lengths) != 1:
+        raise ExpertsError("ragged", f"expert series lengths {sorted(lengths)}")
+    rounds = lengths.pop()
+    if len(contexts) != rounds:
+        raise ExpertsError("context_mismatch", f"{len(contexts)} contexts for {rounds} rounds")
+
+    buckets: dict[str, list[int]] = {}
+    for index, context in enumerate(contexts):
+        buckets.setdefault(str(context), []).append(index)
+
+    out: dict[str, Result] = {}
+    for context, indices in sorted(buckets.items()):
+        if len(indices) < 2:
+            raise ExpertsError(
+                "thin_context", f"context {context!r} has {len(indices)} round(s)"
+            )
+        subset = {
+            name: [returns_by_expert[name][i] for i in indices] for name in names
+        }
+        out[context] = from_returns(subset, **kwargs)
+    return out
+
+
+def advise(
+    contextual: Mapping[str, Result], context: str, *,
+    fallback: Result | None = None,
+) -> dict[str, Any]:
+    """The allocation to use right now, given the current context.
+
+    Falls back to the pooled allocator when a context has never been seen, and says so - silently
+    using uniform weights would look identical to a considered decision.
+    """
+    if context in contextual:
+        payload = report(contextual[context])
+        payload["source"] = "context"
+        payload["context"] = context
+        return payload
+    if fallback is None:
+        raise ExpertsError("unknown_context", f"{context!r} was never observed")
+    payload = report(fallback)
+    payload["source"] = "pooled_fallback"
+    payload["context"] = context
+    return payload
+
+
+def sizes_from_weights(
+    weights: Mapping[str, float], *, budget: float, floor: float = 0.0, cap: float = 1.0,
+) -> dict[str, float]:
+    """Turn an allocation into dollar risk per rule, with a floor and a concentration cap.
+
+    Weights are a share of attention; sizes are a share of risk. A rule that has never traded has
+    no business consuming budget, so anything at or below `floor` is set to zero and the remainder
+    is renormalised. The cap stops one rule from eating the book when the others go quiet.
+    """
+    if budget <= 0:
+        raise ExpertsError("bad_budget", str(budget))
+    if not (0.0 <= floor < 1.0):
+        raise ExpertsError("bad_floor", str(floor))
+    if not (0.0 < cap <= 1.0):
+        raise ExpertsError("bad_cap", str(cap))
+
+    kept = {name: w for name, w in weights.items() if w > floor}
+    if not kept:
+        return {name: 0.0 for name in weights}
+    total = sum(kept.values())
+    scaled = {name: value / total for name, value in kept.items()}
+
+    # Water-filling, not a single clip: capping and renormalising in one pass undoes the cap,
+    # because the excess flows straight back to the rule that was capped. So capped rules are
+    # fixed at the cap and the remaining mass is redistributed among the rest until nothing binds.
+    final = {name: 0.0 for name in weights}
+    remaining = dict(scaled)
+    free = 1.0
+    for _ in range(len(scaled) + 1):
+        pool = sum(remaining.values())
+        if not remaining or pool <= 0:
+            break
+        breached = [n for n, v in remaining.items() if v / pool * free > cap]
+        if not breached:
+            for name, value in remaining.items():
+                final[name] = value / pool * free
+            break
+        for name in breached:
+            final[name] = cap
+            free -= cap
+            remaining.pop(name)
+    return {name: round(final.get(name, 0.0) * budget, 2) for name in weights}
+
+
+def posture(weights: Mapping[str, float], *, budget: float, floor: float = 0.05,
+            cap: float = 0.6) -> dict[str, Any]:
+    """A one-call answer for the sizing layer: sizes, concentration, and whether it is decisive."""
+    allocated = sizes_from_weights(weights, budget=budget, floor=floor, cap=cap)
+    live = {name: value for name, value in allocated.items() if value > 0}
+    concentration = sum((v / budget) ** 2 for v in live.values()) if budget else 0.0
+    return {
+        "sizes": allocated,
+        "live_rules": len(live),
+        "concentration": round(concentration, 4),
+        "decisive": bool(live) and concentration >= 1.5 / max(1, len(allocated)),
+        "note": (
+            "sizes are risk budget shares, not contract counts; the sizing layer converts them "
+            "using the premium band the rule traded in"
+        ),
+    }

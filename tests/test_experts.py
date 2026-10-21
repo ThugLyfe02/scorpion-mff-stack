@@ -167,3 +167,83 @@ def test_the_allocation_sums_to_one_and_drift_is_measured():
     assert sum(weights_file(last).values()) == pytest.approx(1.0)
     drift = allocation_drift(first, last)
     assert drift["total_variation"] > 0 and drift["largest_move"] in ("a", "b")
+
+
+# ── contextual weighting and sizing ───────────────────────────────────────
+def test_each_context_gets_its_own_allocator():
+    from scorpion.experts import by_context
+
+    returns = {"a": [1.0] * 40 + [-1.0] * 40, "b": [-1.0] * 40 + [1.0] * 40}
+    contexts = ["calm"] * 40 + ["volatile"] * 40
+    allocators = by_context(returns, contexts)
+    assert set(allocators) == {"calm", "volatile"}
+    calm = report(allocators["calm"])["best_expert"]
+    volatile = report(allocators["volatile"])["best_expert"]
+    assert calm != volatile
+
+
+def test_a_thin_context_is_refused():
+    from scorpion.experts import by_context
+
+    with pytest.raises(ExpertsError):
+        by_context({"a": [1.0, 2.0], "b": [2.0, 1.0]}, ["only-one", "volatile"])
+
+
+def test_context_length_must_match_the_rounds():
+    from scorpion.experts import by_context
+
+    with pytest.raises(ExpertsError):
+        by_context({"a": [1.0, 2.0], "b": [1.0, 2.0]}, ["calm"])
+
+
+def test_advise_names_the_allocator_it_used():
+    from scorpion.experts import advise, by_context
+
+    returns = {"a": [1.0] * 10 + [-1.0] * 10, "b": [-1.0] * 10 + [1.0] * 10}
+    allocators = by_context(returns, ["calm"] * 10 + ["volatile"] * 10)
+    payload = advise(allocators, "calm")
+    assert payload["source"] == "context" and payload["context"] == "calm"
+
+
+def test_an_unseen_context_needs_an_explicit_fallback():
+    from scorpion.experts import advise, by_context, from_returns
+
+    returns = {"a": [1.0] * 10, "b": [-1.0] * 10}
+    allocators = by_context(returns, ["calm"] * 10)
+    with pytest.raises(ExpertsError):
+        advise(allocators, "never-seen")
+    payload = advise(allocators, "never-seen", fallback=from_returns(returns))
+    assert payload["source"] == "pooled_fallback"
+
+
+def test_sizes_respect_the_budget_and_zero_the_floor():
+    from scorpion.experts import sizes_from_weights
+
+    sizes = sizes_from_weights({"a": 0.8, "b": 0.15, "c": 0.05}, budget=1000.0, floor=0.1)
+    assert abs(sum(sizes.values()) - 1000.0) < 1.0
+    assert sizes["c"] == 0.0
+
+
+def test_the_cap_stops_one_rule_eating_the_book():
+    from scorpion.experts import sizes_from_weights
+
+    sizes = sizes_from_weights({"a": 0.97, "b": 0.03}, budget=100.0, floor=0.0, cap=0.6)
+    assert sizes["a"] <= 60.0 + 0.01
+
+
+def test_bad_sizing_inputs_are_refused():
+    from scorpion.experts import sizes_from_weights
+
+    with pytest.raises(ExpertsError):
+        sizes_from_weights({"a": 1.0}, budget=0.0)
+    with pytest.raises(ExpertsError):
+        sizes_from_weights({"a": 1.0}, budget=100.0, cap=1.5)
+
+
+def test_posture_reports_whether_the_allocation_is_decisive():
+    from scorpion.experts import posture
+
+    decisive = posture({"a": 0.9, "b": 0.1}, budget=1000.0)
+    diffuse = posture({"a": 0.34, "b": 0.33, "c": 0.33}, budget=1000.0)
+    assert decisive["live_rules"] == 2
+    assert decisive["concentration"] > diffuse["concentration"]
