@@ -31,7 +31,7 @@ import re
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal
@@ -242,7 +242,7 @@ def parse_row(row: dict[str, str], *, line: int = 0) -> Trade:
 
     day = _parse_day(row.get("date") or "")
     clock = _parse_et_clock(row.get("time_et") or "")
-    ts_utc = datetime.combine(day, clock) - EASTERN
+    ts_utc = datetime.combine(day, clock, tzinfo=UTC) - EASTERN
 
     ticker = (row.get("ticker") or "").strip().upper()
     if not re.fullmatch(r"[A-Z][A-Z.]{0,5}", ticker or ""):

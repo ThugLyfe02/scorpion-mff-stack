@@ -182,6 +182,35 @@ def cmd_research(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_markout(args: argparse.Namespace) -> int:
+    """Entry drift vs exit capture, with the coverage refusals stated up front."""
+    from .ledger import load_csv
+    from .markout import load_bars, run
+
+    ledger = load_csv(args.corpus)
+    bars = load_bars(args.bars)
+    payload = run(ledger, bars)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    agg, clock = payload["aggregate"], payload["clock"]
+    cov = agg["coverage"]
+    print(f"bar sets {payload['contracts_in_bars']}  measurable {cov['measurable']}"
+          f"/{cov['total']}  excluded {cov['excluded'] or '{}'}")
+    if "withheld" in agg:
+        print(f"  withheld: {agg['withheld']}")
+    else:
+        print(f"  capture   median {agg['median_capture']}  mean {agg['mean_capture']}"
+              f"  >=50% kept {agg['captured_over_half']}%")
+        print(f"  drift     median 15m {agg['median_entry_drift_15m']}   "
+              f"available {agg['median_available']}")
+        print(f"  verdict   {agg['verdict']}")
+    print(f"  clock     first {clock['first_entry_utc']}  last {clock['last_entry_utc']}")
+    print("    by hour (UTC): " + ", ".join(f"{k} {v}" for k, v in clock["by_hour_utc"].items()))
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Rebuild the book from its applied log and diff it against the live state.
 
@@ -300,6 +329,12 @@ def main(argv: list[str] | None = None) -> int:
     res.add_argument("--risk", type=float, default=0.015)
     res.add_argument("--json", action="store_true")
     res.set_defaults(func=cmd_research)
+
+    mk = sub.add_parser("markout", help="entry drift vs exit capture, with coverage refusals")
+    mk.add_argument("--corpus", default="mff-backtest/trades.csv")
+    mk.add_argument("--bars", default="mff-backtest/week_bars.json")
+    mk.add_argument("--json", action="store_true")
+    mk.set_defaults(func=cmd_markout)
 
     ver = sub.add_parser("verify", help="replay the applied log and diff against the book")
     ver.add_argument("--db", default="scorpion.db")

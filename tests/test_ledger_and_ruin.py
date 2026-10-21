@@ -12,7 +12,7 @@ The properties worth testing here are not "does it run". They are:
 """
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -51,7 +51,7 @@ def row(**over) -> dict[str, str]:
 def test_a_row_becomes_a_trade_with_an_et_timestamp():
     trade = parse_row(row())
     assert trade.side == "CALL" and trade.strike == D("712")
-    assert trade.ts_utc == datetime(2026, 9, 3, 10, 31)
+    assert trade.ts_utc == datetime(2026, 9, 3, 10, 31, tzinfo=UTC)
     assert trade.multiple == D("5.0000") and trade.r_multiple == D("4.0000")
 
 
