@@ -1,19 +1,19 @@
 """Alpha decay: how fast the edge in an alert rots, measured from forward returns.
 
-A Discord alert has a shelf life. If the move is over in five minutes, an executor that acts in
-ninety seconds captures most of it and one that acts in ten minutes captures none. That curve decides
-how much engineering the hot path is worth, and it has been inferred here only from the cost side,
-where 20% entry slippage cost 31.53R.
+A Discord alert has a shelf life. If the move is over in five minutes, an executor acting in ninety
+seconds captures most of it and one acting in ten minutes captures none. That curve decides how much
+engineering the hot path is worth, and here it has been inferred only from the cost side, where 20%
+entry slippage cost 31.53R.
 
-This measures it from the signal side: for each entry, the forward return to the same contract at a set
-of horizons, averaged across trades.
+This measures it from the signal side: for each entry, the forward return to the same contract at a
+set of horizons, averaged across trades.
 
     decay_curve   mean forward return at 5, 15, 30 and 60 minutes, with n and standard error
     half_life     the time for that mean to halve, fitted only when the path is monotone and the
                   shortest horizon is above noise; otherwise `not_identified`
 
-The refusals are the substance: below five measurable trades nothing is fitted, a non-monotone path is
-reported as such, and a shortest-horizon mean inside one standard error returns `not_identified`
+The refusals are the substance: below five measurable trades nothing is fitted, a non-monotone path
+is reported as such, and a shortest-horizon mean inside one standard error returns `not_identified`
 rather than a large half-life.
 """
 
