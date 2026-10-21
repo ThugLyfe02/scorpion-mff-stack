@@ -212,6 +212,22 @@ def cmd_markout(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_faults(args: argparse.Namespace) -> int:
+    """Inject every known fault into a fresh store and report containment."""
+    import tempfile
+    from pathlib import Path as _Path
+
+    from .faults import render, run, to_json
+
+    root = _Path(tempfile.mkdtemp(prefix="scorpion-faults-"))
+    report = run(lambda name: Store(root / f"{name}.db"))
+    if args.json:
+        print(to_json(report))
+    else:
+        print(render(report))
+    return 0 if report.ok else 1
+
+
 def cmd_supervision(args: argparse.Namespace) -> int:
     """Liveness, the restart decision, and the metrics that explain a refusal."""
     from datetime import timedelta as _td
@@ -432,6 +448,10 @@ def main(argv: list[str] | None = None) -> int:
     mk.add_argument("--bars", default="mff-backtest/week_bars.json")
     mk.add_argument("--json", action="store_true")
     mk.set_defaults(func=cmd_markout)
+
+    flt = sub.add_parser("faults", help="inject every known fault and report containment")
+    flt.add_argument("--json", action="store_true")
+    flt.set_defaults(func=cmd_faults)
 
     sup = sub.add_parser("supervision", help="liveness, restart decision and metrics")
     sup.add_argument("--db", default="scorpion.db")
