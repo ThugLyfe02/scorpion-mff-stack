@@ -51,7 +51,8 @@ def row(**over) -> dict[str, str]:
 def test_a_row_becomes_a_trade_with_an_et_timestamp():
     trade = parse_row(row())
     assert trade.side == "CALL" and trade.strike == D("712")
-    assert trade.ts_utc == datetime(2026, 9, 3, 10, 31, tzinfo=UTC)
+    # the corpus clock is Pacific: 06:31 PT is 13:31Z, one minute after the open
+    assert trade.ts_utc == datetime(2026, 9, 3, 13, 31, tzinfo=UTC)
     assert trade.multiple == D("5.0000") and trade.r_multiple == D("4.0000")
 
 
@@ -59,6 +60,16 @@ def test_a_rejection_names_its_reason():
     with pytest.raises(LedgerError) as exc:
         parse_row(row(strike=""))
     assert exc.value.code == "bad_strike"
+
+
+def test_the_corpus_clock_is_pacific_by_measurement():
+    """Guards the one assumption every execution metric depends on.
+
+    If this flips back to a naive ET offset, every mark-out join silently shifts three hours
+    and each resulting number describes the mistake rather than the trade.
+    """
+    trade = parse_row(row(time_et="06:31"))
+    assert trade.ts_utc.hour == 13, "06:31 local must land at 13:31Z, the cash open"
 
 
 def test_an_impossible_exit_percentage_is_refused():

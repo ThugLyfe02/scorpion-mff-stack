@@ -37,7 +37,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 MULTIPLIER = Decimal(100)
-EASTERN = timedelta(hours=-4)          # EDT for the corpus window; a fixed offset, not a guess
+# The corpus's `time_et` column is PACIFIC time, not Eastern, and the mislabel is measured
+# rather than assumed. Evidence: 71 of 107 alerts sit at 06:00-06:59, which is 06:00 ET (options
+# do not trade then) but 09:00 PT; shifting by +3h places the joinable trades at 13:31Z and
+# 13:37Z - one and seven minutes after the 13:30Z cash open - and takes measurable mark-outs
+# from 0 of 4 to 3 of 4. A naive ET reading made every corpus timestamp three hours early.
+SOURCE_UTC_OFFSET = timedelta(hours=-7)      # Pacific; see above before changing this
+LEGACY_ET_OFFSET = timedelta(hours=-4)       # kept for the audit trail, not used to parse
 OUTCOMES = ("win", "win_partial", "loss", "scratch", "unknown")
 
 Outcome = Literal["win", "win_partial", "loss", "scratch", "unknown"]
@@ -242,7 +248,7 @@ def parse_row(row: dict[str, str], *, line: int = 0) -> Trade:
 
     day = _parse_day(row.get("date") or "")
     clock = _parse_et_clock(row.get("time_et") or "")
-    ts_utc = datetime.combine(day, clock, tzinfo=UTC) - EASTERN
+    ts_utc = datetime.combine(day, clock, tzinfo=UTC) - SOURCE_UTC_OFFSET
 
     ticker = (row.get("ticker") or "").strip().upper()
     if not re.fullmatch(r"[A-Z][A-Z.]{0,5}", ticker or ""):
