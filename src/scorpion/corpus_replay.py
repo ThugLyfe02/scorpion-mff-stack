@@ -237,24 +237,11 @@ def replay(
             entry_cost.quantize(D("0.01")),
         ))
 
-    # The verifier is allowed to find a defect here: a corpus run is the first workload large
-    # enough to expose an ordering or key mismatch between the signal stream and the fill
-    # stream. Recording it is the point - but it must not destroy the replay's own output, so
-    # the failure is captured as evidence rather than raised.
-    #
-    # Known, unreconciled: under corpus load `verify` reports a fill whose position the replay
-    # did not create (QQQ|CALL|732|2026-08-13), which means a contract key is derived
-    # differently on the entry path than on the settlement path. Until that is fixed the
-    # replay's `verified` flag is False and the applied log is NOT yet a sound reconstruction
-    # of a corpus-scale book.
-    try:
-        result.verification = verify(store, pipeline.state).to_dict()
-    except Exception as exc:                    # noqa: BLE001 - evidence, not a crash
-        result.verification = {
-            "ok": False,
-            "error": f"{type(exc).__name__}: {exc}",
-            "note": "replay of the applied log raised; see corpus_replay.replay",
-        }
+    # The verifier reports drift rather than raising on it, so a corpus run yields the full
+    # list of fills whose position the signal stream did not create. Each one is a key or
+    # generation mismatch between the entry path and the settlement path - the class of defect
+    # only a workload this size exposes.
+    result.verification = verify(store, pipeline.state).to_dict()
     return result
 
 

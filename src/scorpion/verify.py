@@ -124,11 +124,26 @@ def apply_applied(state: BookState, row: dict[str, object]) -> BookState:
     raise ValueError(f"unknown applied kind: {kind}")
 
 
-def replay_applied(rows: list[dict[str, object]]) -> BookState:
-    """Rebuild the book by applying every recorded decision in sequence order."""
+def replay_applied(
+    rows: list[dict[str, object]], *, collect: list[str] | None = None
+) -> BookState:
+    """Rebuild the book by applying every recorded decision in sequence order.
+
+    `collect` trades a hard failure for a list of recorded problems. A verifier that raises on
+    the first bad row tells you less than one that lists every divergence in the log - and the
+    library path (no `collect`) still fails loudly, because applying an impossible fill to a
+    real book should never pass silently.
+    """
+    from .settlement import SettlementError
+
     state = BookState()
     for row in rows:
-        state = apply_applied(state, row)
+        try:
+            state = apply_applied(state, row)
+        except SettlementError as exc:
+            if collect is None:
+                raise
+            collect.append(f"seq {row.get('seq')}: {exc}")
     return state
 
 
@@ -162,9 +177,12 @@ def _diff(live: BookState, replayed: BookState) -> list[Divergence]:
 def verify(store: Store, live: BookState) -> Verification:
     """Replay the applied log and compare it with the live book."""
     rows = store.load_applied()
-    replayed = replay_applied(rows)
+    problems: list[str] = []
+    replayed = replay_applied(rows, collect=problems)
     counts = store.applied_counts()
-    divergences = tuple(_diff(live, replayed))
+    divergences = tuple(_diff(live, replayed)) + tuple(
+        Divergence(f"log:{problem}", "applied", "not applicable") for problem in problems[:10]
+    )
     return Verification(
         ok=not divergences,
         divergences=divergences,
