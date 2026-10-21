@@ -137,7 +137,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
     Exit 2 on divergence, and the store is halted: a book that cannot be reproduced from
     its own log must not keep trading.
     """
-    from .verify import replay_applied, verify_log
+    from .snapshot import SnapshotError, state_from_snapshot
+    from .verify import verify_log
 
     store = Store(args.db)
     result = verify_log(store)
@@ -145,13 +146,20 @@ def cmd_verify(args: argparse.Namespace) -> int:
         store.set_halt(True, "replay_divergence:" + ",".join(
             d.describe() for d in result.divergences[:3]
         ))
-    state = replay_applied(store.load_applied())
+    # Resume from the snapshot, not from the surviving tail: after compaction a tail-only
+    # replay starts from an empty book and every position in it looks orphaned.
+    try:
+        state, from_snapshot = state_from_snapshot(store)
+    except SnapshotError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
+        return 2
     payload = result.to_dict()
     payload["replayed"] = {
         "positions": {k: {"status": v.status.value, "quantity": v.quantity}
                       for k, v in state.positions.items()},
         "equity": str(state.risk.equity),
         "halted": state.halted,
+        "resumed_from_seq": from_snapshot,
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if result.ok else 2
@@ -166,6 +174,39 @@ def cmd_recover(args: argparse.Namespace) -> int:
     print(json.dumps({"recovered": len(recovered), "unknown": store.load_unknown()},
                      indent=2, sort_keys=True))
     return 0
+
+
+def cmd_compact(args: argparse.Namespace) -> int:
+    """Snapshot the book, truncate the covered log, then prove the result."""
+    from .snapshot import SnapshotError, compact, verify_snapshot
+
+    store = Store(args.db)
+    try:
+        snap = compact(store, keep_tail=args.keep_tail)
+    except SnapshotError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
+        return 2
+    ok, problems = verify_snapshot(store)
+    print(json.dumps({
+        "ok": ok, "snapshot_seq": snap.seq, "digest": snap.digest[:16],
+        "rows_remaining": len(store.load_applied()), "problems": problems,
+    }, indent=2, sort_keys=True))
+    return 0 if ok else 2
+
+
+def cmd_unknown(args: argparse.Namespace) -> int:
+    """List sends whose fate is unknown. Exit 1 when any exist, so cron can page."""
+    store = Store(args.db)
+    rows = store.load_unknown()
+    print(json.dumps({
+        "unknown": len(rows),
+        "effects": [
+            {"effect_id": r["effect_id"], "contract_key": r["contract_key"],
+             "reason": r["last_error"], "idempotency_key": r.get("idempotency_key", "")}
+            for r in rows
+        ],
+    }, indent=2, sort_keys=True))
+    return 0 if not rows else 1
 
 
 def cmd_health(args: argparse.Namespace) -> int:
@@ -209,6 +250,15 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--db", default="scorpion.db")
     rec.add_argument("--older-than", type=int, default=0)
     rec.set_defaults(func=cmd_recover)
+
+    comp = sub.add_parser("compact", help="snapshot the book and truncate the covered log")
+    comp.add_argument("--db", default="scorpion.db")
+    comp.add_argument("--keep-tail", type=int, default=0)
+    comp.set_defaults(func=cmd_compact)
+
+    unk = sub.add_parser("unknown", help="list sends whose fate is unknown (exit 1 if any)")
+    unk.add_argument("--db", default="scorpion.db")
+    unk.set_defaults(func=cmd_unknown)
 
     health = sub.add_parser("health", help="heartbeats, halt flag, pending effects")
     health.add_argument("--db", default="scorpion.db")

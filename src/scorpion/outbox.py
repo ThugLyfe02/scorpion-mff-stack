@@ -262,7 +262,8 @@ class Dispatcher:
             # timeout can hide a fill. Quarantine it as UNKNOWN and let reconciliation
             # decide, because a blind retry here is how one order becomes two.
             self.store.mark_unknown(
-                effect_id=effect_id, reason=f"{type(exc).__name__}: {exc}", now=now
+                effect_id=effect_id, reason=f"{type(exc).__name__}: {exc}", now=now,
+                idempotency_key=auth.envelope.idempotency_key,
             )
             self.breaker.record_failure(now)
             return Dispatched(effect_id, contract_key, "UNKNOWN", f"sender_error:{exc}",

@@ -21,9 +21,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Literal
+from datetime import UTC, datetime
+from typing import Literal, Protocol
 
 from .domain import BookState, Effect, EffectKind, PositionStatus
+from .store import Store
 
 LIVE_STATUSES = frozenset(
     {PositionStatus.PENDING_ENTRY, PositionStatus.OPEN, PositionStatus.CLOSING}
@@ -156,3 +158,107 @@ def reconcile_and_halt(
         reason=result.reason,
     )
     return halted, (effect,), result
+
+
+# ── resolving ambiguous sends ────────────────────────────────────────────────
+# An UNKNOWN row is an order we do not know the fate of. Only the venue can say, and it can
+# say three things. Collapsing "I cannot tell you" into "not sent" is how one order becomes
+# two, so the tri-state is the type system's job, not a caller's good intentions.
+
+LookupStatus = Literal["seen", "not_seen", "unknown"]
+
+
+@dataclass(frozen=True, slots=True)
+class LookupResult:
+    status: LookupStatus
+    broker_ref: str = ""
+
+    def __post_init__(self) -> None:
+        if self.status not in ("seen", "not_seen", "unknown"):
+            raise ValueError(f"bad lookup status {self.status!r}")
+
+
+class OrderLookup(Protocol):
+    """Answers whether the venue holds an order for a given idempotency key."""
+
+    def find(self, idempotency_key: str) -> LookupResult: ...
+
+
+class NoLookup:
+    """The honest default when no venue API is wired: every row stays UNKNOWN."""
+
+    def find(self, idempotency_key: str) -> LookupResult:
+        return LookupResult("unknown")
+
+
+@dataclass(frozen=True, slots=True)
+class UnknownResolution:
+    effect_id: int
+    contract_key: str | None
+    idempotency_key: str
+    status: str          # SENT | RETRY | UNKNOWN
+    broker_ref: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class UnknownReport:
+    resolutions: tuple[UnknownResolution, ...] = ()
+
+    @property
+    def sent(self) -> int:
+        return sum(1 for r in self.resolutions if r.status == "SENT")
+
+    @property
+    def retried(self) -> int:
+        return sum(1 for r in self.resolutions if r.status == "RETRY")
+
+    @property
+    def pending(self) -> int:
+        return sum(1 for r in self.resolutions if r.status == "UNKNOWN")
+
+    @property
+    def clean(self) -> bool:
+        return self.pending == 0
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "sent": self.sent, "retried": self.retried, "pending": self.pending,
+            "resolutions": [
+                {"effect_id": r.effect_id, "contract_key": r.contract_key,
+                 "status": r.status, "broker_ref": r.broker_ref}
+                for r in self.resolutions
+            ],
+        }
+
+
+def reconcile_unknown(
+    *, store: Store, lookup: OrderLookup, now: datetime | None = None
+) -> UnknownReport:
+    """Resolve every UNKNOWN send against the venue, and leave the unknowable alone."""
+    moment = now or datetime.now(UTC)
+    resolutions: list[UnknownResolution] = []
+    for row in store.load_unknown():
+        effect_id = int(str(row["effect_id"]))
+        contract_key = str(row["contract_key"]) if row["contract_key"] else None
+        # Prefer the key recorded at send time: re-deriving it would duplicate the
+        # authorization format in a second place, and a format change would silently stop
+        # matching orders the venue already holds.
+        recorded = str(row.get("idempotency_key") or "")
+        key = recorded or (
+            f"{row['source_event_id']}:{contract_key}:{row['generation']}:{row['kind']}"
+        )
+        answer = lookup.find(key)
+        if answer.status == "seen":
+            status = store.resolve_unknown(
+                effect_id=effect_id, sent=True, broker_ref=answer.broker_ref, now=moment
+            )
+        elif answer.status == "not_seen":
+            status = store.resolve_unknown(
+                effect_id=effect_id, sent=False, broker_ref="", now=moment
+            )
+        else:
+            status = "UNKNOWN"          # the venue cannot say: the row keeps waiting
+        resolutions.append(
+            UnknownResolution(effect_id, contract_key, key, status, answer.broker_ref)
+        )
+    return UnknownReport(resolutions=tuple(resolutions))

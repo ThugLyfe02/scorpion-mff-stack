@@ -84,5 +84,13 @@ Still requires environment/operator work:
 - [ ] pre-market bars so exit levels and path statistics can be verified rather than assumed
 - [ ] operator surface beyond the CLI: a long-running dispatcher loop with backoff jitter
 - [ ] structured metrics/export for the dispatcher and reconciliation (counts exist, series do not)
-- [ ] an `applied_events` retention/compaction policy once the log spans months
+- [x] compaction (`scorpion compact`): snapshot at a sequence with a sha256 digest, re-read
+      it, and only then truncate - `keep_tail` preserves a forensic window; the resumed book is
+      compared with the pre-compaction book in tests, and `verify_snapshot` re-checks the tail
+- [x] UNKNOWN resolution (`reconcile_unknown`): a tri-state venue answer (seen / not_seen /
+      cannot say); `NoLookup` leaves every row unknown rather than guessing "not sent", and the
+      idempotency key is read back from the row recorded at send time, never re-derived
+- [x] failure injection: every prefix of the applied log is replayed and compared with the
+      state the live pipeline held at that point; a deleted row shows up as a sequence gap and
+      a corrupted payload raises instead of being skipped
 - [ ] automatic reconciliation trigger on any UNKNOWN row (the resolver exists; the scheduler does not)

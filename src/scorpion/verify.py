@@ -88,37 +88,47 @@ def _signal_from_payload(payload_json: str) -> SignalEvent:
     return SignalEvent(**payload)
 
 
+def apply_applied(state: BookState, row: dict[str, object]) -> BookState:
+    """Apply one recorded decision to an existing book.
+
+    Exposed separately from `replay_applied` so a snapshot can be resumed mid-log without
+    rebuilding from the beginning - which is what makes compaction possible at all.
+    """
+    kind = str(row["kind"])
+    payload_json = str(row["payload_json"])
+    if kind == "signal":
+        event = _signal_from_payload(payload_json)
+        next_state, _ = reduce_book(state, event)
+        return next_state
+    if kind == "fill":
+        payload = json.loads(payload_json)
+        settlement = settle_fill(
+            state=state,
+            contract_key=str(payload["contract_key"]),
+            generation=int(payload["generation"]),
+            quantity_delta=int(payload["quantity_delta"]),
+            fill_price=Decimal(str(payload["fill_price"])),
+            final=bool(payload.get("final", False)),
+        )
+        from dataclasses import replace
+
+        next_state = settlement.state
+        if settlement.realized or settlement.closed:
+            next_state = replace(
+                next_state,
+                risk=next_state.risk.settled(
+                    settlement.realized, date.fromisoformat(str(payload["market_day"]))
+                ),
+            )
+        return next_state
+    raise ValueError(f"unknown applied kind: {kind}")
+
+
 def replay_applied(rows: list[dict[str, object]]) -> BookState:
     """Rebuild the book by applying every recorded decision in sequence order."""
     state = BookState()
     for row in rows:
-        kind = str(row["kind"])
-        payload_json = str(row["payload_json"])
-        if kind == "signal":
-            event = _signal_from_payload(payload_json)
-            state, _ = reduce_book(state, event)
-        elif kind == "fill":
-            payload = json.loads(payload_json)
-            settlement = settle_fill(
-                state=state,
-                contract_key=str(payload["contract_key"]),
-                generation=int(payload["generation"]),
-                quantity_delta=int(payload["quantity_delta"]),
-                fill_price=Decimal(str(payload["fill_price"])),
-                final=bool(payload.get("final", False)),
-            )
-            from dataclasses import replace
-
-            state = settlement.state
-            if settlement.realized or settlement.closed:
-                state = replace(
-                    state,
-                    risk=state.risk.settled(
-                        settlement.realized, date.fromisoformat(str(payload["market_day"]))
-                    ),
-                )
-        else:
-            raise ValueError(f"unknown applied kind: {kind}")
+        state = apply_applied(state, row)
     return state
 
 
@@ -189,12 +199,28 @@ def verify_log(store: Store) -> Verification:
         applied_signal_ids.append(str(payload["event_id"]))
 
     stored_signal_ids = [event.event_id for event in store.load_signals()]
-    missing = [event_id for event_id in stored_signal_ids
-               if event_id not in set(applied_signal_ids)]
-    for event_id in missing[:5]:
-        divergences.append(
-            Divergence(f"log:signal_not_applied:{event_id}", "in signals", "not in log")
-        )
+    snapshot = store.latest_snapshot()
+    covered = int(str(snapshot.get("signals_covered") or 0)) if snapshot else 0
+
+    if covered:
+        # After compaction the covered rows are gone by design, so identity cannot be
+        # checked - only counts. Pretending otherwise flagged every healthy truncated store
+        # as corrupt.
+        if len(applied_signal_ids) + covered != len(stored_signal_ids):
+            divergences.append(
+                Divergence(
+                    "log:signal_count",
+                    f"{len(applied_signal_ids)} in log + {covered} in snapshot",
+                    f"{len(stored_signal_ids)} stored",
+                )
+            )
+    else:
+        missing = [event_id for event_id in stored_signal_ids
+                   if event_id not in set(applied_signal_ids)]
+        for event_id in missing[:5]:
+            divergences.append(
+                Divergence(f"log:signal_not_applied:{event_id}", "in signals", "not in log")
+            )
 
     sequences = [int(str(row["seq"])) for row in applied]
     if sequences and sequences != list(range(sequences[0], sequences[0] + len(sequences))):

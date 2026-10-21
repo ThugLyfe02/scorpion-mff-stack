@@ -128,11 +128,27 @@ CREATE TABLE IF NOT EXISTS applied_events (
     ts_utc TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_applied_kind ON applied_events(kind, seq);
+
+-- A snapshot is a book serialized at a sequence, with its digest. Compaction deletes log
+-- rows at or below `seq` ONLY after this row is written and read back.
+CREATE TABLE IF NOT EXISTS state_snapshots (
+    seq INTEGER PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    created_ts_utc TEXT NOT NULL
+);
 """
 
 
 ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
-    "outbox_state": {"send_token": "TEXT NOT NULL DEFAULT ''"},
+    "outbox_state": {
+        "send_token": "TEXT NOT NULL DEFAULT ''",
+        "idempotency_key": "TEXT NOT NULL DEFAULT ''",
+    },
+    "state_snapshots": {
+        "signals_covered": "INTEGER NOT NULL DEFAULT 0",
+        "fills_covered": "INTEGER NOT NULL DEFAULT 0",
+    },
 }
 
 
@@ -309,13 +325,40 @@ class Store:
             )
             return int(cur.lastrowid or 0)
 
-    def load_applied(self) -> list[dict[str, object]]:
+    def load_applied(self, after_seq: int = 0) -> list[dict[str, object]]:
         with self.connect() as db:
             rows = db.execute(
                 "SELECT seq, kind, contract_key, payload_json, ts_utc "
-                "FROM applied_events ORDER BY seq"
+                "FROM applied_events WHERE seq > ? ORDER BY seq",
+                (after_seq,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def append_snapshot(
+        self, *, seq: int, payload_json: str, digest: str, created_ts_utc: str,
+        signals_covered: int = 0, fills_covered: int = 0,
+    ) -> None:
+        with self.connect() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO state_snapshots"
+                "(seq,payload_json,digest,created_ts_utc,signals_covered,fills_covered) "
+                "VALUES (?,?,?,?,?,?)",
+                (seq, payload_json, digest, created_ts_utc, signals_covered, fills_covered),
+            )
+
+    def latest_snapshot(self) -> dict[str, object] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT seq,payload_json,digest,created_ts_utc,signals_covered,"
+                "fills_covered FROM state_snapshots ORDER BY seq DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def truncate_applied(self, *, upto_seq: int) -> int:
+        """Delete log rows at or below a sequence that a snapshot covers."""
+        with self.connect() as db:
+            cur = db.execute("DELETE FROM applied_events WHERE seq <= ?", (upto_seq,))
+            return int(cur.rowcount)
 
     def applied_counts(self) -> dict[str, int]:
         with self.connect() as db:
@@ -581,7 +624,8 @@ class Store:
         return [dict(row) for row in rows]
 
     def mark_unknown(
-        self, *, effect_id: int, reason: str, now: datetime.datetime
+        self, *, effect_id: int, reason: str, now: datetime.datetime,
+        idempotency_key: str = "",
     ) -> None:
         """An ambiguous send: the transport failed, so we do not know whether it arrived.
 
@@ -593,10 +637,12 @@ class Store:
                 """
                 UPDATE outbox_state
                 SET status='UNKNOWN', last_error=?, lease_owner=NULL,
-                    lease_until_utc=NULL, updated_ts_utc=?
+                    lease_until_utc=NULL, updated_ts_utc=?,
+                    idempotency_key=CASE WHEN ?<>'' THEN ? ELSE idempotency_key END
                 WHERE effect_id=?
                 """,
-                (reason[:500], now.isoformat(), effect_id),
+                (reason[:500], now.isoformat(), idempotency_key, idempotency_key,
+                 effect_id),
             )
 
     def recover_sending(
@@ -630,7 +676,8 @@ class Store:
     def load_unknown(self) -> list[dict[str, object]]:
         with self.connect() as db:
             rows = db.execute(
-                "SELECT o.effect_id, e.contract_key, o.send_token, o.last_error "
+                "SELECT o.effect_id, e.contract_key, e.kind, e.generation, "
+                "e.source_event_id, o.send_token, o.last_error, o.idempotency_key "
                 "FROM outbox_state o LEFT JOIN proposed_effects e "
                 "ON e.effect_id = o.effect_id "
                 "WHERE o.status='UNKNOWN' ORDER BY o.effect_id"
