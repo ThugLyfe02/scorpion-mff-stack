@@ -32,7 +32,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from .domain import BookState, EventKind, SignalEvent
+from .domain import BookState, EventKind, PositionStatus, SignalEvent
 from .reducer import reduce_book
 from .settlement import settle_fill
 from .store import Store
@@ -101,6 +101,22 @@ def apply_applied(state: BookState, row: dict[str, object]) -> BookState:
         event = _signal_from_payload(payload_json)
         next_state, _ = reduce_book(state, event)
         return next_state
+    if kind == "expire":
+        # A release, not a trade: the reducer closed the position because its expiry passed.
+        # Reproduced here without touching quantity, because no premium changed hands.
+        from dataclasses import replace as _replace
+
+        payload = json.loads(payload_json)
+        key = str(payload["contract_key"])
+        position = state.positions.get(key)
+        if position is None:
+            return state
+        return _replace(state, positions={
+            **state.positions,
+            # a release frees the quantity as well as the slot: the position is gone from the
+            # book's exposure even though its history stays readable
+            key: _replace(position, status=PositionStatus.CLOSED, quantity=0),
+        })
     if kind == "fill":
         payload = json.loads(payload_json)
         settlement = settle_fill(

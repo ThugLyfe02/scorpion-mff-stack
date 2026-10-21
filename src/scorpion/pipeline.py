@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from .association import associate_followup
 from .config import MARKET_TZ
-from .domain import BookState, Effect, RawDiscordMessage, SignalEvent
+from .domain import BookState, Effect, PositionStatus, RawDiscordMessage, SignalEvent
 from .expiry import expire_on_roll
 from .parser import parse_message
 from .reducer import reduce_book
@@ -49,19 +49,64 @@ class Pipeline:
         # Day roll first: a contract that expired must not hold a slot against this
         # morning's entries. The sweep is a no-op until the market day actually moves.
         market_day = event.source_ts_utc.astimezone(MARKET_TZ).date()
+        pre_sweep = self.state.positions
         self.state, expiry_effects = expire_on_roll(
             self.state, self.last_market_day, market_day
         )
         if expiry_effects:
             self.store.append_effects(expiry_effects)
             self.store.heartbeat("expiry_sweep", released=len(expiry_effects))
+        # The sweep closes positions with no signal and no fill behind it. Written to the applied
+        # log here, at the moment it happens, or the book contains state its own log cannot
+        # explain - which is exactly the divergence `verify` reported at seq 22.
+        for key, prior in pre_sweep.items():
+            after = self.state.positions.get(key)
+            released = after is None or (
+                after.status is PositionStatus.CLOSED and prior.status is not PositionStatus.CLOSED
+            )
+            if released:
+                self.store.append_applied(
+                    kind="expire",
+                    payload_json=json.dumps({
+                        "contract_key": key,
+                        "generation": prior.generation,
+                        "quantity": prior.quantity,
+                        "market_day": market_day.isoformat(),
+                        "swept_on": event.source_ts_utc.isoformat(),
+                    }, sort_keys=True),
+                    ts=event.source_ts_utc,
+                    contract_key=key,
+                )
         self.last_market_day = market_day
 
         inserted = self.store.append_signal(event)
         if not inserted:
             # Exact duplicate/reconnect delivery. State already includes this event.
             return event, ()
+        before = self.state.positions
         self.state, effects = reduce_book(self.state, event)
+        # The reducer is allowed to release positions on its own - the expiry sweep does, when a
+        # day roll passes a contract's expiry. That is a real state transition with no signal
+        # and no fill behind it, and if it is not written to the log the book contains state its
+        # own log cannot explain. Captured by DIFF rather than by knowing how the sweep works,
+        # so any future in-reducer maintenance is recorded for free.
+        for key, prior in before.items():
+            after = self.state.positions.get(key)
+            released = after is None or (
+                after.status is PositionStatus.CLOSED and prior.status is not PositionStatus.CLOSED
+            )
+            if released:
+                self.store.append_applied(
+                    kind="expire",
+                    payload_json=json.dumps({
+                        "contract_key": key,
+                        "generation": prior.generation,
+                        "quantity": prior.quantity,
+                        "market_day": event.source_ts_utc.date().isoformat(),
+                    }, sort_keys=True),
+                    ts=event.source_ts_utc,
+                    contract_key=key,
+                )
         self.store.append_applied(
             kind="signal",
             payload_json=self.store._signal_payload(event),
