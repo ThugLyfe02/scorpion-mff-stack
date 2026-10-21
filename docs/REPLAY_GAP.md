@@ -61,10 +61,59 @@ position's key on replay is not the key the fill names. Since the key cross-chec
 rows returns zero mismatches, the difference must be in the *generation* the fill carries, not
 the key.
 
-Next command, exactly: print applied rows 15-25 with `kind`, `contract_key`, the fill payload's
-`generation`/`quantity_delta`/`final`, and the generation of the position the replayed book
-holds at that seq. That distinguishes "fill names generation 2 against a generation-1 position"
-from "the entry fill never ran". One query, and the fix follows from the answer.
+## ROOT CAUSE: the expiry sweep is a side effect outside the event stream
+
+Rows 19-23, verbatim:
+
+    19 signal  SPY|CALL|712|2026-04-21   kind ENTRY
+    20 fill    SPY|CALL|712|2026-04-21   gen 1  dq +1  final False
+    21 signal  SQQQ|CALL|43|2026-05-15   kind ENTRY
+    22 fill    SQQQ|CALL|43|2026-05-15   gen 1  dq +1  final False
+
+There is **no exit fill for SPY anywhere in the log** - not a mismatched generation, not a
+missing row, none at all. Yet the live book holds that position CLOSED with quantity 0.
+
+The only code that can close a position without a settlement is the expiry sweep
+(`expiry.expire_on_roll`), which runs inside the reduction when the market day advances: at row
+21 the day rolls 2026-04-21 -> 2026-05-15, SPY's expiry is behind it, and the sweep releases the
+position. That release changes the book and **appends nothing to `applied_events`**, so the
+replay - which only folds the applied log - never sees it.
+
+Every downstream symptom follows from this one property:
+
+    a position closed outside the log
+        -> replay keeps holding it (qty 1, OPEN)
+        -> its quantity blocks the next day roll
+        -> market_day stops advancing for the replay (2026-08-12 vs 2026-09-03)
+        -> later signals apply against a stale book
+        -> 29 positions missing, 10 orphaned fills, 47 divergences
+
+The verifier was right, and it was right for the right reason: **the book contained state its
+own log could not explain.** That is precisely the drift it exists to detect.
+
+## The fix, and why it is the right one
+
+The sweep must become part of the event stream rather than a side effect of the reducer:
+
+* `reduce_book` (or the pipeline, immediately after it) returns the expired keys, and the
+  pipeline appends one `kind="expire"` row per released position, carrying key, generation and
+  the day that released it;
+* `apply_applied` gains an `expire` branch that marks the position CLOSED without a fill, so a
+  replay reproduces the release exactly;
+* the sweep becomes **deterministic on (day, expiry)** rather than on ambient time, which is
+  also what makes it testable.
+
+Then the permanent test is the lockstep diff at every mark, not just the final state - 173 marks
+in the corpus, each one compared. A system that only checks the ending cannot see a book that
+took a different path to it.
+
+## The wider lesson, worth more than the fix
+
+This defect is invisible to every unit test that exercises the reducer alone, because the
+reducer is self-consistent: it sweeps, and the state it returns is correct. The hole only shows
+up when a *second* consumer rebuilds the book from the log and disagrees. That is the argument
+for keeping `verify` in the hot path rather than as a debugging aid: it is the only component
+that can tell you the system's story about itself is incomplete.
 
 ## Where the origin is, and the test that names it
 
