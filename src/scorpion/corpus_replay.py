@@ -155,8 +155,11 @@ def replay(
     rule becomes a number instead of an opinion.
     """
     store = Store(db_path)
-    pipeline = Pipeline(store=store)
     policy = policy or _policy()
+    # The pipeline runs on its own default policy: threading the variant policy into the reducer
+    # is correct in principle and breaks `verify` today (101 taken, divergences), so it is a
+    # documented next task rather than a silent regression. See docs/REPLAY_GAP.md.
+    pipeline = Pipeline(store=store)
     result = ReplayResult()
     allowed = set(channels) if channels else None
 

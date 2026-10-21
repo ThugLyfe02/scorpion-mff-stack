@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from .association import associate_followup
-from .config import MARKET_TZ
+from .config import MARKET_TZ, Policy
 from .domain import BookState, Effect, PositionStatus, RawDiscordMessage, SignalEvent
 from .expiry import expire_on_roll
 from .parser import parse_message
@@ -19,6 +19,7 @@ from .store import Store
 @dataclass(slots=True)
 class Pipeline:
     store: Store
+    policy: Policy = field(default_factory=Policy)
     allowed_author_ids: frozenset[str] | None = None
     state: BookState = field(init=False)
     last_market_day: date | None = field(init=False, default=None)
@@ -84,7 +85,7 @@ class Pipeline:
             # Exact duplicate/reconnect delivery. State already includes this event.
             return event, ()
         before = self.state.positions
-        self.state, effects = reduce_book(self.state, event)
+        self.state, effects = reduce_book(self.state, event, policy=self.policy)
         # The reducer is allowed to release positions on its own - the expiry sweep does, when a
         # day roll passes a contract's expiry. That is a real state transition with no signal
         # and no fill behind it, and if it is not written to the log the book contains state its
