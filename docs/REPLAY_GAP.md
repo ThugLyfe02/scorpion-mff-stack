@@ -41,6 +41,31 @@ three quarters of the way through the corpus, and everything after that point de
 This is a **cascade with one origin**, not 47 independent defects. The count of divergences is a
 function of where the cascade starts, which is why fixing the last symptom would change nothing.
 
+## PINPOINTED: first divergence at seq 22
+
+The lockstep diff ran 173 marks across the corpus and returned the first disagreement:
+
+    seq 22   kind=fill   contract_key=SQQQ|CALL|43|2026-05-15
+    SPY|CALL|712|2026-04-21   status  live=CLOSED   replayed=OPEN
+    SPY|CALL|712|2026-04-21   quantity live=0        replayed=1
+
+Read precisely: the replay's book still holds one contract of a position the live book closed,
+and the counts of missing/extra positions at that mark are both empty. So the exit FILL was
+applied live and **skipped on replay** - it raised `SettlementError: no position` and the
+collector swallowed it, leaving the entry fill's quantity stranded.
+
+That kills the sweep hypothesis and the day-roll hypothesis: the market day agrees at seq 22
+(2026-05-13), and nothing is missing or extra at that point. The remaining explanation is that
+`settle_fill` only ADJUSTS a position that `reduce_book` created, so an orphaned fill means the
+position's key on replay is not the key the fill names. Since the key cross-check over all 107
+rows returns zero mismatches, the difference must be in the *generation* the fill carries, not
+the key.
+
+Next command, exactly: print applied rows 15-25 with `kind`, `contract_key`, the fill payload's
+`generation`/`quantity_delta`/`final`, and the generation of the position the replayed book
+holds at that seq. That distinguishes "fill names generation 2 against a generation-1 position"
+from "the entry fill never ran". One query, and the fix follows from the answer.
+
 ## Where the origin is, and the test that names it
 
 The origin is the *first* `SettlementError`, and there are exactly two candidate mechanisms:
