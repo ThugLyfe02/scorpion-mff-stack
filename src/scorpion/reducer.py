@@ -14,6 +14,7 @@ from .domain import (
     PositionStatus,
     SignalEvent,
 )
+from .risk import DEFAULT_RISK_LIMITS, RiskLimits, decide
 
 
 def _open_count(state: BookState) -> int:
@@ -27,6 +28,8 @@ def reduce_book(
     state: BookState,
     event: SignalEvent,
     policy: Policy = DEFAULT_POLICY,
+    *,
+    limits: RiskLimits = DEFAULT_RISK_LIMITS,
 ) -> tuple[BookState, tuple[Effect, ...]]:
     if event.event_id in state.seen_event_ids:
         return state, ()
@@ -82,6 +85,24 @@ def reduce_book(
             return state, (
                 Effect(EffectKind.REVIEW, key, event.event_id, 0, "max_open_positions"),
             )
+
+        # Risk gate. Evaluated from book state, so replay reproduces it exactly, and the
+        # stand-down is recorded rather than silently dropped.
+        decision, risk_after = decide(
+            limits, state.risk, market_day=market_day, channel_id=event.channel_id
+        )
+        state = replace(state, risk=risk_after)
+        if decision.stand_down:
+            return state, (
+                Effect(
+                    EffectKind.REVIEW,
+                    key,
+                    event.event_id,
+                    0,
+                    f"risk_stand_down:{decision.reason_text}",
+                ),
+            )
+
         generation = 1 if existing is None else existing.generation + 1
         entry_position = PositionState(
             contract_key=key,
@@ -152,6 +173,22 @@ def reduce_book(
                     event.event_id,
                     position.generation,
                     "second_add_disallowed",
+                ),
+            )
+        # An add is new money at risk: it is gated by the same limits as an entry.
+        market_day = event.source_ts_utc.astimezone(MARKET_TZ).date()
+        decision, risk_after = decide(
+            limits, state.risk, market_day=market_day, channel_id=event.channel_id
+        )
+        state = replace(state, risk=risk_after)
+        if decision.stand_down:
+            return state, (
+                Effect(
+                    EffectKind.REVIEW,
+                    key,
+                    event.event_id,
+                    position.generation,
+                    f"risk_stand_down:{decision.reason_text}",
                 ),
             )
         new_position = replace(

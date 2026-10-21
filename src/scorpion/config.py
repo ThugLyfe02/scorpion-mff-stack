@@ -27,6 +27,10 @@ class Policy:
     first_entry_quantity: int = 1
     skip_fridays: bool = True
     live_submission_enabled: bool = False
+    # A quote older than this may not authorize an order. Two seconds is deliberately
+    # short: the whole hot path is budgeted in seconds, and a stale ask is how a
+    # marketable limit becomes a gift.
+    quote_max_age_seconds: int = 2
 
 
 @dataclass(frozen=True, slots=True)

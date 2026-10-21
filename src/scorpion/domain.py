@@ -6,6 +6,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Literal
 
+from .risk import RiskState
+
 
 class EventKind(StrEnum):
     ENTRY = "ENTRY"
@@ -118,6 +120,9 @@ class BookState:
     halted: bool = False
     seen_event_ids: frozenset[str] = frozenset()
     first_entry_proposed_on: date | None = None
+    # Risk is book state, not a side-channel: it is derived from the same event stream, so
+    # a replay reproduces the drawdown and a restart cannot forget a stand-down.
+    risk: RiskState = field(default_factory=RiskState)
 
     def with_position(self, position: PositionState) -> BookState:
         positions = dict(self.positions)

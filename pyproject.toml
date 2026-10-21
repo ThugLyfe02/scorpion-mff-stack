@@ -9,6 +9,9 @@ description = "Deterministic event-sourced control plane for MFF signal ingestio
 requires-python = ">=3.13"
 dependencies = [
   "discord.py>=2.4,<3",
+  # Windows ships no tz database, so `ZoneInfo("America/New_York")` raises on the
+  # operator's own machine without this (Linux CI has one, which is why it went unnoticed).
+  "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]
@@ -44,3 +47,8 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 python_version = "3.13"
 strict = true
 packages = ["scorpion"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately carry long assertion lines (fixtures, expectations on one line).
+# The 100-column limit stays enforced on src, where it shapes the code.
+"tests/*" = ["E501"]
