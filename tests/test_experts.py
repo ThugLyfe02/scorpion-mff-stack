@@ -247,3 +247,44 @@ def test_posture_reports_whether_the_allocation_is_decisive():
     diffuse = posture({"a": 0.34, "b": 0.33, "c": 0.33}, budget=1000.0)
     assert decisive["live_rules"] == 2
     assert decisive["concentration"] > diffuse["concentration"]
+
+
+# ── variance-aware weighting ──────────────────────────────────────────────
+def test_a_noisy_rule_with_the_same_mean_earns_less_weight():
+    import random as _r
+
+    from scorpion.experts import variance_aware
+
+    rng = _r.Random(3)
+    steady = [1.0] * 120
+    spiky = [1.0 + rng.gauss(0.0, 6.0) for _ in range(120)]
+    payload = variance_aware({"steady": steady, "spiky": spiky})
+    weights = dict(zip(payload["names"], payload["final_weights"], strict=True))
+    assert weights["steady"] > weights["spiky"]
+
+
+def test_with_one_observation_the_method_degenerates_to_plain_hedge():
+    from scorpion.experts import variance_aware
+
+    payload = variance_aware({"a": [0.0], "b": [5.0]})
+    weights = dict(zip(payload["names"], payload["final_weights"], strict=True))
+    assert weights["a"] > weights["b"]
+
+
+def test_bad_delta_and_beta_are_refused():
+    from scorpion.experts import variance_aware
+
+    with pytest.raises(ExpertsError):
+        variance_aware({"a": [1.0, 2.0], "b": [1.0, 2.0]}, delta=0.0)
+    with pytest.raises(ExpertsError):
+        variance_aware({"a": [1.0, 2.0], "b": [1.0, 2.0]}, beta=-1.0)
+
+
+def test_the_variance_aware_payload_feeds_the_sizing_layer():
+    from scorpion.experts import posture, variance_aware, weights_from_variance_aware
+
+    payload = variance_aware({"a": [0.2] * 40, "b": [2.0] * 40})
+    weights = weights_from_variance_aware(payload)
+    assert sum(weights.values()) == pytest.approx(1.0)
+    sized = posture(weights, budget=1000.0)
+    assert sum(sized["sizes"].values()) <= 1000.0 + 1.0

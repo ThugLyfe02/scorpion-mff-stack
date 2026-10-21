@@ -456,3 +456,93 @@ def posture(weights: Mapping[str, float], *, budget: float, floor: float = 0.05,
             "using the premium band the rule traded in"
         ),
     }
+
+
+# ── variance-aware weighting: a noisy rule has not earned conviction ───────
+# Plain Hedge compares raw losses, so a rule that had one huge win looks identical to one that
+# grinds out small wins - and the first is far more likely to be luck. Empirical-Bernstein
+# weighting scores each rule by an UPPER confidence bound on its loss instead of the loss itself:
+#
+#     score_i = mean_loss_i + beta * sqrt(2 * var_i * ln(2K/delta) / n_i) - prior_bonus
+#
+# which is pessimistic about noisy rules and optimistic about well-measured ones. The effect is that
+# weight follows evidence, not one lucky print, which is the difference between an allocator that
+# chases a spike and one that requires it to repeat.
+
+def variance_aware(
+    losses_by_expert: Mapping[str, Sequence[float]], *,
+    delta: float = 0.1, beta: float = 1.0, alpha: float = 0.02,
+    eta: float | None = None,
+) -> dict[str, Any]:
+    """Blend experts on a confidence bound over their loss, not on the raw loss."""
+    names = tuple(losses_by_expert)
+    if not names:
+        raise ExpertsError("no_experts", "empty mapping")
+    series = [list(losses_by_expert[name]) for name in names]
+    lengths = {len(s) for s in series}
+    if len(lengths) != 1:
+        raise ExpertsError("ragged", f"expert series lengths {sorted(lengths)}")
+    rounds = lengths.pop()
+    if rounds == 0:
+        raise ExpertsError("no_rounds", "every series is empty")
+    if not (0.0 < delta < 1.0):
+        raise ExpertsError("bad_delta", str(delta))
+    if beta < 0:
+        raise ExpertsError("bad_beta", str(beta))
+
+    rate = eta if eta is not None else learning_rate(rounds, len(names))
+    hedge = Hedge(n_experts=len(names), eta=rate, alpha=alpha)
+    log_term = math.log(max(2.0, 2.0 * len(names) / delta))
+
+    means = [0.0] * len(names)
+    m2 = [0.0] * len(names)
+    counts = [0] * len(names)
+    rounds_out: list[Round] = []
+
+    for index in range(rounds):
+        scores: list[float] = []
+        for i, series_i in enumerate(series):
+            value = series_i[index]
+            counts[i] += 1
+            n = counts[i]
+            delta_i = value - means[i]
+            means[i] += delta_i / n
+            m2[i] += delta_i * (value - means[i])
+            var = (m2[i] / (n - 1)) if n > 1 else 0.0
+            bonus = beta * math.sqrt(max(0.0, 2.0 * var * log_term / n)) if n > 1 else 0.0
+            scores.append(means[i] + bonus)
+        weights = hedge.update(scores)
+        rounds_out.append(Round(index, tuple(scores), tuple(weights), hedge.leader()))
+
+    cumulative = tuple(sum(s) for s in series)
+    best = min(range(len(names)), key=lambda i: cumulative[i])
+    blended = sum(
+        sum(w * series[i][t] for i, w in enumerate(rnd.weights))
+        for t, rnd in enumerate(rounds_out)
+    )
+    return {
+        "names": list(names),
+        "rounds": [r.to_dict() for r in rounds_out],
+        "cumulative_loss": [round(x, 4) for x in cumulative],
+        "confidence_scores": [round(m, 4) for m in means],
+        "blended_cumulative_loss": round(blended, 4),
+        "best_expert": names[best],
+        "final_weights": list(rounds_out[-1].weights),
+        "regret": round(blended - cumulative[best], 4),
+        "caveats": [
+            "scores are upper confidence bounds on loss, so a noisy rule is penalised until its "
+            "evidence accumulates",
+            "the bound uses empirical Bernstein scaling; it is not a proven regret bound for the "
+            "blended sequence, only a principled weighting",
+            "with fewer than two observations per rule the variance term is zero and the method "
+            "degenerates to plain Hedge - by design",
+        ],
+    }
+
+
+def weights_from_variance_aware(payload: Mapping[str, Any]) -> dict[str, float]:
+    """The allocation a sizing layer reads, from the variance-aware blend."""
+    return {
+        name: float(weight)
+        for name, weight in zip(payload["names"], payload["final_weights"], strict=False)
+    }
