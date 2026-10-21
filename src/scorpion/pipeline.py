@@ -34,6 +34,17 @@ class Pipeline:
             self.state = replace(self.state, halted=True)
             self.store.heartbeat("halt_recovered", reason=reason)
         self.last_market_day = self.state.risk.market_day
+        # The log must describe the rules it was written under. Without this row a replay applies
+        # whatever policy is configured NOW, which is how a Friday-skipping default silently
+        # re-read a Friday-trading book as 13 missing positions.
+        seen = {
+            str(row["payload_json"]) for row in self.store.load_applied() if row["kind"] == "policy"
+        }
+        payload = json.dumps({"policy": self.policy.to_payload(),
+                              "fingerprint": self.policy.fingerprint}, sort_keys=True)
+        if payload not in seen and not seen:
+            self.store.append_applied(kind="policy", payload_json=payload,
+                                      ts=datetime.now(UTC))
         # INSERT OR IGNORE re-materializes any effect lost by a crash after signal persistence.
         self.store.append_effects(historical_effects)
 

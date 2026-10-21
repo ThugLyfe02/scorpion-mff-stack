@@ -32,10 +32,13 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
+from .config import Policy
 from .domain import BookState, EventKind, PositionStatus, SignalEvent
 from .reducer import reduce_book
 from .settlement import settle_fill
 from .store import Store
+
+_DEFAULT_POLICY = Policy()
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +92,9 @@ def _signal_from_payload(payload_json: str) -> SignalEvent:
     return SignalEvent(**payload)
 
 
-def apply_applied(state: BookState, row: dict[str, object]) -> BookState:
+def apply_applied(
+    state: BookState, row: dict[str, object], *, policy: Policy | None = None
+) -> BookState:
     """Apply one recorded decision to an existing book.
 
     Exposed separately from `replay_applied` so a snapshot can be resumed mid-log without
@@ -99,7 +104,9 @@ def apply_applied(state: BookState, row: dict[str, object]) -> BookState:
     payload_json = str(row["payload_json"])
     if kind == "signal":
         event = _signal_from_payload(payload_json)
-        next_state, _ = reduce_book(state, event)
+        next_state, _ = reduce_book(
+            state, event, policy=policy or _DEFAULT_POLICY
+        )
         return next_state
     if kind == "halt":
         from dataclasses import replace as _replace
@@ -158,10 +165,17 @@ def replay_applied(
     """
     from .settlement import SettlementError
 
+    recorded = None
+    for row in rows:
+        if str(row["kind"]) == "policy":
+            recorded = Policy.from_payload(json.loads(str(row["payload_json"]))["policy"])
+
     state = BookState()
     for row in rows:
+        if str(row["kind"]) == "policy":
+            continue
         try:
-            state = apply_applied(state, row)
+            state = apply_applied(state, row, policy=recorded)
         except SettlementError as exc:
             if collect is None:
                 raise

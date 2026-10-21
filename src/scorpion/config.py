@@ -33,6 +33,40 @@ class Policy:
     quote_max_age_seconds: int = 2
 
 
+    def to_payload(self) -> dict[str, object]:
+        """The policy as data, so the applied log can record the rules it was written under."""
+        return {
+            "max_open_positions": self.max_open_positions,
+            "max_dislocation_from_reference": str(self.max_dislocation_from_reference),
+            "price_limit_markup": str(self.price_limit_markup),
+            "first_entry_quantity": self.first_entry_quantity,
+            "skip_fridays": self.skip_fridays,
+            "live_submission_enabled": self.live_submission_enabled,
+            "quote_max_age_seconds": self.quote_max_age_seconds,
+        }
+
+    @property
+    def fingerprint(self) -> str:
+        import hashlib
+        import json
+
+        return hashlib.sha256(
+            json.dumps(self.to_payload(), sort_keys=True).encode()
+        ).hexdigest()[:16]
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, object]) -> Policy:
+        return cls(
+            max_open_positions=int(str(payload["max_open_positions"])),
+            max_dislocation_from_reference=Decimal(str(payload["max_dislocation_from_reference"])),
+            price_limit_markup=Decimal(str(payload["price_limit_markup"])),
+            first_entry_quantity=int(str(payload["first_entry_quantity"])),
+            skip_fridays=bool(payload["skip_fridays"]),
+            live_submission_enabled=bool(payload["live_submission_enabled"]),
+            quote_max_age_seconds=int(str(payload["quote_max_age_seconds"])),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     database_path: str

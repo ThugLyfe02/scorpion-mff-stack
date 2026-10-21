@@ -77,8 +77,8 @@ def test_the_corpus_replay_is_verified_end_to_end(tmp_path, corpus):
     summary, verification = out["summary"], out["verification"]
 
     assert summary["corpus"] == 107
-    assert summary["taken"] == 88, "coverage drift means a rule or a parser changed"
-    assert summary["contracts"] == 327
+    assert summary["taken"] == 101, "coverage drift means a rule or a parser changed"
+    assert summary["contracts"] == 373
     assert verification["ok"] is True, verification["divergences"]
     assert verification["divergences"] == []
     assert verification["signals"] == 107

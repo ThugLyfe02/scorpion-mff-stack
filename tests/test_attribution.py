@@ -36,7 +36,7 @@ def test_an_unknown_policy_field_is_refused(ledger, tmp_path):
 def test_the_baseline_verifies(ledger, tmp_path):
     outcome = run_variant(ledger, BASELINE, db_path=tmp_path / "b.db")
     assert outcome["verified"] is True
-    assert outcome["taken"] == 88
+    assert outcome["taken"] == 101   # the log now records its policy
 
 
 def test_a_haircut_cannot_be_applied_twice_or_out_of_range():
@@ -51,7 +51,7 @@ def test_attribution_measures_each_variant_against_the_same_baseline(ledger, tmp
          Variant("exit_haircut_10", exit_haircut=0.10, note="worse exits")),
         db_path_for=lambda name: tmp_path / f"{name}.db",
     )
-    assert payload["baseline"]["taken"] == 88
+    assert payload["baseline"]["taken"] == 101
     assert len(payload["variants"]) == 2
     assert all(row["verified"] for row in payload["variants"])
     assert payload["method"]["store_per_variant"] is True

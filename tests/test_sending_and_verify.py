@@ -217,5 +217,5 @@ def test_verification_reports_counts(tmp_path):
     s = store(tmp_path)
     p = pipeline_with_entry(s, tmp_path)
     result = verify(s, p.state)
-    assert result.ok and result.applied_seq == 1 and result.positions == 1
-    assert s.applied_counts() == {"signal": 1}
+    assert result.ok and result.applied_seq == 2 and result.positions == 1
+    assert s.applied_counts() == {"signal": 1, "policy": 1}

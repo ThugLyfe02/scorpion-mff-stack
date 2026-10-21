@@ -159,7 +159,7 @@ def replay(
     # The pipeline runs on its own default policy: threading the variant policy into the reducer
     # is correct in principle and breaks `verify` today (101 taken, divergences), so it is a
     # documented next task rather than a silent regression. See docs/REPLAY_GAP.md.
-    pipeline = Pipeline(store=store)
+    pipeline = Pipeline(store=store, policy=policy)
     result = ReplayResult()
     allowed = set(channels) if channels else None
 
