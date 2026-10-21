@@ -241,18 +241,17 @@ def verify_log(store: Store) -> Verification:
                 Divergence(f"log:signal_not_applied:{event_id}", "in signals", "not in log")
             )
 
-    # The indexed column and the payload's own derivation must agree: when they do not, a fill
-    # can name a position the signal stream never created - which is what a 47-position
-    # divergence at corpus scale looked like from the outside.
+    # The key recorded in the row and the key the payload derives must agree. `contract_key` is
+    # a property of the event, so it is not in the payload - which is exactly why the column and
+    # the derivation can drift apart without anything noticing.
     for row in applied:
         if str(row["kind"]) != "signal":
             continue
-        payload = json.loads(str(row["payload_json"]))
-        stated = payload.get("contract_key")
+        stated = row.get("contract_key")
         rebuilt = _signal_from_payload(str(row["payload_json"])).contract_key
-        if stated is not None and stated != rebuilt:
+        if stated is not None and rebuilt is not None and str(stated) != rebuilt:
             divergences.append(
-                Divergence(f"log:contract_key_mismatch:{stated}", str(stated), str(rebuilt))
+                Divergence(f"log:contract_key_mismatch:{stated}", str(stated), rebuilt)
             )
 
     sequences = [int(str(row["seq"])) for row in applied]
