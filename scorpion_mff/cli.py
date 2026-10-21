@@ -113,6 +113,11 @@ def _parser() -> argparse.ArgumentParser:
     tf = tca_sub.add_parser("fills", help="realised venue fills: limit vs fill, bps, latency")
     tf.add_argument("--executions", type=Path, default=None)
     tf.add_argument("--json", action="store_true")
+
+    fz = sub.add_parser("fuzz", help="throw generated posts at the hot path and check invariants")
+    fz.add_argument("--iterations", type=int, default=3000)
+    fz.add_argument("--seed", type=int, default=7)
+    fz.add_argument("--json", action="store_true")
     return p
 
 
@@ -519,6 +524,23 @@ def cmd_tca(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fuzz(args: argparse.Namespace) -> int:
+    """Exit 1 on a violation, so CI can gate on it."""
+    from . import fuzz
+
+    campaign = fuzz.run_campaign(seed=args.seed, iterations=args.iterations)
+    if args.json:
+        print(json.dumps({"seed": args.seed, "iterations": args.iterations,
+                          "posts": campaign.posts, "intents": campaign.intents,
+                          "clean": campaign.clean,
+                          "violations": [{"invariant": v.invariant, "detail": v.detail,
+                                          "post": v.post} for v in campaign.violations],
+                          "statuses": campaign.statuses}, indent=2))
+    else:
+        print(campaign.to_text())
+    return 0 if campaign.clean else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     handlers = {
@@ -531,6 +553,7 @@ def main(argv: list[str] | None = None) -> int:
         "policy": cmd_policy,
         "desk": cmd_desk,
         "tca": cmd_tca,
+        "fuzz": cmd_fuzz,
     }
     return handlers[args.cmd](args)
 

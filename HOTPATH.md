@@ -206,3 +206,40 @@ both desks).
 and cannot tell a quiet market from a dead feed — it knows only whether the process is
 beating and whether the engine raised something it could not act on.
 
+
+## Adversarial hardening (`fuzz`)
+
+The `%`-as-price bug — a $3.13 contract "sold" for $19, $8,146 of phantom profit — was
+found by a human reading a replay. That is not a method. `scorpion_mff/fuzz.py` generates
+the shapes the channel actually writes (entries, malformed entries, closes stated as
+prices *and* as percentages, negations, multi-ticker closes, noise) and asserts ten
+invariants that must hold for **any** input, after every message:
+
+    I1  a sell only for a contract the book holds        I6  a kill switch blocks buys, never exits
+    I2  a percentage never becomes a price               I7  same input -> same output
+    I3  no option priced above its strike                I8  qty >= 1, never negative
+    I4  the book never exceeds max_concurrent            I9  a closed contract is not re-entered same-day
+    I5  every intent carries a reason                   I10 the parser never raises
+
+    python -m scorpion_mff.cli fuzz --iterations 4000 --seed 7     # exit 1 on a violation
+
+18,000 generated posts across six seeds run clean, and the campaign is deterministic, so
+CI can gate on it.
+
+**It found two real defects on its first runs, and both were money-losing:**
+
+1. **A named exit for a contract we do not hold closed a different one.** `PLTR CALLs
+   closing at 7.76` flattened a held NVDA put, because NVDA was the only position in that
+   channel: `_resolve` fell through to channel-only resolution even though the post named
+   a contract. Now a post that names a ticker or a side must match one position or
+   nothing; the channel fallback applies only to a post that names nothing at all.
+2. **The kill-switch invariant itself was wrong** — the first version failed any intent
+   while blocked, which flagged a legitimate *exit*. The engine was right and the fuzzer
+   was wrong: a switch that traps you in a position is worse than no switch. Entries are
+   blocked; exits are not, and that is now pinned by a test.
+
+Two of the invariants were also corrected in the other direction (I1 had to sample the
+book *before* the decision, because a full close deletes the position; I2 had to compare
+the limit against the stated percentage *and* the live bid rather than merely detect a
+`%`). A fuzzer whose invariants are wrong is a noise generator, so the invariants are
+tested as carefully as the code they guard.

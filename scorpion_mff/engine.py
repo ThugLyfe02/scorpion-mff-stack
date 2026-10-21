@@ -136,20 +136,33 @@ class Engine:
         Real exits often do NOT restate the contract ("Close remaining for 10%"),
         so the resolution ladder is:
           1. the full contract key, when the post carries one
-          2. ticker+side, when that is unambiguous
-          3. the single open position in the SAME CHANNEL - he posts an exit
-             where he posted the entry
-        Anything ambiguous resolves to None: flattening the wrong contract is
-        worse than doing nothing, and the skip is logged.
+          2. ticker (+side, when stated), when that is unambiguous
+          3. the single open position in the SAME CHANNEL - but ONLY for a post that
+             names nothing at all
+        Anything ambiguous resolves to None: flattening the wrong contract is worse
+        than doing nothing, and the skip is logged.
+
+        Step 3 used to run even when the post named a contract we do not hold. The
+        fuzzer found it: "PLTR CALLs closing at 7.76" flattened a held NVDA put,
+        because NVDA was the only position in that channel. A post that names a
+        ticker, a side, or both is a deliberate reference; if it matches nothing, the
+        answer is "no position", not "some position".
         """
         key = signal.contract_key
         if key and key in self.positions:
             return self.positions[key]
-        if signal.ticker and signal.side:
+
+        named_something = bool(signal.ticker or signal.side)
+        if named_something:
             matches = [p for p in self.open_positions
-                       if p.ticker == signal.ticker and p.side is signal.side]
+                       if (not signal.ticker or p.ticker == signal.ticker)
+                       and (signal.side is None or p.side is signal.side)]
             if len(matches) == 1:
                 return matches[0]
+            # Zero matches (a contract we do not hold) or several (ambiguous): never
+            # fall through to the channel, because the channel is not what was named.
+            return None
+
         if signal.channel:
             in_channel = [p for p in self.open_positions if p.channel == signal.channel]
             if len(in_channel) == 1:
