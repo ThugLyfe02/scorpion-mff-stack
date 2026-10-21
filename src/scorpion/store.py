@@ -219,6 +219,10 @@ class Store:
     def _signal_payload(event: SignalEvent) -> str:
         payload = dataclasses.asdict(event)
         payload["kind"] = event.kind.value
+        # `contract_key` is a property, so asdict drops it silently and the payload could never
+        # be checked against the indexed column it is stored beside. Recording it makes the
+        # duplication auditable: verify_log flags any row where the two disagree.
+        payload["contract_key"] = event.contract_key
         for key in ("source_ts_utc", "received_ts_utc"):
             payload[key] = payload[key].isoformat()
         for key in ("strike", "referenced_price", "referenced_pct"):

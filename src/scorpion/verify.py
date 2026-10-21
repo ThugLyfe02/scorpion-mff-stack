@@ -85,6 +85,7 @@ def _signal_from_payload(payload_json: str) -> SignalEvent:
     for key in ("strike", "referenced_price", "referenced_pct"):
         if payload.get(key) is not None:
             payload[key] = Decimal(payload[key])
+    payload.pop("contract_key", None)       # audit field, re-derived by the event itself
     return SignalEvent(**payload)
 
 
@@ -238,6 +239,20 @@ def verify_log(store: Store) -> Verification:
         for event_id in missing[:5]:
             divergences.append(
                 Divergence(f"log:signal_not_applied:{event_id}", "in signals", "not in log")
+            )
+
+    # The indexed column and the payload's own derivation must agree: when they do not, a fill
+    # can name a position the signal stream never created - which is what a 47-position
+    # divergence at corpus scale looked like from the outside.
+    for row in applied:
+        if str(row["kind"]) != "signal":
+            continue
+        payload = json.loads(str(row["payload_json"]))
+        stated = payload.get("contract_key")
+        rebuilt = _signal_from_payload(str(row["payload_json"])).contract_key
+        if stated is not None and stated != rebuilt:
+            divergences.append(
+                Divergence(f"log:contract_key_mismatch:{stated}", str(stated), str(rebuilt))
             )
 
     sequences = [int(str(row["seq"])) for row in applied]
