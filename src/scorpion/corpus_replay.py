@@ -110,29 +110,32 @@ class ReplayResult:
 
 def _entry_text(trade: Any) -> str:
     contract = "C" if trade.side == "CALL" else "P"
-    strike = str(trade.strike).rstrip("0").rstrip(".") if "." in str(trade.strike) else str(trade.strike)
+    strike = (
+        str(trade.strike).rstrip("0").rstrip(".")
+        if "." in str(trade.strike)
+        else str(trade.strike)
+    )
     expiry = "TODAY" if trade.expiry_kind == "today" else trade.expiry_kind
     return f"{trade.ticker} {strike}{contract} {expiry} @ {trade.entry_bid}"
 
 
 def _exit_price(trade: Any) -> Decimal | None:
     if trade.exit_price is not None:
-        return trade.exit_price
+        return D(str(trade.exit_price))
     pct = trade.lifecycle.exit_pct
     if pct is None:
         return None
-    return (trade.entry_bid * (1 + D(pct) / 100)).quantize(D("0.01"))
+    entry = D(str(trade.entry_bid))
+    return (entry * (1 + D(pct) / 100)).quantize(D("0.01"))
 
 
-def _policy(**over: Any) -> Policy:
+def _policy() -> Policy:
     """The live policy, with the two settings a corpus replay cannot honestly inherit."""
-    base = {
-        "live_submission_enabled": True,
-        "skip_fridays": False,      # the corpus has a Friday channel; refusing it measures
-        "first_entry_quantity": 1,  # the pipe test is a real rule, not a replay convenience
-    }
-    base.update(over)
-    return Policy(**base)
+    return Policy(
+        live_submission_enabled=True,
+        skip_fridays=False,      # the corpus has a Friday channel; refusing it measures nothing
+        first_entry_quantity=1,  # the pipe test is a real rule, not a replay convenience
+    )
 
 
 def replay(
@@ -214,7 +217,8 @@ def replay(
             market_day=market_day,
         )
 
-        entry_cost = (receipt.fill_price or envelope.limit_price) * D(contracts) * D(100)
+        fill_px = D(str(receipt.fill_price or envelope.limit_price))
+        entry_cost = fill_px * D(contracts) * D(100)
         exit_px = _exit_price(trade)
         if exit_px is not None:
             pipeline.settle(
@@ -222,14 +226,15 @@ def replay(
                 quantity_delta=-contracts, fill_price=exit_px, market_day=market_day,
                 final=True,
             )
-            realised = (exit_px - (receipt.fill_price or envelope.limit_price)) * D(contracts) * D(100)
+            realised = (exit_px - fill_px) * D(contracts) * D(100)
         else:
             realised = -entry_cost                     # no recorded exit: assume total loss
 
         executed_r = (realised / entry_cost).quantize(D("0.0001")) if entry_cost else None
         result.trades.append(ReplayedTrade(
             trade.identity, trade.channel, trade.ticker, trade.r_multiple, executed_r,
-            contracts, "taken", "", realised.quantize(D("0.01")), entry_cost.quantize(D("0.01")),
+            contracts, "taken", "", realised.quantize(D("0.01")),
+            entry_cost.quantize(D("0.01")),
         ))
 
     # The verifier is allowed to find a defect here: a corpus run is the first workload large
