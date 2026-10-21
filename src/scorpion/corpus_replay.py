@@ -144,18 +144,42 @@ def replay(
     db_path: str | Path,
     policy: Policy | None = None,
     channels: Iterable[str] | None = None,
+    hold_minutes: int | None = None,
 ) -> ReplayResult:
+    """Replay the ledger through the real stack.
+
+    `hold_minutes` switches on the concurrency model. With it unset every position is closed the
+    instant it is opened, which isolates executor fidelity but lets the cap never bind. With it
+    set, a position is held for that long and closed when the next trade is due to start, so
+    `max_open_positions` refuses entries for the same reason it would live - and the cost of the
+    rule becomes a number instead of an opinion.
+    """
     store = Store(db_path)
     pipeline = Pipeline(store=store)
     policy = policy or _policy()
     result = ReplayResult()
     allowed = set(channels) if channels else None
 
+    held: list[dict[str, Any]] = []
+
+    def close_due(now: datetime, day: Any) -> None:
+        for position in list(held):
+            if position["exit_at"] > now:
+                continue
+            pipeline.settle(
+                contract_key=position["contract_key"], generation=position["generation"],
+                quantity_delta=-position["contracts"], fill_price=position["exit_px"],
+                market_day=day, final=True,
+            )
+            held.remove(position)
+
     for trade in ledger.trades:
         if allowed is not None and trade.channel not in allowed:
             continue
         entry_ts = trade.ts_utc.astimezone(UTC)
         market_day = entry_ts.date()
+        if hold_minutes is not None:
+            close_due(entry_ts, market_day)
         # The pipeline stamps effects with the WALL clock, so a corpus-timestamped dispatch
         # clock (months in the past) never sees them as due. The signal clock stays the
         # corpus; the decision clock is now. This is also what the live path does.
@@ -220,7 +244,16 @@ def replay(
         fill_px = D(str(receipt.fill_price or envelope.limit_price))
         entry_cost = fill_px * D(contracts) * D(100)
         exit_px = _exit_price(trade)
-        if exit_px is not None:
+        if hold_minutes is not None and exit_px is not None:
+            held.append({
+                "contract_key": envelope.contract_key,
+                "generation": envelope.generation,
+                "contracts": contracts,
+                "exit_px": exit_px,
+                "exit_at": entry_ts + timedelta(minutes=hold_minutes),
+            })
+            realised = (exit_px - fill_px) * D(contracts) * D(100)
+        elif exit_px is not None:
             pipeline.settle(
                 contract_key=envelope.contract_key, generation=envelope.generation,
                 quantity_delta=-contracts, fill_price=exit_px, market_day=market_day,
@@ -241,6 +274,12 @@ def replay(
     # list of fills whose position the signal stream did not create. Each one is a key or
     # generation mismatch between the entry path and the settlement path - the class of defect
     # only a workload this size exposes.
+    for position in list(held):                      # close anything still open at the end
+        pipeline.settle(
+            contract_key=position["contract_key"], generation=position["generation"],
+            quantity_delta=-position["contracts"], fill_price=position["exit_px"],
+            market_day=position["exit_at"].date(), final=True,
+        )
     result.verification = verify(store, pipeline.state).to_dict()
     return result
 
