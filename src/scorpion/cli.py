@@ -212,6 +212,21 @@ def cmd_markout(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_supervision(args: argparse.Namespace) -> int:
+    """Liveness, the restart decision, and the metrics that explain a refusal."""
+    from datetime import timedelta as _td
+
+    from .ops import render, report, to_json
+
+    store = Store(args.db)
+    payload = report(store, stale_after=_td(seconds=args.stale_after))
+    if args.json:
+        print(to_json(payload))
+    else:
+        print(render(payload))
+    return int(payload["assessment"]["exit_code"])
+
+
 def cmd_halt(args: argparse.Namespace) -> int:
     """Stop the desk. Recorded as an applied event, so a replay stays halted."""
     from .snapshot import state_from_snapshot
@@ -417,6 +432,12 @@ def main(argv: list[str] | None = None) -> int:
     mk.add_argument("--bars", default="mff-backtest/week_bars.json")
     mk.add_argument("--json", action="store_true")
     mk.set_defaults(func=cmd_markout)
+
+    sup = sub.add_parser("supervision", help="liveness, restart decision and metrics")
+    sup.add_argument("--db", default="scorpion.db")
+    sup.add_argument("--stale-after", type=int, default=1800)
+    sup.add_argument("--json", action="store_true")
+    sup.set_defaults(func=cmd_supervision)
 
     h = sub.add_parser("halt", help="stop the desk; recorded in the applied log")
     h.add_argument("--db", default="scorpion.db")
