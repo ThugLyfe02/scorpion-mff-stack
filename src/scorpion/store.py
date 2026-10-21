@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS outbox_state (
     lease_until_utc TEXT,
     last_error TEXT NOT NULL DEFAULT '',
     broker_ref TEXT NOT NULL DEFAULT '',
+    send_token TEXT NOT NULL DEFAULT '',
     updated_ts_utc TEXT NOT NULL,
     FOREIGN KEY(effect_id) REFERENCES proposed_effects(effect_id)
 );
@@ -114,7 +115,25 @@ CREATE TABLE IF NOT EXISTS executions (
     broker_ref TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_executions_contract ON executions(contract_key);
+
+-- The applied log: every decision that CHANGED the book, in the order it changed it.
+-- `signal_events` records what arrived; this records what was applied, including fills,
+-- which is what makes a bit-for-bit replay possible. AUTOINCREMENT is the ordering
+-- authority - timestamps can tie or go backwards, a sequence cannot.
+CREATE TABLE IF NOT EXISTS applied_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,               -- signal | fill
+    contract_key TEXT,
+    payload_json TEXT NOT NULL,
+    ts_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_applied_kind ON applied_events(kind, seq);
 """
+
+
+ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
+    "outbox_state": {"send_token": "TEXT NOT NULL DEFAULT ''"},
+}
 
 
 class Store:
@@ -122,6 +141,22 @@ class Store:
         self.path = str(path)
         with self.connect() as db:
             db.executescript(SCHEMA)
+            self._migrate(db)
+
+    @staticmethod
+    def _migrate(db: sqlite3.Connection) -> None:
+        """Additive, idempotent migration: existing databases gain new columns in place.
+
+        No version table and no destructive step - each column is added only if the
+        catalog does not already have it, so this is safe to run on every connect.
+        """
+        for table, columns in ADDITIVE_COLUMNS.items():
+            existing = {
+                str(row["name"]) for row in db.execute(f"PRAGMA table_info({table})")
+            }
+            for name, ddl in columns.items():
+                if name not in existing:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
     @contextlib.contextmanager
     def connect(self) -> collections.abc.Iterator[sqlite3.Connection]:
@@ -261,6 +296,36 @@ class Store:
                 inserted += max(cur.rowcount, 0)
         return inserted
 
+    def append_applied(
+        self, *, kind: str, payload_json: str, ts: datetime.datetime,
+        contract_key: str | None = None,
+    ) -> int:
+        """Append one applied decision. The sequence it returns is the replay order."""
+        with self.connect() as db:
+            cur = db.execute(
+                "INSERT INTO applied_events(kind,contract_key,payload_json,ts_utc) "
+                "VALUES (?,?,?,?)",
+                (kind, contract_key, payload_json, ts.isoformat()),
+            )
+            return int(cur.lastrowid or 0)
+
+    def load_applied(self) -> list[dict[str, object]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT seq, kind, contract_key, payload_json, ts_utc "
+                "FROM applied_events ORDER BY seq"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def applied_counts(self) -> dict[str, int]:
+        with self.connect() as db:
+            return {
+                str(row["kind"]): int(row["n"])
+                for row in db.execute(
+                    "SELECT kind, COUNT(*) AS n FROM applied_events GROUP BY kind"
+                )
+            }
+
     def heartbeat(self, component: str, **metadata: object) -> None:
         now = datetime.datetime.now(datetime.UTC).isoformat()
         with self.connect() as db:
@@ -381,14 +446,19 @@ class Store:
                 ).fetchall()
                 ids = [int(row["effect_id"]) for row in rows]
                 for effect_id in ids:
+                    attempt = next(
+                        int(r["attempts"]) + 1 for r in rows
+                        if int(r["effect_id"]) == effect_id
+                    )
                     db.execute(
                         """
                         UPDATE outbox_state
-                        SET lease_owner=?, lease_until_utc=?, attempts=attempts+1,
-                            updated_ts_utc=?
+                        SET status='SENDING', lease_owner=?, lease_until_utc=?,
+                            attempts=attempts+1, send_token=?, updated_ts_utc=?
                         WHERE effect_id=?
                         """,
-                        (owner, lease_s, now_s, effect_id),
+                        (owner, lease_s, f"{effect_id}:{attempt}:{int(now.timestamp() * 1000)}",
+                         now_s, effect_id),
                     )
                 # Report the attempt that is now IN PROGRESS, not the count from before it:
                 # the dispatcher derives its backoff from this number, so returning the
@@ -509,6 +579,77 @@ class Store:
                 "SELECT * FROM executions ORDER BY fill_ts_utc, execution_id"
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def mark_unknown(
+        self, *, effect_id: int, reason: str, now: datetime.datetime
+    ) -> None:
+        """An ambiguous send: the transport failed, so we do not know whether it arrived.
+
+        This is deliberately NOT a retry. Retrying an ambiguous send is how one intended
+        order becomes two real ones; the row waits for reconciliation to say which.
+        """
+        with self.connect() as db:
+            db.execute(
+                """
+                UPDATE outbox_state
+                SET status='UNKNOWN', last_error=?, lease_owner=NULL,
+                    lease_until_utc=NULL, updated_ts_utc=?
+                WHERE effect_id=?
+                """,
+                (reason[:500], now.isoformat(), effect_id),
+            )
+
+    def recover_sending(
+        self, *, now: datetime.datetime, older_than_seconds: int = 0
+    ) -> list[dict[str, object]]:
+        """Rows still marked SENDING after a restart are ambiguous by definition.
+
+        A process that died between the send call and the response cannot know whether the
+        venue acted, so every stale SENDING row becomes UNKNOWN and is returned for
+        reconciliation rather than being retried.
+        """
+        cutoff = (now - datetime.timedelta(seconds=max(0, older_than_seconds))).isoformat()
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT o.effect_id, e.contract_key, o.send_token, o.last_error "
+                "FROM outbox_state o LEFT JOIN proposed_effects e "
+                "ON e.effect_id = o.effect_id "
+                "WHERE o.status='SENDING' AND o.updated_ts_utc <= ?",
+                (cutoff,),
+            ).fetchall()
+            ids = [int(row["effect_id"]) for row in rows]
+            for effect_id in ids:
+                db.execute(
+                    "UPDATE outbox_state SET status='UNKNOWN', "
+                    "last_error='recovered_from_sending', updated_ts_utc=? "
+                    "WHERE effect_id=?",
+                    (now.isoformat(), effect_id),
+                )
+        return [dict(row) for row in rows]
+
+    def load_unknown(self) -> list[dict[str, object]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT o.effect_id, e.contract_key, o.send_token, o.last_error "
+                "FROM outbox_state o LEFT JOIN proposed_effects e "
+                "ON e.effect_id = o.effect_id "
+                "WHERE o.status='UNKNOWN' ORDER BY o.effect_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def resolve_unknown(
+        self, *, effect_id: int, sent: bool, broker_ref: str, now: datetime.datetime
+    ) -> str:
+        """Reconciliation's verdict on an ambiguous send: it happened, or it did not."""
+        status = "SENT" if sent else "RETRY"
+        with self.connect() as db:
+            db.execute(
+                "UPDATE outbox_state SET status=?, broker_ref=?, last_error='', "
+                "send_token='', lease_owner=NULL, lease_until_utc=NULL, updated_ts_utc=? "
+                "WHERE effect_id=?",
+                (status, broker_ref, now.isoformat(), effect_id),
+            )
+        return status
 
     def outbox_snapshot(self) -> dict[str, object]:
         with self.connect() as db:

@@ -61,6 +61,14 @@ Implemented in this change:
       is wired
 - [x] a persisted halt is read back on start (`Store.halt_state`), so a restart resumes
       halted instead of quietly trading
+- [x] sending-state discipline: a claimed effect becomes SENDING; a transport exception is
+      AMBIGUOUS and quarantined as UNKNOWN (never blind-retried), recovered on restart and
+      resolved only by reconciliation (`recover_sending`, `resolve_unknown`, `scorpion recover`)
+- [x] circuit breaker: consecutive transport failures open the breaker for a cooldown, then
+      one probe; a dead venue cannot turn the queue into dead letters
+- [x] an applied-event log (`applied_events`): fills are events, not side effects, so the book
+      is a pure function of its log - and `scorpion verify` replays it and diffs the result
+      against the live state, halting on any divergence
 
 Still requires environment/operator work:
 
@@ -76,3 +84,5 @@ Still requires environment/operator work:
 - [ ] pre-market bars so exit levels and path statistics can be verified rather than assumed
 - [ ] operator surface beyond the CLI: a long-running dispatcher loop with backoff jitter
 - [ ] structured metrics/export for the dispatcher and reconciliation (counts exist, series do not)
+- [ ] an `applied_events` retention/compaction policy once the log spans months
+- [ ] automatic reconciliation trigger on any UNKNOWN row (the resolver exists; the scheduler does not)

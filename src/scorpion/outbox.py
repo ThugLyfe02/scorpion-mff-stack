@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
 
@@ -73,6 +73,43 @@ class DispatchConfig:
         return int(min(int(self.max_backoff_seconds), growth))
 
 
+@dataclass
+class Breaker:
+    """Stops hammering a venue that is failing.
+
+    A dead venue plus a queue is how a hundred effects become a hundred dead letters in
+    thirty seconds. After `failure_threshold` consecutive transport failures the breaker
+    opens for `cooldown_seconds`, then allows one probe; a success closes it, a failure
+    re-opens it for another cooldown.
+    """
+
+    failure_threshold: int = 3
+    cooldown_seconds: int = 30
+    failures: int = 0
+    opened_until: datetime | None = None
+
+    def allow(self, now: datetime) -> bool:
+        if self.opened_until is None:
+            return True
+        if now >= self.opened_until:
+            self.opened_until = None       # half-open: one probe may pass
+            return True
+        return False
+
+    @property
+    def is_open(self) -> bool:
+        return self.opened_until is not None
+
+    def record_success(self) -> None:
+        self.failures = 0
+        self.opened_until = None
+
+    def record_failure(self, now: datetime) -> None:
+        self.failures += 1
+        if self.failures >= self.failure_threshold:
+            self.opened_until = now + timedelta(seconds=self.cooldown_seconds)
+
+
 @dataclass(frozen=True, slots=True)
 class Dispatched:
     effect_id: int
@@ -118,6 +155,8 @@ class Dispatcher:
     # same batch is authorized, or a close can be authorized against a position the open in
     # that batch has not filled yet.
     on_filled: Callable[[Dispatched], None] | None = None
+    breaker: Breaker = field(default_factory=Breaker)
+    recover_after_seconds: int = 0
 
     def dispatch_once(
         self,
@@ -129,6 +168,19 @@ class Dispatcher:
     ) -> DispatchReport:
         """One bounded pass over what is due. Safe to call in a loop; never blocks."""
         moment = now or datetime.now(UTC)
+
+        # A row still SENDING is an ambiguous send from a previous process: quarantine it
+        # before claiming anything, because retrying it could double a real order.
+        self.store.recover_sending(now=moment, older_than_seconds=self.recover_after_seconds)
+
+        if not self.breaker.allow(moment):
+            report = DispatchReport()
+            report.items.append(
+                Dispatched(0, None, "CIRCUIT_OPEN", f"until {self.breaker.opened_until}")
+            )
+            self.store.heartbeat("outbox_dispatcher", circuit="open")
+            return report
+
         claims = self.store.claim_due(
             owner=self.owner, now=moment, limit=self.config.batch,
             lease_seconds=self.config.lease_seconds,
@@ -206,12 +258,14 @@ class Dispatcher:
         try:
             receipt = self.sender.send(auth.envelope, now=now)
         except Exception as exc:  # noqa: BLE001 - a sender failure is data, not a crash
-            status = self.store.mark_failed(
-                effect_id=effect_id, error=f"{type(exc).__name__}: {exc}", now=now,
-                backoff_seconds=self.config.backoff(tries),
-                max_attempts=self.config.max_attempts,
+            # An exception means we do NOT know whether the venue received the order: a
+            # timeout can hide a fill. Quarantine it as UNKNOWN and let reconciliation
+            # decide, because a blind retry here is how one order becomes two.
+            self.store.mark_unknown(
+                effect_id=effect_id, reason=f"{type(exc).__name__}: {exc}", now=now
             )
-            return Dispatched(effect_id, contract_key, status, f"sender_error:{exc}",
+            self.breaker.record_failure(now)
+            return Dispatched(effect_id, contract_key, "UNKNOWN", f"sender_error:{exc}",
                               envelope=auth.envelope)
 
         if receipt.ok:
@@ -230,10 +284,14 @@ class Dispatcher:
                 broker_ref=receipt.broker_ref,
             )
             self.store.mark_sent(effect_id=effect_id, broker_ref=receipt.broker_ref, now=now)
+            self.breaker.record_success()
             return Dispatched(effect_id, contract_key, "SENT", receipt.broker_ref,
                               envelope=auth.envelope, receipt=receipt)
 
         if receipt.retryable:
+            # An explicit "not filled" from the venue is safe to retry; only the ambiguity
+            # of a transport exception is not.
+            self.breaker.record_failure(now)
             status = self.store.mark_failed(
                 effect_id=effect_id, error=receipt.error, now=now,
                 backoff_seconds=self.config.backoff(tries),

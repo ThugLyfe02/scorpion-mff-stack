@@ -85,6 +85,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
     print(f"  sent {result.sent} | refused {result.refused} | open {result.open_positions} "
           f"| realized {result.realized_usd}")
     print(f"  tca {json.dumps(result.tca.to_dict(), sort_keys=True)}")
+    print(f"  verified (book == applied log): {result.verified}")
     if args.json:
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     print(f"  db {db_path}")
@@ -130,6 +131,43 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Rebuild the book from its applied log and diff it against the live state.
+
+    Exit 2 on divergence, and the store is halted: a book that cannot be reproduced from
+    its own log must not keep trading.
+    """
+    from .verify import replay_applied, verify_log
+
+    store = Store(args.db)
+    result = verify_log(store)
+    if not result.ok:
+        store.set_halt(True, "replay_divergence:" + ",".join(
+            d.describe() for d in result.divergences[:3]
+        ))
+    state = replay_applied(store.load_applied())
+    payload = result.to_dict()
+    payload["replayed"] = {
+        "positions": {k: {"status": v.status.value, "quantity": v.quantity}
+                      for k, v in state.positions.items()},
+        "equity": str(state.risk.equity),
+        "halted": state.halted,
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0 if result.ok else 2
+
+
+def cmd_recover(args: argparse.Namespace) -> int:
+    """Quarantine sends that were in flight when a process died."""
+    store = Store(args.db)
+    recovered = store.recover_sending(
+        now=datetime.now(UTC), older_than_seconds=args.older_than
+    )
+    print(json.dumps({"recovered": len(recovered), "unknown": store.load_unknown()},
+                     indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_health(args: argparse.Namespace) -> int:
     print(json.dumps(Store(args.db).health_snapshot(), indent=2, sort_keys=True))
     return 0
@@ -162,6 +200,15 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--db", default="scorpion.db")
     rec.add_argument("--snapshot", required=True)
     rec.set_defaults(func=cmd_reconcile)
+
+    ver = sub.add_parser("verify", help="replay the applied log and diff against the book")
+    ver.add_argument("--db", default="scorpion.db")
+    ver.set_defaults(func=cmd_verify)
+
+    rec = sub.add_parser("recover", help="quarantine sends that were in flight at a crash")
+    rec.add_argument("--db", default="scorpion.db")
+    rec.add_argument("--older-than", type=int, default=0)
+    rec.set_defaults(func=cmd_recover)
 
     health = sub.add_parser("health", help="heartbeats, halt flag, pending effects")
     health.add_argument("--db", default="scorpion.db")

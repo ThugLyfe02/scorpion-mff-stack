@@ -132,7 +132,9 @@ def test_a_retryable_failure_backs_off_and_stays_claimable(tmp_path):
 
 
 def test_a_poison_effect_is_dead_lettered_after_max_attempts(tmp_path):
-    sender = Sender(RuntimeError("venue down"))
+    # An explicit, retryable refusal from the venue - not a transport exception, which is
+    # ambiguous and is quarantined as UNKNOWN instead of retried.
+    sender = Sender(Receipt(ok=False, error="venue rejected", retryable=True))
     d = dispatcher(tmp_path, sender, max_attempts=2, base_backoff_seconds=0)
     d.dispatch_once(state=book(), now=NOW, quotes=QUOTES)
     second = d.dispatch_once(state=book(), now=NOW + timedelta(seconds=1), quotes=QUOTES)
@@ -152,9 +154,14 @@ def test_a_lease_stops_a_second_worker_claiming_the_same_effect(tmp_path):
     first = s.claim_due(owner="w1", now=NOW, limit=10, lease_seconds=30)
     second = s.claim_due(owner="w2", now=NOW, limit=10, lease_seconds=30)
     assert len(first) == 1 and second == []
-    # after the lease expires the effect is claimable again, and the attempt was counted
-    third = s.claim_due(owner="w2", now=NOW + timedelta(seconds=31), limit=10, lease_seconds=30)
-    assert len(third) == 1 and int(str(third[0]["attempts"])) == 2
+    # A claimed row is SENDING, so it is NOT re-claimable even after the lease expires:
+    # the only safe path is recovery -> UNKNOWN -> reconciliation, never a blind retry.
+    after = s.claim_due(owner="w2", now=NOW + timedelta(seconds=31), limit=10, lease_seconds=30)
+    assert after == []
+    assert s.outbox_snapshot()["counts"] == {"SENDING": 1}
+    recovered = s.recover_sending(now=NOW + timedelta(seconds=31))
+    assert len(recovered) == 1
+    assert s.outbox_snapshot()["counts"] == {"UNKNOWN": 1}
 
 
 def test_the_execution_insert_is_idempotent_on_the_key(tmp_path):

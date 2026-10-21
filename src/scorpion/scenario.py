@@ -54,6 +54,8 @@ class ScenarioResult:
     open_positions: int = 0
     realized_usd: Decimal = Decimal("0")
     risk_reasons: tuple[str, ...] = ()
+    verified: bool = False
+    verification: dict[str, object] = field(default_factory=dict)
 
     @property
     def sent(self) -> int:
@@ -75,6 +77,8 @@ class ScenarioResult:
             "tca": self.tca.to_dict(),
             "dispatches": [r.to_dict() for r in self.dispatches],
             "settlements": self.settlements,
+            "verified": self.verified,
+            "verification": self.verification,
         }
 
 
@@ -199,6 +203,10 @@ async def run_async(
          {"PENDING_ENTRY", "OPEN", "CLOSING"}]
     )
     result.realized_usd = pipeline.state.risk.equity
+    from .verify import verify
+    check = verify(store, pipeline.state)
+    result.verified = check.ok
+    result.verification = check.to_dict()
     result.risk_reasons = tuple(
         f"{p.contract_key}:{p.last_reason}" for p in pipeline.state.positions.values()
         if p.last_reason

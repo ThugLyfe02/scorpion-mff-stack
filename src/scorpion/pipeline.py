@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field, replace
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from .association import associate_followup
@@ -61,6 +62,12 @@ class Pipeline:
             # Exact duplicate/reconnect delivery. State already includes this event.
             return event, ()
         self.state, effects = reduce_book(self.state, event)
+        self.store.append_applied(
+            kind="signal",
+            payload_json=self.store._signal_payload(event),
+            ts=event.source_ts_utc,
+            contract_key=event.contract_key,
+        )
         self.store.append_effects(effects)
         self.store.heartbeat(
             "pipeline",
@@ -95,6 +102,19 @@ class Pipeline:
             final=final,
         )
         self.state = settlement.state
+        self.store.append_applied(
+            kind="fill",
+            payload_json=json.dumps({
+                "contract_key": contract_key,
+                "generation": generation,
+                "quantity_delta": quantity_delta,
+                "fill_price": str(fill_price),
+                "final": final,
+                "market_day": market_day.isoformat(),
+            }, sort_keys=True),
+            ts=datetime.now(UTC),
+            contract_key=contract_key,
+        )
         if settlement.realized or settlement.closed:
             self.state = replace(
                 self.state,
