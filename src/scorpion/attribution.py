@@ -50,6 +50,7 @@ class Variant:
     policy_overrides: dict[str, Any] = field(default_factory=dict)
     exit_haircut: float = 0.0          # multiply every claimed exit price by (1 - haircut)
     entry_slippage: float = 0.0        # pay this much more than the alert bid
+    scenario: bool = False             # a matrix cell: several dimensions by design, not a delta
     note: str = ""
 
     def __post_init__(self) -> None:
@@ -60,7 +61,7 @@ class Variant:
             dimensions += 1
         if self.entry_slippage:
             dimensions += 1
-        if dimensions > 1:
+        if dimensions > 1 and not self.scenario:
             raise VariantError(
                 f"{self.name}: changes a policy field AND an exit haircut, so its delta is "
                 "unattributable - use two variants"
@@ -180,6 +181,68 @@ def default_variants() -> tuple[Variant, ...]:
         Variant("entry_slip_35", entry_slippage=0.35,
                 note="pay 35% above it, past the gate"),
     )
+
+
+def matrix(
+    ledger: Any, *, db_path_for: Callable[[str], str | Path],
+    slippages: Sequence[float] = (0.0, 0.10, 0.20, 0.35),
+    gates: Sequence[Decimal] = (D("0.10"), D("0.25"), D("0.40")),
+) -> dict[str, Any]:
+    """Slippage x gate, because a gate can only be priced against the latency it refuses.
+
+    One-at-a-time attribution answered "what does a 25% gate cost" with zero, because with no
+    slippage there is nothing to refuse. The question that decides a config is conditional: given
+    the latency we actually have, does a tighter gate make money? That is a two-dimensional
+    question and it needs a two-dimensional answer.
+    """
+    rows: list[dict[str, Any]] = []
+    for slippage in slippages:
+        for gate in gates:
+            name = f"slip{int(slippage * 100)}_gate{int(gate * 100)}"
+            outcome = run_variant(
+                ledger,
+                Variant(name, {"max_dislocation_from_reference": gate},
+                        entry_slippage=slippage, scenario=True),
+                db_path=db_path_for(name),
+            )
+            rows.append({
+                "slippage": slippage, "gate": float(gate),
+                "taken": outcome["taken"], "r_total": outcome["r_total"],
+                "realised_usd": outcome["realised_usd"],
+                "verified": outcome["verified"],
+            })
+
+    best = max(rows, key=lambda row: row["r_total"]) if rows else None
+    return {
+        "rows": rows,
+        "best": best,
+        "note": (
+            "each cell is a full corpus replay under that slippage and that gate; the best cell is "
+            "the config this corpus supports, not a prediction"
+        ),
+    }
+
+
+def render_matrix(payload: dict[str, Any]) -> str:
+    rows = payload["rows"]
+    if not rows:
+        return "no rows"
+    gates = sorted({row["gate"] for row in rows})
+    slips = sorted({row["slippage"] for row in rows})
+    lines = ["slippage | gate " + " ".join(f"{g:>9.0%}" for g in gates)]
+    for slip in slips:
+        cells = []
+        for gate in gates:
+            match = next(r for r in rows if r["slippage"] == slip and r["gate"] == gate)
+            cells.append(f"{match['r_total']:>+9.2f}")
+        lines.append(f"{slip:>13.0%} " + " ".join(cells))
+    best = payload["best"]
+    if best:
+        lines.append(
+            f"best: slippage {best['slippage']:.0%}, gate {best['gate']:.0%} -> "
+            f"{best['r_total']:+.2f}R on {best['taken']} trades"
+        )
+    return chr(10).join(lines)
 
 
 def render(payload: dict[str, Any]) -> str:
