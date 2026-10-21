@@ -313,11 +313,7 @@ def run_backtest(trades: list[Trade] | None = None, *,
                 # Group by reason KIND, keeping the qualifier when it is a name:
                 # "too_far_off_bid:31.2%" -> too_far_off_bid, but
                 # "ignored:ticker_excluded" keeps both halves.
-                parts = last.reason.split(":")
-                if len(parts) > 1 and ("%" in parts[1] or parts[1].replace(".", "").isdigit()):
-                    reason_key = parts[0]
-                else:
-                    reason_key = last.reason
+                reason_key = _reason_key(last.reason)
                 report.skip_reasons[reason_key] = report.skip_reasons.get(reason_key, 0) + 1
                 if last.event == "reject":
                     report.rejected += 1
@@ -353,6 +349,116 @@ def run_backtest(trades: list[Trade] | None = None, *,
                          for k, v in report.by_channel.items()}
     report.duplicate_keys = sorted(k for k, n in keys.items() if n > 1)
     return report
+
+
+def _reason_key(reason: str) -> str:
+    """Group a skip reason for reporting without losing the qualifier.
+
+    "too_far_off_bid:31.2%" -> too_far_off_bid
+    "ignored:ticker_excluded" -> ignored:ticker_excluded
+    "governor:ladder:-1.0R->x0.5|streak:3->x0.5" -> governor
+    """
+    if reason.startswith("governor:"):
+        return "governor"
+    parts = reason.split(":")
+    if len(parts) > 1 and ("%" in parts[1] or parts[1].replace(".", "").isdigit()):
+        return parts[0]
+    return reason
+
+
+def run_governed(policy, trades: list[Trade] | None = None, *,
+                 ask_multiple: float = DEFAULT_ASK_MULTIPLE,
+                 exit_slippage: float = 1.0,
+                 pipe_test: bool = True,
+                 named_exits: bool = True,
+                 corpus: str | Path = DEFAULT_CORPUS):
+    """Run the corpus with a risk policy active, and record every time it intervened.
+
+    Returns (report, decisions) where each decision is (trade, factor, reasons) for the
+    entries the governor touched - so a policy can be judged by what it *did*, not by
+    what the equity curve happened to look like.
+    """
+    from .governor import GovernorState, decide
+
+    trades = list(trades if trades is not None else load_trades(corpus))
+    engine = Engine(config=EngineConfig(pipe_test=pipe_test), fills=FillLog(),
+                    quotes=QuoteScript(build_quotes(trades, ask_multiple, exit_slippage)),
+                    governor=lambda st, sig, ts: decide(policy, st, channel=sig.channel, ts=ts))
+    # ONE risk state: the engine's. A preview against a copy would report zero
+    # interventions while the engine's governor was standing down.
+    state = engine.governor_state
+
+    report = BacktestReport(trades=len(trades), ask_multiple=ask_multiple,
+                            exit_slippage=exit_slippage, pipe_test=pipe_test,
+                            days=len({t.date for t in trades}))
+    decisions: list[tuple[Trade, float, str]] = []
+
+    for trade in trades:
+        entry_signal = parse(entry_message(trade))
+        # What the governor would have said, recorded independently of the outcome,
+        # so a stand-down is visible even when the trade would have lost.
+        preview = decide(policy, state, channel=trade.channel, ts=trade.entry_ts)
+        if preview.factor < 1.0:
+            decisions.append((trade, preview.factor, preview.reason_text))
+
+        intents = engine.on_signal(entry_signal, now=trade.entry_ts)
+        result = TradeResult(trade=trade, taken=bool(intents))
+        if intents:
+            result.contracts = intents[0].qty
+            result.entry_limit = intents[0].limit
+            result.decision = intents[0].reason
+        else:
+            last = engine.fills.records[-1] if engine.fills.records else None
+            result.reason = last.reason if last else "no_signal"
+            result.decision = result.reason
+            if last is not None and last.event in {"skip", "reject", "alert"}:
+                key = _reason_key(last.reason)
+                report.skip_reasons[key] = report.skip_reasons.get(key, 0) + 1
+                if last.event == "reject":
+                    report.rejected += 1
+                else:
+                    report.skipped += 1
+
+        exit_msg = exit_message(trade, named=named_exits, slippage=exit_slippage)
+        if exit_msg is not None and result.taken:
+            sells = engine.on_signal(parse(exit_msg), now=trade.exit_ts)
+            if sells:
+                result.exit_price = sells[0].limit
+                result.pnl_usd = round((sells[0].limit - result.entry_limit) * sells[0].qty * 100, 2)
+        elif exit_msg is None and result.taken:
+            # No recorded exit: mark it at entry when the sweep releases it, so the
+            # policy comparison is not flattered by unrealised winners.
+            result.pnl_usd = 0.0
+
+        if result.taken:
+            report.taken += 1
+            report.contracts += result.contracts
+            report.notional_usd += result.entry_limit * result.contracts * 100
+            report.pnl_usd += result.pnl_usd
+            if result.pnl_usd > 0:
+                report.winners += 1
+            elif result.pnl_usd < 0:
+                report.losers += 1
+            agg = report.by_channel.setdefault(trade.channel, {"n": 0, "contracts": 0, "pnl": 0.0})
+            agg["n"] += 1
+            agg["contracts"] += result.contracts
+            agg["pnl"] += result.pnl_usd
+        report.results.append(result)
+
+    report.pnl_usd = round(report.pnl_usd, 2)
+    report.notional_usd = round(report.notional_usd, 2)
+    report.by_channel = {k: {"n": v["n"], "contracts": v["contracts"], "pnl": round(v["pnl"], 2)}
+                         for k, v in report.by_channel.items()}
+    return report, decisions
+
+
+def outcomes_from(report: BacktestReport):
+    """Backtest results -> expectancy.Outcome rows, for the desk statistics."""
+    from .expectancy import Outcome
+
+    return [Outcome(channel=r.trade.channel, pnl_usd=r.pnl_usd,
+                    ts=r.trade.entry_ts, ticker=r.trade.ticker)
+            for r in report.results if r.taken]
 
 
 def attribution(trades: list[Trade] | None = None,

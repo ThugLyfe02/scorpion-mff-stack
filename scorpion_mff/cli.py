@@ -79,6 +79,29 @@ def _parser() -> argparse.ArgumentParser:
     wa.add_argument("--fills", type=Path, default=None)
     wa.add_argument("--kill", type=Path, default=None)
     wa.add_argument("--json", action="store_true", help="machine-readable state")
+
+    pol = sub.add_parser("policy", help="risk policy: show, validate, init, simulate")
+    pol_sub = pol.add_subparsers(dest="policy_cmd", required=True)
+    for name, helptext in (("show", "print the policy an operator must read before arming"),
+                           ("validate", "parse and check; non-zero exit if it is unsafe")):
+        sp = pol_sub.add_parser(name, help=helptext)
+        sp.add_argument("--path", type=Path, default=None)
+        sp.add_argument("--json", action="store_true")
+    init = pol_sub.add_parser("init", help="write the baseline policy (refuses to overwrite)")
+    init.add_argument("--path", type=Path, default=None)
+    init.add_argument("--name", default="baseline-v1")
+    sim = pol_sub.add_parser("simulate", help="run the corpus with the policy active")
+    sim.add_argument("--path", type=Path, default=None)
+    sim.add_argument("--exit-slippage", type=float, default=1.0,
+                     help="stress: fraction of his posted exit level we get (1.0 = as recorded)")
+    sim.add_argument("--ask-multiple", type=float, default=1.05,
+                     help="stress: how far through his bid we pay (default 1.05)")
+    sim.add_argument("--json", action="store_true")
+
+    desk = sub.add_parser("desk", help="expectancy, drawdown and allocation from the record")
+    desk.add_argument("--risk-unit", type=float, default=None, help="1R in USD (default: policy, else $1500)")
+    desk.add_argument("--json", action="store_true")
+    desk.add_argument("--md", type=Path, default=None, help="write the markdown report here")
     return p
 
 
@@ -142,6 +165,37 @@ def cmd_arm(args: argparse.Namespace) -> int:
         print(f"kill switch is active: {kill.status()}  (delete {kill.path} to arm)", file=sys.stderr)
         return 1
 
+    # The risk policy is a precondition, not a decoration. A missing, invalid or
+    # unreviewed policy is a refusal: the desk does not trade without a written
+    # risk limit, and it does not trade on one nobody has looked at in a week.
+    from . import policy as policy_mod
+    from .governor import GovernorState, make_governor
+
+    policy_path = ROOT / "live" / "policy.json"
+    try:
+        risk_policy = policy_mod.load(policy_path)
+    except policy_mod.PolicyError as exc:
+        print(f"{exc}\nrefusing to arm: no valid risk policy at {policy_path}", file=sys.stderr)
+        return 1
+    if risk_policy.is_stale():
+        age_h = (risk_policy.age_minutes() or 0) / 60
+        print(f"policy {risk_policy.name} is {age_h:.1f}h old (limit "
+              f"{risk_policy.stale_after_minutes / 60:.0f}h) - review and re-date it, "
+              f"then arm", file=sys.stderr)
+        return 1
+
+    state_path = ROOT / "live" / "governor.json"
+    try:
+        risk_state = GovernorState.load(state_path)
+    except ValueError as exc:
+        print(f"{exc}\nrefusing to arm: a corrupt risk file could silently reset a "
+              f"drawdown limit", file=sys.stderr)
+        return 1
+    if risk_state.halted_reason:
+        print(f"risk state is stood down: {risk_state.halted_reason}\n"
+              f"delete {state_path} after a review to re-arm", file=sys.stderr)
+        return 1
+
     live = bool(args.live)
     if live and not os.environ.get("MFF_RH_TOKEN"):
         print("--live needs MFF_RH_TOKEN", file=sys.stderr)
@@ -155,7 +209,9 @@ def cmd_arm(args: argparse.Namespace) -> int:
     broker = RobinhoodAgenticBroker(dry_run=not live)
     listener = Listener(
         transport=WebsocketGateway(token=token),
-        engine=Engine(config=EngineConfig(), fills=FillLog(path=FILL_LOG, fsync=False)),
+        engine=Engine(config=EngineConfig(), fills=FillLog(path=FILL_LOG, fsync=False),
+                      governor=make_governor(risk_policy),
+                      risk_state=risk_state, risk_state_path=state_path),
         broker=broker,
         quotes=quotes,
         budget=LatencyBudget(),
@@ -165,6 +221,9 @@ def cmd_arm(args: argparse.Namespace) -> int:
     print(f"armed | broker={'LIVE' if live else 'DRY'} | "
           f"quotes={'configured' if quotes.configured else 'NOT configured (entries will reject)'} | "
           f"channels={','.join(CHANNEL_IDS)}")
+    print(f"risk  | policy {risk_policy.name} (1R=${risk_policy.risk_unit_usd:,.0f}, "
+          f"daily stop ${risk_policy.daily_loss_limit_usd_effective() or 0:,.0f}) | "
+          f"equity ${risk_state.equity_usd:,.2f} | peak ${risk_state.peak_equity_usd:,.2f}")
 
     async def pump() -> int:
         count = 0
@@ -280,6 +339,120 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return 1 if (result is not None and result.ok) else 2
 
 
+def cmd_policy(args: argparse.Namespace) -> int:
+    from . import policy as policy_mod
+
+    path = args.path or policy_mod.DEFAULT_POLICY_PATH
+    if args.policy_cmd == "init":
+        if Path(path).exists():
+            print(f"refusing to overwrite {path} - a risk policy is not a generated file")
+            return 2
+        written = policy_mod.write(policy_mod.baseline(args.name), path)
+        print(f"wrote baseline policy -> {written}")
+        print()
+        print(policy_mod.summarise(policy_mod.load(written)))
+        return 0
+
+    if args.policy_cmd == "simulate":
+        from . import historic
+        try:
+            policy = policy_mod.load(path)
+        except policy_mod.PolicyError as exc:
+            print(exc)
+            return 2
+        base = historic.run_backtest(ask_multiple=args.ask_multiple,
+                                     exit_slippage=args.exit_slippage)
+        governed, decisions = historic.run_governed(policy,
+                                                    ask_multiple=args.ask_multiple,
+                                                    exit_slippage=args.exit_slippage)
+        if args.json:
+            print(json.dumps({
+                "policy": policy.name,
+                "ungoverned": {"taken": base.taken, "contracts": base.contracts,
+                               "pnl_usd": base.pnl_usd},
+                "governed": {"taken": governed.taken, "contracts": governed.contracts,
+                             "pnl_usd": governed.pnl_usd,
+                             "skip_reasons": governed.skip_reasons},
+                "interventions": [{"date": t.date, "channel": t.channel, "factor": f,
+                                   "reason": r} for t, f, r in decisions],
+            }, indent=2))
+            return 0
+        print(f"policy {policy.name} over the corpus")
+        print(f"  ungoverned : taken {base.taken:>3}  contracts {base.contracts:>4}  "
+              f"pnl ${base.pnl_usd:>11,.2f}")
+        print(f"  governed   : taken {governed.taken:>3}  contracts {governed.contracts:>4}  "
+              f"pnl ${governed.pnl_usd:>11,.2f}")
+        delta = governed.pnl_usd - base.pnl_usd
+        print(f"  difference : ${delta:+,.2f}  "
+              f"({len(decisions)} entries touched by the policy)")
+        if decisions:
+            print("\n  interventions:")
+            for trade, factor, reason in decisions[:20]:
+                print(f"    {trade.date} {trade.time_et} {trade.channel:<22} "
+                      f"x{factor:<4g} {reason}")
+            if len(decisions) > 20:
+                print(f"    ... and {len(decisions) - 20} more")
+        if governed.skip_reasons:
+            print("\n  governed skips:", ", ".join(
+                f"{k}={v}" for k, v in sorted(governed.skip_reasons.items())))
+        return 0
+
+    # show / validate
+    try:
+        policy = policy_mod.load(path)
+    except policy_mod.PolicyError as exc:
+        print(exc)
+        return 2
+    if args.json:
+        print(json.dumps(policy.to_dict(), indent=2))
+        return 0
+    print(policy_mod.summarise(policy))
+    if args.policy_cmd == "validate":
+        print("\n  valid: parses, every multiplier within the locked cap, reduce-only\n"
+              "  note: freshness is checked at arm time, not here - a stale policy "
+              "still parses")
+    return 0
+
+
+def cmd_desk(args: argparse.Namespace) -> int:
+    """The statistics layer: what the record says, and where the next dollar belongs."""
+    from . import expectancy, historic
+    from . import policy as policy_mod
+
+    risk_unit = args.risk_unit
+    if risk_unit is None:
+        try:
+            risk_unit = policy_mod.load().risk_unit_usd
+        except policy_mod.PolicyError:
+            risk_unit = policy_mod.DEFAULT_R_USD
+
+    report = historic.run_backtest()
+    rows = historic.outcomes_from(report)
+    desk = expectancy.report(rows, risk_unit_usd=risk_unit)
+
+    if args.md is not None:
+        args.md.parent.mkdir(parents=True, exist_ok=True)
+        args.md.write_text(desk.to_markdown(), encoding="utf-8")
+
+    if args.json:
+        print(json.dumps({
+            "overall": desk.overall.to_dict(),
+            "channels": {name: stats.to_dict() for name, stats in desk.channels.items()},
+            "ranking": [{"channel": name, "score": round(score, 4)} for name, score, _ in desk.ranking],
+            "drawdown": desk.dd.to_dict(),
+            "runs_test": desk.runs,
+            "streak_expectations": [{"length": n, "expected": round(v, 2)}
+                                    for n, v in desk.streak_table],
+            "risk_unit_usd": desk.risk_unit_usd,
+        }, indent=2))
+        return 0
+
+    print(desk.to_text())
+    if args.md is not None:
+        print(f"\nmarkdown report -> {args.md}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     handlers = {
@@ -289,6 +462,8 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "backtest": cmd_backtest,
         "watch": cmd_watch,
+        "policy": cmd_policy,
+        "desk": cmd_desk,
     }
     return handlers[args.cmd](args)
 

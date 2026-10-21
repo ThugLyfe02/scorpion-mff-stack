@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 from .fills import FillLog
 from .pricing import far_off_bid, marketable_limit, pct_off_bid
+from .governor import GovernorState, apply_contracts
 from .sizing import (
     MAX_CONCURRENT,
     PIPE_TEST_CONTRACTS,
@@ -71,12 +72,40 @@ class Engine:
     clock: Callable[[], float] = time.time
     blocked: Callable[[], bool] = lambda: False      # kill switch hook
     quotes: Any = None                               # QuoteProvider; see _quote_for
+    governor: Any = None                             # governor.Governor or None
+    risk_state: GovernorState = field(default_factory=GovernorState)
+    risk_state_path: Any = None                      # persist risk state after each settle
     stats: EngineStats = field(default_factory=EngineStats)
 
     positions: dict[str, Position] = field(default_factory=dict)
     closed: set[str] = field(default_factory=set)
     halted: bool = False
     day: str = ""
+
+    # ── the book ─────────────────────────────────────────────────────────────
+    @property
+    def governor_state(self) -> GovernorState:
+        """Live risk state, kept in step with realised P&L.
+
+        Held on the engine so a governor is a pure function of it: no second source of
+        truth about how much has been lost today, and nothing to drift. `arm` seeds it
+        from live/governor.json so a restart cannot forget a drawdown.
+        """
+        return self.risk_state
+
+    def _book_result(self, delta_usd: float, ts: float) -> None:
+        """One place where a realised result moves the stats and the risk state."""
+        self.stats.realized_usd += delta_usd
+        self.governor_state.record_result(
+            delta_usd, time.strftime("%Y-%m-%d", time.gmtime(ts)))
+        if self.risk_state_path is not None:
+            try:
+                self.governor_state.save(self.risk_state_path)
+            except OSError as exc:
+                # A risk file that cannot be written must not stop an exit from
+                # settling, but it must be visible in the log.
+                self.fills.record(event="alert", contract_key="", qty=0, price=0.0,
+                                  reason=f"risk_state_unwritable:{exc}", ts=ts)
 
     # ── book helpers ─────────────────────────────────────────────────────────
     def _quote_for(self, key: str, explicit: Quote | None) -> Quote | None:
@@ -254,6 +283,16 @@ class Engine:
         else:
             qty = contracts_for(clip_budget(tier), limit)
 
+        # The governor can only shrink the locked clip. It is consulted AFTER the
+        # locked size exists, so "reduce-only" is structural rather than a promise:
+        # apply_contracts() also clamps, in case the policy was hand-edited.
+        if self.governor is not None:
+            decision = self.governor(self.governor_state, signal, ts)
+            qty = apply_contracts(qty, decision.factor)
+            if decision.stand_down or qty <= 0:
+                # A stand-down is a decision worth recording, never a silent drop.
+                return self._skip(signal, ts, f"governor:{decision.reason_text}", latency_ms)
+
         position = Position(contract_key=key, ticker=signal.ticker, side=signal.side,
                             contracts=qty, avg_price=limit, opened_ts=ts,
                             channel=signal.channel)
@@ -320,7 +359,7 @@ class Engine:
             quote.bid if quote is not None else None)
         if price is None:
             return self._reject(signal, ts, "no_price_for_trim", latency_ms, key)
-        self.stats.realized_usd += (price - position.avg_price) * qty * 100
+        self._book_result((price - position.avg_price) * qty * 100, ts)
         position.contracts = self.config.trim_target
         position.trimmed += 1
         position.breakeven_stop = position.avg_price
@@ -349,7 +388,7 @@ class Engine:
             quote.bid if quote is not None else None)
         if price is None:
             return self._reject(signal, ts, "no_price_for_close", latency_ms, key)
-        self.stats.realized_usd += (price - position.avg_price) * qty * 100
+        self._book_result((price - position.avg_price) * qty * 100, ts)
         position.contracts = 0
         self.closed.add(position.contract_key)
         del self.positions[position.contract_key]

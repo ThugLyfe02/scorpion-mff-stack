@@ -8,3 +8,7 @@ __pycache__/
 # deliberately NOT ignored - an arm-blocking file must be visible in the tree.
 live/fills.jsonl
 live/heartbeat.json
+
+# risk state is machine state: a persisted drawdown must not be committed
+live/governor.json
+live/governor.json.tmp
