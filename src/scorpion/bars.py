@@ -250,7 +250,18 @@ def load_path(path: str | Path) -> tuple[list[BarSet], list[dict[str, str]], str
         good, bad = load_document(payload, source=file.name)
         accepted.extend(good)
         rejected.extend(bad)
-    return accepted, rejected, digest.hexdigest()
+
+    # A directory of vendor exports contains files that are not contract bar sets. Reporting each
+    # one buries the rejections that matter, so unrecognised names are collapsed into one line.
+    named = [row for row in rejected if row["code"] != "bad_name"]
+    unnamed = len(rejected) - len(named)
+    if unnamed:
+        named.append({
+            "set": f"{unnamed} files",
+            "code": "unrecognised_name",
+            "detail": "filenames are not TICKER_SIDE_STRIKE[_DAY]",
+        })
+    return accepted, named, digest.hexdigest()
 
 
 # ── persistence ─────────────────────────────────────────────────────────────

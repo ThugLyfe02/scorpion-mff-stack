@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 import tempfile
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -211,6 +211,46 @@ def cmd_markout(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_coverage(args: argparse.Namespace) -> int:
+    """What the corpus can support, and the missing input behind every refusal."""
+    from .bars import load_path, persist
+    from .coverage import assess, to_dict
+    from .ledger import load_csv
+
+    rows_bars, rejected, digest = load_path(args.bars)
+    ledger = load_csv(args.corpus)
+    classified, summary = assess(ledger, {b.contract_key: b for b in rows_bars})
+    payload = to_dict(classified, summary)
+    payload["bars"] = {"accepted": len(rows_bars), "rejected": rejected, "digest": digest[:16]}
+    if args.db:
+        store = Store(args.db)
+        payload["persisted"] = persist(store, rows_bars)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    m = payload["summary"]
+    print(f"corpus {m['trades']} trades  measurable {m['measurable']} ({m['pct']}%)  "
+          f"bar sets {m['contracts_with_bars']}")
+    print("  by reason  " + (", ".join(f"{k} {v}" for k, v in m["by_reason"].items()) or "none"))
+    for channel, entry in m["by_channel"].items():
+        print(f"    {channel:26s} {entry['measurable']:3d}/{entry['total']:<3d} "
+              f"{entry['pct']:5.1f}%")
+    if rejected:
+        print(f"  bar rejections: {len(rejected)}")
+        for row in rejected[:5]:
+            print(f"    {row['set']}: {row['code']} {row['detail'][:60]}")
+    return 0
+
+
+def cmd_calendar(args: argparse.Namespace) -> int:
+    from .sessions import report as calendar_report
+
+    payload = calendar_report(date.fromisoformat(args.start), date.fromisoformat(args.end))
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Rebuild the book from its applied log and diff it against the live state.
 
@@ -335,6 +375,18 @@ def main(argv: list[str] | None = None) -> int:
     mk.add_argument("--bars", default="mff-backtest/week_bars.json")
     mk.add_argument("--json", action="store_true")
     mk.set_defaults(func=cmd_markout)
+
+    cov = sub.add_parser("coverage", help="which trades can be measured, and what is missing")
+    cov.add_argument("--corpus", default="mff-backtest/trades.csv")
+    cov.add_argument("--bars", default="mff-backtest/week_bars.json")
+    cov.add_argument("--db", default="")
+    cov.add_argument("--json", action="store_true")
+    cov.set_defaults(func=cmd_coverage)
+
+    cal = sub.add_parser("calendar", help="sessions, half-days and holiday coverage")
+    cal.add_argument("--start", default="2026-01-01")
+    cal.add_argument("--end", default="2026-12-31")
+    cal.set_defaults(func=cmd_calendar)
 
     ver = sub.add_parser("verify", help="replay the applied log and diff against the book")
     ver.add_argument("--db", default="scorpion.db")
