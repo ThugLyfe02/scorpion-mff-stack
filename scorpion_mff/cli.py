@@ -102,6 +102,17 @@ def _parser() -> argparse.ArgumentParser:
     desk.add_argument("--risk-unit", type=float, default=None, help="1R in USD (default: policy, else $1500)")
     desk.add_argument("--json", action="store_true")
     desk.add_argument("--md", type=Path, default=None, help="write the markdown report here")
+
+    tca = sub.add_parser("tca", help="execution quality: path analysis and venue fills")
+    tca_sub = tca.add_subparsers(dest="tca_cmd", required=True)
+    tp = tca_sub.add_parser("path", help="what the contract did between entry and exit (real bars)")
+    tp.add_argument("--bars", type=Path, default=None)
+    tp.add_argument("--ask-multiple", type=float, default=1.05)
+    tp.add_argument("--md", type=Path, default=None)
+    tp.add_argument("--json", action="store_true")
+    tf = tca_sub.add_parser("fills", help="realised venue fills: limit vs fill, bps, latency")
+    tf.add_argument("--executions", type=Path, default=None)
+    tf.add_argument("--json", action="store_true")
     return p
 
 
@@ -453,6 +464,61 @@ def cmd_desk(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tca(args: argparse.Namespace) -> int:
+    """Execution quality. `path` needs bars (here); `fills` needs venue executions (live)."""
+    from . import historic, tca as tca_mod
+
+    if args.tca_cmd == "fills":
+        path = args.executions or (ROOT / "live" / "executions.jsonl")
+        log = tca_mod.ExecutionLog.load(path)
+        report = tca_mod.FillReport(executions=log.records)
+        if args.json:
+            print(json.dumps({"executions": len(log.records),
+                              "mean_cost_bps": round(report.mean_cost_bps, 1),
+                              "p90_cost_bps": round(report.p90_cost_bps, 1),
+                              "total_cost_usd": report.total_cost_usd,
+                              "at_or_better_pct": round(report.at_or_better_share, 1),
+                              "partial_pct": round(report.partial_share, 1),
+                              "latency_p90_ms": round(report.latency_p90_ms, 1),
+                              "suggested_ask_multiple": report.suggested_ask_multiple(),
+                              "source": str(path)}, indent=2))
+            return 0
+        print(report.to_text())
+        if not log.records:
+            print(f"  (looked in {path})")
+        return 0
+
+    bars_dir = args.bars or tca_mod.DEFAULT_BARS_DIR
+    barsets = tca_mod.load_barsets(bars_dir)
+    if not barsets:
+        print(f"no bar series under {bars_dir} - nothing to analyse", file=sys.stderr)
+        return 2
+    report = tca_mod.analyse_paths(barsets, historic.load_trades(),
+                                   ask_multiple=args.ask_multiple)
+    if args.md is not None:
+        args.md.parent.mkdir(parents=True, exist_ok=True)
+        args.md.write_text(report.to_markdown(), encoding="utf-8")
+    if args.json:
+        print(json.dumps({
+            "barsets": report.barsets, "joined": report.n,
+            "measurable": len(report.measurable),
+            "entry_before_coverage": report.n - len(report.in_coverage),
+            "aggregates_withheld": not report.measurable_enough,
+            "mae_median_pct": round(report.mae_median, 2) if report.measurable_enough else None,
+            "mfe_median_pct": round(report.mfe_median, 2) if report.measurable_enough else None,
+            "stop30_hit_pct": round(report.stop30_share, 1) if report.measurable_enough else None,
+            "carry_median_pct": round(report.carry_median, 2),
+            "expired_pct": round(report.expired_share, 1),
+            "unmatched": report.unmatched,
+            "rows": [r.to_dict() for r in report.rows],
+        }, indent=2))
+        return 0
+    print(report.to_text())
+    if args.md is not None:
+        print(f"\nmarkdown report -> {args.md}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     handlers = {
@@ -464,6 +530,7 @@ def main(argv: list[str] | None = None) -> int:
         "watch": cmd_watch,
         "policy": cmd_policy,
         "desk": cmd_desk,
+        "tca": cmd_tca,
     }
     return handlers[args.cmd](args)
 

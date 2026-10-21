@@ -109,9 +109,18 @@ matters most: two positions, one named exit, the other left untouched.
   the pipe test is for, and what the live quote feed has to prove.
 * **No partial fills, no rejects, no halts.** The corpus has no fill reports, so every
   accepted limit is assumed filled.
-* **No theta.** Exits happen minutes after entries, so time decay inside the hold is
-  negligible — but a position that is not exited before expiry is marked at entry, which
-  hides the real loss on a worthless expire.
+* **No theta inside the hold.** Exits happen minutes after entries, so decay during the
+  hold is negligible — but a position that is not exited before expiry was marked at entry,
+  which hides the real loss. **That gap is now measured** (`TCA.md`): of the 18 corpus trades
+  with contract bars, **17% finished at ~zero**, and the median contract was already
+  **−12.9% below our entry** by the 09:30 open on the day it traded. Marking an unexited
+  expire at entry is not a rounding convenience — on the trades we can see, missing the exit
+  gives back the premium.
+* **The exit levels themselves remain unverified.** The bars cannot settle whether his posted
+  exit was attainable, because 16 of the 18 matched trades entered pre-market while the series
+  begin at 09:30 — the move happened before the data starts. A path statistic averaged over a
+  window that does not contain the trade would be a fiction, so `tca path` withholds its
+  aggregates below five measurable trades rather than printing one.
 * **Nothing here says the channel's edge continues.** It says the executor would have acted
   on the record as written, at the sizes the lock allows, and it says where the rules that
   are load-bearing actually bite.
