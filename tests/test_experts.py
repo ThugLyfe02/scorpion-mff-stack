@@ -109,3 +109,61 @@ def test_the_report_carries_caveats_and_renders():
     assert payload["caveats"]
     assert "regret" in render(payload)
     assert payload["weight_path"]["a"] and payload["within_bound"] is True
+
+
+# ── wiring the runner into the allocator ──────────────────────────────────
+def rows(name, values):
+    return [{"identity": f"{name}-{i}", "executed_r": v} for i, v in enumerate(values)]
+
+
+def test_alignment_uses_the_intersection_of_executed_trades():
+    from scorpion.experts import aligned_returns
+
+    trades = {
+        "a": [{"identity": "t1", "executed_r": 1.0}, {"identity": "t2", "executed_r": 0.5}],
+        "b": [{"identity": "t2", "executed_r": 0.5}, {"identity": "t3", "executed_r": 2.0}],
+    }
+    returns, identities = aligned_returns(trades)
+    assert identities == ["t2"]
+    assert returns["a"] == returns["b"] == [0.5]
+
+
+def test_a_refusal_is_dropped_rather_than_scored_as_zero():
+    from scorpion.experts import aligned_returns
+
+    trades = {
+        "a": [{"identity": "t1", "executed_r": 1.0}, {"identity": "t2", "executed_r": 1.0}],
+        "b": [{"identity": "t1", "executed_r": 1.0},
+              {"identity": "t2", "executed_r": None}],
+    }
+    returns, identities = aligned_returns(trades)
+    assert identities == ["t1"] and len(returns["b"]) == 1
+
+
+def test_thin_overlap_is_refused():
+    from scorpion.experts import aligned_returns
+
+    with pytest.raises(ExpertsError):
+        aligned_returns({"a": [{"identity": "t1", "executed_r": 1.0}], "b": []})
+
+
+def test_blending_variant_trades_reports_coverage():
+    from scorpion.experts import from_variant_trades
+
+    payload = from_variant_trades({
+        "no_markup": rows("x", [1.0] * 30),
+        "wider_gate": rows("x", [-1.0] * 30),
+    })
+    assert payload["identity_count"] == 30 and payload["variant_count"] == 2
+    assert payload["best_expert"] == "no_markup"
+    assert payload["coverage_note"]
+
+
+def test_the_allocation_sums_to_one_and_drift_is_measured():
+    from scorpion.experts import allocation_drift, from_variant_trades, weights_file
+
+    first = from_variant_trades({"a": rows("x", [1.0] * 20), "b": rows("x", [1.0] * 20)})
+    last = from_variant_trades({"a": rows("x", [1.0] * 20), "b": rows("x", [-2.0] * 20)})
+    assert sum(weights_file(last).values()) == pytest.approx(1.0)
+    drift = allocation_drift(first, last)
+    assert drift["total_variation"] > 0 and drift["largest_move"] in ("a", "b")

@@ -255,3 +255,80 @@ def adaptive(
     returns_by_expert: Iterable[tuple[str, Sequence[float]]], **kwargs: Any,
 ) -> dict[str, Any]:
     return report(from_returns(dict(returns_by_expert), **kwargs))
+
+
+# ── wiring the runner into the allocator ────────────────────────────────────
+# `corpus_replay.report()` already emits one row per trade per variant, each carrying
+# `executed_r`. That is exactly the loss matrix a blending rule needs, so the adaptation
+# does not require a new data path - only alignment and a shape change.
+
+def aligned_returns(
+    trades_by_variant: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> tuple[dict[str, list[float]], list[str]]:
+    """Align per-variant trade rows on identity and return (returns, identities).
+
+    A rule that refused a trade it should have taken has no R for it; treating that as zero
+    would reward refusal during drawdowns, so a missing trade is dropped for that round and
+    the count is reported by `coverage`. Identities are the intersection across variants,
+    which is the only set on which a comparison is apples to apples.
+    """
+    per_variant: dict[str, dict[str, float]] = {}
+    for name, rows in trades_by_variant.items():
+        series: dict[str, float] = {}
+        for row in rows:
+            identity = str(row.get("identity", ""))
+            value = row.get("executed_r")
+            if identity and value is not None:
+                series[identity] = float(value)
+        per_variant[name] = series
+
+    if not per_variant:
+        raise ExpertsError("no_variants", "nothing to blend")
+    shared = set(next(iter(per_variant.values())))
+    for series in per_variant.values():
+        shared &= set(series)
+    identities = sorted(shared)
+    if not identities:
+        # alignment reports what exists; deciding whether a blend is meaningful is the caller's job
+        raise ExpertsError("thin_overlap", "no trade executed by every variant")
+    returns = {name: [series[i] for i in identities] for name, series in per_variant.items()}
+    return returns, identities
+
+
+def from_variant_trades(
+    trades_by_variant: Mapping[str, Sequence[Mapping[str, Any]]], **kwargs: Any,
+) -> dict[str, Any]:
+    """Blend the attribution variants over their shared trades and report the allocation."""
+    returns, identities = aligned_returns(trades_by_variant)
+    result = from_returns(returns, **kwargs)
+    payload = report(result)
+    payload["identity_count"] = len(identities)
+    payload["variant_count"] = len(returns)
+    payload["coverage_note"] = (
+        "blended over the intersection of trades every variant executed; a variant that "
+        "refused a trade contributes nothing to that round"
+    )
+    return payload
+
+
+def weights_file(payload: Mapping[str, Any]) -> dict[str, float]:
+    """The allocation a sizing layer would consume: rule name to weight, summing to one."""
+    names = payload["names"]
+    final = payload["final_weights"]
+    return {name: float(weight) for name, weight in zip(names, final, strict=False)}
+
+
+def allocation_drift(first: Mapping[str, Any], last: Mapping[str, Any]) -> dict[str, Any]:
+    """How far the allocation moved between two runs - the size of the adaptation."""
+    a = weights_file(first)
+    b = weights_file(last)
+    common = sorted(set(a) & set(b))
+    drift = {name: round(b[name] - a[name], 4) for name in common}
+    total = sum(abs(v) for v in drift.values())
+    return {
+        "drift": drift,
+        "total_variation": round(total / 2.0, 4),
+        "largest_move": (
+            max(drift, key=lambda k: abs(drift[k])) if drift else None
+        ),
+    }
