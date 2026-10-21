@@ -67,6 +67,18 @@ def _parser() -> argparse.ArgumentParser:
                     help="also show what each locked rule is worth, one rule at a time")
     bt.add_argument("--md", type=Path, default=None, help="write the markdown report here")
     bt.add_argument("--json", action="store_true", help="machine-readable summary")
+
+    wa = sub.add_parser("watch", help="check the hone's heartbeat and page a human if it is ill")
+    wa.add_argument("--once", action="store_true",
+                    help="single check (for Task Scheduler / cron); this is the only mode")
+    wa.add_argument("--stale-after", type=float, default=None,
+                    help="heartbeat age that counts as stale, seconds (default 120)")
+    wa.add_argument("--dry-run", action="store_true",
+                    help="build the page and print it; send nothing")
+    wa.add_argument("--heartbeat", type=Path, default=None)
+    wa.add_argument("--fills", type=Path, default=None)
+    wa.add_argument("--kill", type=Path, default=None)
+    wa.add_argument("--json", action="store_true", help="machine-readable state")
     return p
 
 
@@ -230,6 +242,44 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    from . import watch as watch_mod
+
+    kwargs = {"dry_run": args.dry_run}
+    if args.stale_after is not None:
+        kwargs["stale_after_s"] = args.stale_after
+    if args.heartbeat is not None:
+        kwargs["heartbeat_path"] = args.heartbeat
+    if args.fills is not None:
+        kwargs["fills_path"] = args.fills
+    if args.kill is not None:
+        kwargs["kill_path"] = args.kill
+
+    health, result = watch_mod.run_watch(**kwargs)
+    if args.json:
+        payload = health.to_dict()
+        payload["page"] = result.to_dict() if result is not None else None
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"watch: {health.status.upper()}")
+        for problem in health.problems:
+            print(f"  {problem}")
+        if result is None:
+            print("  nothing to page")
+        elif result.dry_run:
+            print("\n--- page that would be sent ---")
+            print(health.page_text())
+        elif result.ok:
+            print(f"  paged: {result.chunks} message(s), ids {list(result.message_ids)}")
+        else:
+            print(f"  PAGE FAILED: {result.error}")
+    if health.healthy:
+        return 0
+    if result is not None and result.dry_run:
+        return 1
+    return 1 if (result is not None and result.ok) else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     handlers = {
@@ -238,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
         "arm": cmd_arm,
         "status": cmd_status,
         "backtest": cmd_backtest,
+        "watch": cmd_watch,
     }
     return handlers[args.cmd](args)
 

@@ -169,3 +169,40 @@ alerts do:
 
 Both are covered by `tests/test_exit_attribution.py`, including the two-position case.
 
+## Ops: does anyone know when it stops?
+
+The fill log records everything a machine needs, and nothing was reading it. The failure
+class that matters is **silence**: a listener that dies at 09:31, or a book that fills with
+unexitable positions, produces zero activity — no fills, no errors, nothing to notice.
+
+`watch --once` is one bounded check, meant for Task Scheduler (or cron) every minute or two:
+
+    python -m scorpion_mff.cli watch --once [--stale-after 120] [--dry-run] [--json]
+
+It reads `live/heartbeat.json` and the tail of `live/fills.jsonl`, then:
+
+| condition | status | pages? |
+|---|---|---|
+| no heartbeat file | DOWN | yes — the listener has not run here |
+| heartbeat older than `--stale-after` | STALE | yes — it ran, then stopped/wedged |
+| any `alert` event today | ALERTING | yes — the engine refused to act on something |
+| fresh heartbeat, no alerts | OK | no — one stat, exit 0 |
+| `live/NO_TRADE` present | OK | no — an armed kill switch is a decision, not a fault |
+
+Exit codes: `0` healthy, `1` a problem was found (and paged, or printed in a dry run),
+`2` the page could not be delivered. A watchdog that reports success when it could not
+deliver is worse than no watchdog.
+
+Paging goes through `scorpion_mff/page.py` — the same bot the stock-finder digest uses —
+with the properties that matter: fail closed without both token and chat id, `retry_after`
+honoured on 429, 5xx retried once, 4xx never retried, the token redacted from every error
+string, and long text chunked on line boundaries so nothing is silently truncated.
+
+Credentials (never committed): `MFF_TELEGRAM_TOKEN` + `MFF_TELEGRAM_CHAT`
+(`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` are accepted as fallbacks, so one `.env` serves
+both desks).
+
+**What it does not do:** it does not restart anything, does not page on position-level P&L,
+and cannot tell a quiet market from a dead feed — it knows only whether the process is
+beating and whether the engine raised something it could not act on.
+
