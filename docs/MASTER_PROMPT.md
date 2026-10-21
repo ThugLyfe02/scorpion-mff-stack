@@ -147,6 +147,18 @@ Do them in that order. The order is dependency, not preference.
   path can still fail loudly.
 - **Committing small.** Each commit should be one coherent capability with its tests and its gate
   output, not a fragment. If a change spans two modules and a test file, that is one commit.
+- **Surgically editing inside a long docstring.** Replacing one line of a triple-quoted block with a
+  shorter one silently deletes the closing quotes and swallows the rest of the file; the syntax error
+  surfaces hundreds of lines later, at the last `"""`. This happened twice in one session. When a
+  docstring needs fixing, replace the WHOLE block between the opening quotes and the first import.
+- **Writing lines longer than 100 characters.** Ruff's E501 then demands a follow-up edit to a line
+  that was already correct, and that edit is where the docstring damage happens. Stay under 100 while
+  writing, not after.
+- **Running pytest before ruff.** A green test run on a file that fails E501 is not green; the lint
+  fix afterwards is the one that breaks things. Lint first, then test.
+- **Batching three modules without a mid-point gate.** A 1,100-line commit is three ~350-line modules
+  each linted and tested before the next is started, then committed together. Writing all three and
+  verifying once means the failure report names a 1,100-line surface instead of a file.
 
 ---
 
