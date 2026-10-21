@@ -49,6 +49,7 @@ class Variant:
     name: str
     policy_overrides: dict[str, Any] = field(default_factory=dict)
     exit_haircut: float = 0.0          # multiply every claimed exit price by (1 - haircut)
+    entry_slippage: float = 0.0        # pay this much more than the alert bid
     note: str = ""
 
     def __post_init__(self) -> None:
@@ -56,6 +57,8 @@ class Variant:
         if self.policy_overrides:
             dimensions += 1
         if self.exit_haircut:
+            dimensions += 1
+        if self.entry_slippage:
             dimensions += 1
         if dimensions > 1:
             raise VariantError(
@@ -99,7 +102,10 @@ def _haircut_ledger(ledger: Any, haircut: float) -> Any:
 def run_variant(ledger: Any, variant: Variant, *, db_path: str | Path) -> dict[str, Any]:
     """Replay one variant and return its summary plus the verification result."""
     target = _haircut_ledger(ledger, variant.exit_haircut) if variant.exit_haircut else ledger
-    result = replay(target, db_path=db_path, policy=_policy(variant.policy_overrides))
+    result = replay(
+        target, db_path=db_path, policy=_policy(variant.policy_overrides),
+        entry_slippage=variant.entry_slippage,
+    )
     summary = result.summary()
     return {
         "variant": variant.name,
@@ -169,6 +175,10 @@ def default_variants() -> tuple[Variant, ...]:
                 note="exits fill 10% worse than claimed"),
         Variant("exit_haircut_25", exit_haircut=0.25,
                 note="exits fill 25% worse than claimed"),
+        Variant("entry_slip_20", entry_slippage=0.20,
+                note="pay 20% above the alert bid, as a late reader would"),
+        Variant("entry_slip_35", entry_slippage=0.35,
+                note="pay 35% above it, past the gate"),
     )
 
 

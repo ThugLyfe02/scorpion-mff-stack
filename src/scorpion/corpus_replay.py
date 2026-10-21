@@ -145,6 +145,7 @@ def replay(
     policy: Policy | None = None,
     channels: Iterable[str] | None = None,
     hold_minutes: int | None = None,
+    entry_slippage: float = 0.0,
 ) -> ReplayResult:
     """Replay the ledger through the real stack.
 
@@ -207,7 +208,12 @@ def replay(
             continue
 
         key = effects[0].contract_key or ""
-        quotes = {key: quote(str(trade.entry_bid * D("0.98")), str(trade.entry_bid),
+        # A human types an alert and the executor acts seconds later, so the price it can actually
+        # pay is not the price in the message. Without this the dislocation gate and the limit
+        # markup never bind, which is why four attribution variants measured exactly zero.
+        entry = D(str(trade.entry_bid))
+        ask = (entry * (D(1) + D(str(entry_slippage)))).quantize(D("0.01"))
+        quotes = {key: quote(str((ask * D("0.98")).quantize(D("0.01"))), str(ask),
                              at=dispatch_at)}
         fills: list[Any] = []
         dispatcher = Dispatcher(
@@ -298,6 +304,6 @@ def report(ledger: Any, *, db_path: str | Path, policy: Policy | None = None) ->
             "exits are settled at the claimed price, not signalled",
             "one position at a time, so the concurrency cap never binds",
             "Fridays are traded (the live policy skips them)",
-            "no fees and no slippage beyond the alert bid",
+            "no fees; entry slippage is a parameter, zero by default",
         ],
     }
