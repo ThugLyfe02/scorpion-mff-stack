@@ -147,3 +147,25 @@ architect deepseek-v4-pro · main deepseek-v4-flash), all now regression-tested 
    Named contracts and ambiguity handling cover most of it; the rest needs his
    actual posting habit.
 
+## Added after driving 93 real alerts (`BACKTEST.md`)
+
+Two rules exist because a single-day tape cannot expose these, and 59 days of real
+alerts do:
+
+* **Expiry releases a slot** (`Engine._expire_carried`). MAX_CONCURRENT is a live-risk
+  limit, so a position whose contract has provably expired must stop counting. Without
+  it, one alert with no recorded exit held both slots and every later entry was skipped —
+  the hone goes silent mid-month and the log says only `max_concurrent`. `0DTE` and past
+  ISO expiries are released at the day roll; an unparseable expiry (`Dec 5`) is **not**
+  released and raises `expiry_unparsed`, because freeing a live slot on a guess
+  under-counts risk. The release is `accepted=False`, so an unmarked expiry never enters
+  realised P&L.
+* **A bare ticker attributes an exit** (`parser._BARE_SYMBOL_RE`). The parser used to
+  recover a ticker only from the literal `TICKER X` form, so `QQQ puts closed at 2.85`
+  arrived nameless and could only be resolved by channel — and with two positions open in
+  one channel, every exit became `ambiguous_exit` and nothing could close. A bare symbol
+  is now accepted when exactly one candidate remains after removing English words.
+  Ambiguity is still an alert, never a guess: two symbols in one post resolves to nothing.
+
+Both are covered by `tests/test_exit_attribution.py`, including the two-position case.
+

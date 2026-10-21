@@ -41,9 +41,33 @@ _ID_TO_NAME = {**{v: k for k, v in CHANNEL_IDS.items()},
 _NON_TICKERS = frozenset({
     "STRIKE", "EXP", "EXPIRY", "CURRENT", "BID", "PRICE", "LOTTO", "ODTE",
     "CALL", "PUT", "ER", "FOMC", "RISKY", "TODAY", "SL", "LIGHT", "NEW",
+    "CALLS", "PUTS",
 })
 
-_SIDE_RE = re.compile(r"\b(CALL|PUT)\b")
+# An exit post almost never restates the contract ("QQQ puts closed 2.85"). Without
+# a ticker the engine can only resolve by channel, so two positions in one channel
+# make every exit ambiguous and the book never empties - see BACKTEST.md. These are
+# the English words that would otherwise be mistaken for a bare symbol.
+_BARE_TICKER_STOPWORDS = _NON_TICKERS | frozenset({
+    "AT", "ON", "IN", "OUT", "ALL", "AND", "THE", "FOR", "NOT", "NOW", "OFF", "UP",
+    "DOWN", "SOLD", "SALE", "CLOSE", "CLOSED", "CLOSING", "EXIT", "EXITING",
+    "FLATTEN", "FLAT", "TRIM", "TRIMMED", "TRIMMING", "RUNNER", "RUNNERS", "HALF",
+    "PART", "PARTIAL", "FULL", "FULLY", "BE", "BREAKEVEN", "ATM", "OTM", "ITM",
+    "STILL", "HOLD", "HOLDING", "NICE", "GOOD", "GREAT", "YES", "MORE", "MOST",
+    "LAST", "NEXT", "DAY", "WEEK", "PROFIT", "LOSS", "WIN", "WINNER", "WINNERS",
+    "STOP", "STOPPED", "POSITION", "POSITIONS", "CONTRACT", "CONTRACTS", "TAKE",
+    "TAKEN", "ADD", "ADDED", "AVG", "AVERAGE", "OLD", "HEAVY", "SIZE", "LOCK",
+    "LOCKED", "SAFE", "RISK", "FREE", "OPEN", "GAP", "LESS", "MUCH", "VERY",
+    "JUST", "THANKS", "WOW", "PLUS", "EVEN", "BACK", "HERE", "THERE", "THIS",
+    "THAT", "FROM", "WITH", "WILL", "WONT", "CAN", "COULD", "SHOULD", "WOULD",
+    "MAY", "MIGHT", "MUST", "DONT", "DOESNT", "STOPLOSS", "ROLLING", "ROLLED",
+    "MOVE", "MOVED", "MOVING", "PLAY", "PLAYS", "TRADE", "TRADES", "TRADED",
+    "CASH", "BAG", "BAGS", "CHART", "LEVEL", "LEVELS", "ZONE", "FLOW", "REST",
+    "ELSE", "SOME", "ANY", "EVERY", "BOTH", "EACH", "OVER", "UNDER", "ABOVE",
+})
+_BARE_SYMBOL_RE = re.compile(r"\b([A-Z]{2,5})\b")
+
+_SIDE_RE = re.compile(r"\b(CALLS?|PUTS?)\b")
 _TICKER_RE = re.compile(r"\bTICKER\s+\$?([A-Z][A-Z0-9]{0,5}(?:\.[A-Z])?)\b")
 _STRIKE_RE = re.compile(r"\bSTRIKE\s*[:.]?\s*\$?\s*([0-9]{1,6}(?:\.[0-9]{1,2})?)\b")
 _EXP_RE = re.compile(r"\bEXP(?:IRY|IRATION)?\s*[:.]?\s*([A-Z0-9/ ,.:-]{0,28})")
@@ -191,7 +215,13 @@ def parse(message: RawMessage | str, channel: str = "") -> Signal:
         chan_id = CHANNEL_IDS.get(name, EXCLUDED_CHANNEL_IDS.get(name, ""))
 
     side_m = _SIDE_RE.search(t)
-    side = Side(side_m.group(1)) if side_m else None
+    side = None
+    if side_m:
+        token = side_m.group(1).rstrip("Ss")
+        try:
+            side = Side(token)
+        except ValueError:            # a side token we do not model is not a crash
+            side = None
 
     ticker = ""
     tick_m = _TICKER_RE.search(t)
@@ -229,6 +259,15 @@ def parse(message: RawMessage | str, channel: str = "") -> Signal:
     )
 
     kind = _kind(t, side, strike)
+
+    # Recover a bare symbol on exit-side posts, so an exit can be attributed.
+    # Exactly one candidate or nothing: guessing between two symbols is worse than
+    # an alert, and this only ever runs when the post did not say "TICKER X".
+    if not ticker and kind is not AlertKind.ENTRY:
+        candidates = {m for m in _BARE_SYMBOL_RE.findall(t)
+                      if m not in _BARE_TICKER_STOPWORDS}
+        if len(candidates) == 1:
+            ticker = candidates.pop()
 
     base: dict[str, Any] = dict(
         channel=name, channel_id=chan_id, ticker=ticker, side=side, strike=strike,

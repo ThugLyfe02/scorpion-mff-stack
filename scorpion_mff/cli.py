@@ -53,6 +53,20 @@ def _parser() -> argparse.ArgumentParser:
     arm.add_argument("--limit", type=int, default=None, help="stop after N events")
 
     sub.add_parser("status", help="kill-switch state + tail of the fill log")
+
+    bt = sub.add_parser("backtest", help="run the executor over the historical alert corpus")
+    bt.add_argument("--corpus", type=Path, default=None, help="trades.json (default: mff-backtest/bt_full)")
+    bt.add_argument("--ask-multiple", type=float, default=1.05,
+                    help="how far through his posted bid we pay (default 1.05)")
+    bt.add_argument("--exit-slippage", type=float, default=1.0,
+                    help="fraction of his posted exit level we get (default 1.0)")
+    bt.add_argument("--no-pipe-test", action="store_true", help="full clip from the first trade")
+    bt.add_argument("--bare-exits", action="store_true",
+                    help="emit exits that name no contract (measures the ambiguity cost)")
+    bt.add_argument("--attribution", action="store_true",
+                    help="also show what each locked rule is worth, one rule at a time")
+    bt.add_argument("--md", type=Path, default=None, help="write the markdown report here")
+    bt.add_argument("--json", action="store_true", help="machine-readable summary")
     return p
 
 
@@ -173,6 +187,49 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backtest(args: argparse.Namespace) -> int:
+    from . import historic
+
+    kwargs = dict(ask_multiple=args.ask_multiple, exit_slippage=args.exit_slippage,
+                  pipe_test=not args.no_pipe_test, named_exits=not args.bare_exits)
+    if args.corpus is not None:
+        kwargs["corpus"] = args.corpus
+    report = historic.run_backtest(**kwargs)
+
+    if args.md is not None:
+        args.md.parent.mkdir(parents=True, exist_ok=True)
+        args.md.write_text(report.to_markdown(), encoding="utf-8")
+
+    if args.json:
+        print(json.dumps({
+            "corpus": str(args.corpus or historic.DEFAULT_CORPUS),
+            "alerts": report.trades, "days": report.days,
+            "taken": report.taken, "skipped": report.skipped, "rejected": report.rejected,
+            "contracts": report.contracts, "notional_usd": report.notional_usd,
+            "pnl_usd": report.pnl_usd, "avg_pnl_usd": round(report.avg_pnl_usd, 2),
+            "win_rate_pct": round(report.win_rate, 2),
+            "by_channel": report.by_channel, "skip_reasons": report.skip_reasons,
+            "assumptions": {"ask_multiple": report.ask_multiple,
+                            "exit_slippage": report.exit_slippage,
+                            "pipe_test": report.pipe_test},
+        }, indent=2))
+        return 0
+
+    print(report.to_text())
+    if args.md is not None:
+        print(f"\nmarkdown report -> {args.md}")
+
+    if args.attribution:
+        print("\nwhat each locked rule is worth (one rule changed at a time):")
+        base = None
+        for label, variant in historic.attribution(corpus=args.corpus or historic.DEFAULT_CORPUS):
+            if base is None:
+                base = variant.pnl_usd
+            print(f"  {label:<44} taken {variant.taken:>3}  contracts {variant.contracts:>4}  "
+                  f"pnl ${variant.pnl_usd:>11,.2f}  vs locked {variant.pnl_usd - base:+,.2f}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     handlers = {
@@ -180,6 +237,7 @@ def main(argv: list[str] | None = None) -> int:
         "replay": cmd_replay,
         "arm": cmd_arm,
         "status": cmd_status,
+        "backtest": cmd_backtest,
     }
     return handlers[args.cmd](args)
 

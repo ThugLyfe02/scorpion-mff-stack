@@ -35,6 +35,14 @@ from .sizing import (
 from .types import AlertKind, OrderIntent, Position, Quote, Signal
 
 
+def _iso_date(value: str) -> str | None:
+    """'2026-09-11' -> the same ISO string (validated); anything else -> None."""
+    try:
+        return time.strftime("%Y-%m-%d", time.strptime(value.strip(), "%Y-%m-%d"))
+    except (ValueError, TypeError):
+        return None
+
+
 @dataclass
 class EngineConfig:
     max_concurrent: int = MAX_CONCURRENT
@@ -51,6 +59,7 @@ class EngineStats:
     skipped: int = 0
     rejected: int = 0
     intents: int = 0
+    expired: int = 0
 
 
 @dataclass
@@ -135,8 +144,42 @@ class Engine:
         self.day = day
         self.closed.clear()
         self.stats.trades_today = 0
+        self._expire_carried(day, ts)
         self.fills.record(event="day_roll", contract_key="", qty=0, price=0.0,
                           reason=f"new_day:{day}", ts=ts)
+
+    def _expire_carried(self, day: str, ts: float) -> None:
+        """Release positions whose contract has provably stopped existing.
+
+        MAX_CONCURRENT is a LIVE-RISK limit, so a position that expired must not
+        hold a slot. Without this sweep one missed exit silently disables the hone
+        for the rest of the month: driving the historical corpus proves it - an
+        alert with no recorded exit kept the book at 2/2 and every later entry was
+        skipped (see BACKTEST.md). The release is deliberately conservative:
+
+          * "0DTE" in the key  -> expired at that day's close
+          * an ISO expiry date earlier than today -> expired
+          * anything else ("Dec 5") -> NOT released; it raises an alert instead,
+            because freeing a slot on an unparsed expiry is a guess.
+
+        The position is marked at its own entry price with accepted=False: the
+        contract's real settle is unknown, so it must not enter realised P&L.
+        """
+        for pos in list(self.positions.values()):
+            if not pos.is_open:
+                continue
+            expiry = pos.contract_key.rsplit("|", 1)[-1]
+            iso = _iso_date(expiry)
+            if expiry.upper() == "0DTE" or (iso is not None and iso < day):
+                self.fills.record(event="expire", contract_key=pos.contract_key,
+                                  qty=pos.contracts, price=pos.avg_price,
+                                  reason=f"expired:{expiry}", ts=ts, accepted=False)
+                self.stats.expired += 1
+                pos.contracts = 0
+            elif iso is None:
+                self.fills.record(event="alert", contract_key=pos.contract_key,
+                                  qty=pos.contracts, price=pos.avg_price,
+                                  reason=f"expiry_unparsed:{expiry}", ts=ts)
 
     def _ambiguous_exit(self, signal: Signal) -> bool:
         """An exit that names no contract while two positions sit in its channel."""
