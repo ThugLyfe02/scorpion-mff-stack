@@ -101,6 +101,11 @@ def apply_applied(state: BookState, row: dict[str, object]) -> BookState:
         event = _signal_from_payload(payload_json)
         next_state, _ = reduce_book(state, event)
         return next_state
+    if kind == "halt":
+        from dataclasses import replace as _replace
+
+        payload = json.loads(payload_json)
+        return _replace(state, halted=bool(payload.get("halted", True)))
     if kind == "expire":
         # A release, not a trade: the reducer closed the position because its expiry passed.
         # Reproduced here without touching quantity, because no premium changed hands.

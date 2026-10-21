@@ -13,6 +13,7 @@ from .config import Policy
 from .domain import EventKind, SignalEvent
 from .outbox import Dispatcher
 from .paper import PaperSender
+from .pipeline import Pipeline
 from .reconciliation import BrokerPosition, reconcile
 from .replay import replay
 from .scenario import demo_messages, demo_quotes, run
@@ -211,6 +212,47 @@ def cmd_markout(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_halt(args: argparse.Namespace) -> int:
+    """Stop the desk. Recorded as an applied event, so a replay stays halted."""
+    from .snapshot import state_from_snapshot
+
+    store = Store(args.db)
+    state, _ = state_from_snapshot(store)
+    pipeline = Pipeline(store=store)
+    pipeline.state = state
+    changed = pipeline.halt(args.reason)
+    print(json.dumps({"halted": True, "changed": changed, "reason": args.reason}, indent=2))
+    return 0
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    from .snapshot import state_from_snapshot
+
+    store = Store(args.db)
+    state, _ = state_from_snapshot(store)
+    pipeline = Pipeline(store=store)
+    pipeline.state = state
+    changed = pipeline.clear_halt()
+    print(json.dumps({"halted": False, "changed": changed}, indent=2))
+    return 0
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    """Export one day's decisions as a sealed, checkable bundle."""
+    from .audit import build
+    from .snapshot import state_from_snapshot
+
+    store = Store(args.db)
+    state, _ = state_from_snapshot(store)
+    bundle = build(store, state, date.fromisoformat(args.day))
+    if args.out:
+        path = bundle.write(args.out)
+        print(json.dumps({**bundle.to_dict(), "path": str(path)}, indent=2))
+    else:
+        print(bundle.payload_json)
+    return 0
+
+
 def cmd_coverage(args: argparse.Namespace) -> int:
     """What the corpus can support, and the missing input behind every refusal."""
     from .bars import load_path, persist
@@ -375,6 +417,21 @@ def main(argv: list[str] | None = None) -> int:
     mk.add_argument("--bars", default="mff-backtest/week_bars.json")
     mk.add_argument("--json", action="store_true")
     mk.set_defaults(func=cmd_markout)
+
+    h = sub.add_parser("halt", help="stop the desk; recorded in the applied log")
+    h.add_argument("--db", default="scorpion.db")
+    h.add_argument("--reason", default="operator")
+    h.set_defaults(func=cmd_halt)
+
+    rs = sub.add_parser("resume", help="re-arm a halted desk; recorded in the applied log")
+    rs.add_argument("--db", default="scorpion.db")
+    rs.set_defaults(func=cmd_resume)
+
+    au = sub.add_parser("audit", help="export a day's decisions as a sealed bundle")
+    au.add_argument("--db", default="scorpion.db")
+    au.add_argument("--day", required=True)
+    au.add_argument("--out", default="")
+    au.set_defaults(func=cmd_audit)
 
     cov = sub.add_parser("coverage", help="which trades can be measured, and what is missing")
     cov.add_argument("--corpus", default="mff-backtest/trades.csv")

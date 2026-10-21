@@ -122,6 +122,39 @@ class Pipeline:
         )
         return event, effects
 
+    def halt(self, reason: str, *, now: datetime | None = None) -> bool:
+        """Stop the desk, durably and audibly.
+
+        A halt is a state change like any other, so it belongs in the applied log. Writing only
+        the flag left the same hole the expiry sweep had: the book could be halted while its log
+        said otherwise, and a replay would happily resume trading a stopped desk.
+        """
+        moment = now or datetime.now(UTC)
+        if self.state.halted:
+            return False
+        self.store.set_halt(True, reason)
+        self.store.append_applied(
+            kind="halt",
+            payload_json=json.dumps({"reason": reason, "halted": True}, sort_keys=True),
+            ts=moment,
+        )
+        self.state = replace(self.state, halted=True)
+        return True
+
+    def clear_halt(self, *, now: datetime | None = None) -> bool:
+        """Re-arm. One auditable human act, recorded like any other state change."""
+        moment = now or datetime.now(UTC)
+        if not self.state.halted:
+            return False
+        self.store.set_halt(False, "")
+        self.store.append_applied(
+            kind="halt",
+            payload_json=json.dumps({"reason": "", "halted": False}, sort_keys=True),
+            ts=moment,
+        )
+        self.state = replace(self.state, halted=False)
+        return True
+
     def settle(
         self,
         *,
