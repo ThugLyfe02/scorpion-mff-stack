@@ -131,6 +131,57 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_research(args: argparse.Namespace) -> int:
+    """Read the corpus, summarise the edge, and state what it can be wrong about."""
+    from .ledger import build_report, load_csv
+    from .ruin import RuinConfig
+    from .ruin import report as ruin_report
+
+    ledger = load_csv(args.corpus)
+    summary = build_report(ledger)
+    rs = [float(r) for r in ledger.rs()]
+    sizing = ruin_report(rs, RuinConfig(
+        runs=args.runs, trades_per_run=args.trades, risk_fraction=args.risk,
+    ))
+
+    payload = {
+        "manifest": summary["manifest"],
+        "r": summary["r"],
+        "per_channel": summary["per_channel"],
+        "edge_breakeven": sizing["edge_breakeven"],
+        "win_haircut": sizing["win_haircut"],
+        "stress": sizing["stress"],
+        "simulation": sizing["simulation"],
+        "recommended_fraction": sizing["recommended_fraction"],
+        "diagnostics": sizing["diagnostics"],
+        "caveats": sizing["caveats"],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    m, r = payload["manifest"], payload["r"]
+    print(f"corpus {m['trades']} trades / {m['trading_days']} days / "
+          f"{m['first_day']}..{m['last_day']}  digest {m['digest'][:12]}")
+    print(f"  channels   {', '.join(m['channels'])}")
+    print(f"  outcomes   {m['outcomes']}")
+    print(f"  rejected   {m['rejected']}  near-duplicates {m['near_duplicates']}")
+    print(f"  R          mean {r['mean_r']}  median {r['median_r']}  total {r['total_r']}"
+          f"  win% {r['win_rate']}  PF {r['profit_factor']}")
+    edge = payload["edge_breakeven"]
+    print(f"  breakeven  wins can be overstated by "
+          f"{100 * edge['breakeven_win_haircut']:.1f}% at a {100 * edge['loss_rate']:.0f}% "
+          f"loss rate (avg win {edge['avg_win_r']}R, avg loss {edge['avg_loss_r']}R)")
+    print("  win haircut -> mean R / P(down) / median growth")
+    for row in payload["win_haircut"]:
+        print(f"    {100 * row['win_haircut']:>4.0f}%  {row['mean_r']:+.3f}R   "
+              f"{row['p_down']:>5.1f}%   {row['median_growth']:.2f}x")
+    print(f"  size       {100 * payload['recommended_fraction']:.2f}% of equity per trade")
+    for line in payload["diagnostics"]:
+        print(f"  ! {line}")
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Rebuild the book from its applied log and diff it against the live state.
 
@@ -241,6 +292,14 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--db", default="scorpion.db")
     rec.add_argument("--snapshot", required=True)
     rec.set_defaults(func=cmd_reconcile)
+
+    res = sub.add_parser("research", help="corpus edge, win-haircut breakeven, sizing")
+    res.add_argument("--corpus", default="mff-backtest/trades.csv")
+    res.add_argument("--runs", type=int, default=400)
+    res.add_argument("--trades", type=int, default=250)
+    res.add_argument("--risk", type=float, default=0.015)
+    res.add_argument("--json", action="store_true")
+    res.set_defaults(func=cmd_research)
 
     ver = sub.add_parser("verify", help="replay the applied log and diff against the book")
     ver.add_argument("--db", default="scorpion.db")
