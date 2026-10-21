@@ -210,7 +210,9 @@ def fill_report(fills: Sequence[Fill]) -> dict[str, Any]:
     }
 
 
-def equivalence_check(intent: int, chunks: Sequence[int], price: D, exit_price: D) -> dict[str, Any]:
+def equivalence_check(
+    intent: int, chunks: Sequence[int], price: D, exit_price: D
+) -> dict[str, Any]:
     """A split fill and a single fill must realise the same money. Used as a test and as a guard."""
     single = Position(contract_key="X", generation=1, quantity=intent,
                       cost=price * D(intent) * D(100), fills=())
