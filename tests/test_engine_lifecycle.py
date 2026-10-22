@@ -121,6 +121,21 @@ def test_add_cannot_bypass_a_stand_down_governor():
     assert any("governor" in reason for reason in _reasons(eng))
 
 
+def test_add_governor_sees_the_position_channel():
+    """A channel tilt must apply to an add that omits the channel."""
+    seen: list[str] = []
+
+    def governor(_state, signal, _ts):
+        seen.append(signal.channel)
+        return Decision(factor=1.0, stand_down=False, reasons=("test",))
+
+    eng = Engine(config=EngineConfig(pipe_test=False), fills=FillLog(), governor=governor)
+    ts = _ts("2026-03-10 10:00")
+    eng.on_signal(_entry(ts, channel=HIGH), Quote(bid=1.00, ask=1.00), now=ts)
+    eng.on_signal(_add(ts + 30, channel="", price=1.00), Quote(1.0, 1.0), now=ts + 30)
+    assert seen[-1] == HIGH
+
+
 def test_add_uses_the_position_channel_for_the_clip():
     """An add post without a channel is still a high-confidence add."""
     eng = _engine()

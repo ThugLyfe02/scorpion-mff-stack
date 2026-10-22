@@ -19,7 +19,7 @@ Rules implemented (live/RULES.lock.md):
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from .fills import FillLog
@@ -392,7 +392,10 @@ class Engine:
         # which meant a stand-down, a loss ladder or a channel tilt could all be
         # undone by the next "adding at 1.30" post.
         if self.governor is not None:
-            decision = self.governor(self.governor_state, signal, ts)
+            # An add post that does not restate the channel must still be governed
+            # under the position's channel, or a channel tilt silently skips adds.
+            governed = signal if signal.channel else replace(signal, channel=position.channel)
+            decision = self.governor(self.governor_state, governed, ts)
             qty = apply_contracts(qty, decision.factor)
             if decision.stand_down or qty <= 0:
                 return self._skip(signal, ts, f"governor:{decision.reason_text}", latency_ms, key)
