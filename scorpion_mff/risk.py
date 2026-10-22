@@ -34,9 +34,9 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping
 
 from .types import Position
 
@@ -210,7 +210,7 @@ class RiskBudget:
         }
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, object]) -> "RiskBudget":
+    def from_dict(cls, payload: Mapping[str, object]) -> RiskBudget:
         if not isinstance(payload, Mapping):
             raise RiskBudgetError("risk budget must be an object")
         known = {"version", "max_total_premium_usd", "max_underlying_premium_usd",
@@ -247,7 +247,7 @@ class RiskBudget:
         )
 
     @classmethod
-    def load(cls, path: str | Path, *, missing_ok: bool = True) -> "RiskBudget | None":
+    def load(cls, path: str | Path, *, missing_ok: bool = True) -> RiskBudget | None:
         p = Path(path)
         try:
             raw = p.read_text(encoding="utf-8")

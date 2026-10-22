@@ -1,0 +1,213 @@
+{
+  "as_of": "2026-09-11",
+  "authority": "RESEARCH_ONLY",
+  "checksum": "6d6e6ceaa5d7710c8d78a650938ae8fdc0099e363ba578c78f4fe2dd98df1b1b",
+  "counts": {
+    "context": 3,
+    "go": 1,
+    "mixed": 5,
+    "skip": 1,
+    "symbols": 10
+  },
+  "generated_at_utc": "2026-09-11T12:00:00Z",
+  "producer": {
+    "name": "scorpion-stock-finder",
+    "source": "demo/session-2026-09-11/verdict.json",
+    "version": "3.6.0"
+  },
+  "schema": "scorpion.research-context.v1",
+  "symbols": [
+    {
+      "buyout_at_deal": true,
+      "catalyst": "buyout",
+      "dilution_risk": false,
+      "disposition": "SKIP",
+      "float_shares": null,
+      "gap_pct": 44.0,
+      "halt_risk": false,
+      "instrument_id": "US_EQUITY:ACVA",
+      "quality": {
+        "blocking_reasons": []
+      },
+      "ross_boxes_hit": 3,
+      "ross_boxes_known": 4,
+      "rvol": null,
+      "source_flags": [
+        "size.buyout_at_deal"
+      ],
+      "symbol": "ACVA",
+      "tape_flag": "FADE"
+    },
+    {
+      "buyout_at_deal": false,
+      "catalyst": "earnings",
+      "dilution_risk": false,
+      "disposition": "GO",
+      "float_shares": null,
+      "gap_pct": 28.0,
+      "halt_risk": false,
+      "instrument_id": "US_EQUITY:AENT",
+      "quality": {
+        "blocking_reasons": []
+      },
+      "ross_boxes_hit": 5,
+      "ross_boxes_known": 5,
+      "rvol": 178.0,
+      "source_flags": [],
+      "symbol": "AENT",
+      "tape_flag": "GO"
+    },
+    {
+      "buyout_at_deal": false,
+      "catalyst": "earnings",
+      "dilution_risk": false,
+      "disposition": "CONTEXT",
+      "float_shares": null,
+      "gap_pct": 30.9,
+      "halt_risk": false,
+      "instrument_id": "US_EQUITY:FEIM",
+      "quality": {
+        "blocking_reasons": []
+      },
+      "ross_boxes_hit": 3,
+      "ross_boxes_known": 4,
+      "rvol": null,
+      "source_flags": [],
+      "symbol": "FEIM",
+      "tape_flag": "MIXED"
+    },
+    {
+      "buyout_at_deal": false,
+      "catalyst": "none found",
+      "dilution_risk": false,
+      "disposition": "MIXED",
+      "float_shares": null,
+      "gap_pct": 33.2,
+      "halt_risk": false,
+      "instrument_id": "US_EQUITY:FTFT",
+      "quality": {
+        "blocking_reasons": []
+      },
+      "ross_boxes_hit": 4,
+      "ross_boxes_known": 5,
+      "rvol": 22.0,
+      "source_flags": [],
+      "symbol": "FTFT",
+      "tape_flag": "MIXED"
+    },
+    {
+      "buyout_at_deal": false,
+      "catalyst": "earnings",
+      "dilution_risk": false,
+      "disposition": "CONTEXT",
+      "float_shares": null,
+      "gap_pct": 5.7,
+      "halt_risk": false,
+      "instrument_id": "US_EQUITY:ORCL",
+      "quality": {
+        "blocking_reasons": []
+      },
+      "ross_boxes_hit": 1,
+      "ross_boxes_known": 4,
+      "rvol": null,
+      "source_flags": [],
+      "symbol": "ORCL",
+      "tape_flag": "FADE"
+    },
+    {
+      "buyout_at_deal": false,
+      "catalyst": "none found",
+      "dilution_risk": false,
+      "disposition": "MIXED",
+      "float_shares": null,
+      "gap_pct": 25.0,
+      "halt_risk": false,
+      "instrument_id": "US_EQUITY:PCLA",
+      "quality": {
+        "blocking_reasons": []
+      },
+      "ross_boxes_hit": 3,
+      "ross_boxes_known": 5,
+      "rvol": 2.0,
+      "source_flags": [],
+      "symbol": "PCLA",
+      "tape_flag": "MIXED"
+    },
+    {
+      "buyout_at_deal": false,
+      "catalyst": "earnings",
+      "dilution_risk": false,
+      "disposition": "CONTEXT",
+      "float_shares": null,
+      "gap_pct": 8.0,
+      "halt_risk": false,
+      "instrument_id": "US_EQUITY:RH",
+      "quality": {
+        "blocking_reasons": []
+      },
+      "ross_boxes_hit": 1,
+      "ross_boxes_known": 4,
+      "rvol": null,
+      "source_flags": [],
+      "symbol": "RH",
+      "tape_flag": "FADE"
+    },
+    {
+      "buyout_at_deal": false,
+      "catalyst": "none found",
+      "dilution_risk": false,
+      "disposition": "MIXED",
+      "float_shares": null,
+      "gap_pct": 57.4,
+      "halt_risk": false,
+      "instrument_id": "US_EQUITY:SWRD",
+      "quality": {
+        "blocking_reasons": []
+      },
+      "ross_boxes_hit": 3,
+      "ross_boxes_known": 5,
+      "rvol": 10.9,
+      "source_flags": [],
+      "symbol": "SWRD",
+      "tape_flag": "MIXED"
+    },
+    {
+      "buyout_at_deal": false,
+      "catalyst": "none found",
+      "dilution_risk": false,
+      "disposition": "MIXED",
+      "float_shares": null,
+      "gap_pct": 20.2,
+      "halt_risk": false,
+      "instrument_id": "US_EQUITY:SXTC",
+      "quality": {
+        "blocking_reasons": []
+      },
+      "ross_boxes_hit": 4,
+      "ross_boxes_known": 5,
+      "rvol": 87.0,
+      "source_flags": [],
+      "symbol": "SXTC",
+      "tape_flag": "MIXED"
+    },
+    {
+      "buyout_at_deal": false,
+      "catalyst": "contract",
+      "dilution_risk": false,
+      "disposition": "MIXED",
+      "float_shares": null,
+      "gap_pct": 36.0,
+      "halt_risk": false,
+      "instrument_id": "US_EQUITY:TNON",
+      "quality": {
+        "blocking_reasons": []
+      },
+      "ross_boxes_hit": 4,
+      "ross_boxes_known": 5,
+      "rvol": 1.2,
+      "source_flags": [],
+      "symbol": "TNON",
+      "tape_flag": "MIXED"
+    }
+  ]
+}

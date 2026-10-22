@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -132,6 +133,16 @@ def test_budget_round_trips_through_json(tmp_path):
     loaded = RiskBudget.load(path)
     assert loaded == original
     assert json.loads(path.read_text())["version"] == 1
+
+
+def test_the_shipped_example_is_a_valid_budget():
+    example = Path(__file__).resolve().parents[1] / "live" / "risk-budget.example.json"
+    loaded = RiskBudget.load(example, missing_ok=False)
+    assert loaded is not None
+    assert loaded.daily_loss_limit_usd == 3000.0
+    assert loaded.max_underlying_premium_usd is not None
+    assert loaded.max_total_premium_usd is not None
+    assert loaded.max_underlying_premium_usd < loaded.max_total_premium_usd
 
 
 def test_report_shows_worst_case_day_and_headroom():

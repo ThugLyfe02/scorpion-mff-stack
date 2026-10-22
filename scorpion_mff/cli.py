@@ -17,20 +17,26 @@ import sys
 from pathlib import Path
 
 from .broker import HttpQuoteProvider, PaperBroker, RobinhoodAgenticBroker, mask
+from .context import (ContextError, attribute as attribute_context,
+                      attribution_text, load as load_context)
 from .engine import Engine, EngineConfig
+from .evidence import (SOURCE_CORPUS, build_report, load_corpus, load_fills,
+                       to_markdown, to_text)
 from .fills import FillLog
 from .health import Heartbeat, LatencyBudget
 from .killswitch import KillSwitch
 from .listener import Listener, WebsocketGateway
 from .parser import CHANNEL_IDS, EXCLUDED_CHANNEL_IDS, EXCLUDED_TICKERS
 from .replay import load_quotes, load_tape, replay
+from .risk import RiskBudget, RiskBudgetError
 
 ROOT = Path(__file__).resolve().parent.parent
 FILL_LOG = ROOT / "live" / "fills.jsonl"
 HEARTBEAT = ROOT / "live" / "heartbeat.json"
 NO_TRADE = ROOT / "live" / "NO_TRADE"
+RISK_BUDGET = ROOT / "live" / "risk-budget.json"
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -118,6 +124,34 @@ def _parser() -> argparse.ArgumentParser:
     fz.add_argument("--iterations", type=int, default=3000)
     fz.add_argument("--seed", type=int, default=7)
     fz.add_argument("--json", action="store_true")
+
+    rb = sub.add_parser("risk-budget", help="pre-trade worst-case loss and concentration caps")
+    rb_sub = rb.add_subparsers(dest="risk_budget_cmd", required=True)
+    for name, helptext in (("show", "print the active budget and its defaults"),
+                           ("validate", "parse and check; non-zero exit if unsafe")):
+        sp = rb_sub.add_parser(name, help=helptext)
+        sp.add_argument("--path", type=Path, default=None)
+        sp.add_argument("--json", action="store_true")
+    rbi = rb_sub.add_parser("init", help="write a conservative budget (refuses to overwrite)")
+    rbi.add_argument("--path", type=Path, default=None)
+    rbi.add_argument("--total", type=float, default=3000.0,
+                     help="max premium at risk across the book (default 2R)")
+    rbi.add_argument("--daily", type=float, default=3000.0,
+                     help="worst-case daily loss budget (default 2R)")
+
+    evp = sub.add_parser("evidence", help="what the record proves: intervals, posterior, drift")
+    ev_sub = evp.add_subparsers(dest="evidence_cmd", required=True)
+    evr = ev_sub.add_parser("report", help="measure live fills (or the historical corpus)")
+    evr.add_argument("--fills", type=Path, default=None,
+                     help="fill-log JSONL (default: live/fills.jsonl)")
+    evr.add_argument("--corpus", type=Path, default=None,
+                     help="historical trades.json; labels the result CALIBRATION ONLY")
+    evr.add_argument("--draws", type=int, default=4000, help="bootstrap draws")
+    evr.add_argument("--seed", type=int, default=7)
+    evr.add_argument("--context", type=Path, default=None,
+                     help="research-context JSON to join (attribution only; never sizes)")
+    evr.add_argument("--md", type=Path, default=None, help="write a markdown report here")
+    evr.add_argument("--json", action="store_true")
     return p
 
 
@@ -212,6 +246,16 @@ def cmd_arm(args: argparse.Namespace) -> int:
               f"delete {state_path} after a review to re-arm", file=sys.stderr)
         return 1
 
+    # An optional pre-trade budget. A corrupt file is a refusal, not a silent
+    # "no budget": the limit that is missing at the moment of the order is the one
+    # that mattered.
+    try:
+        risk_budget = RiskBudget.load(RISK_BUDGET)
+    except RiskBudgetError as exc:
+        print(f"{exc}\nrefusing to arm: a risk budget that cannot be read is not "
+              f"the same as no risk budget", file=sys.stderr)
+        return 1
+
     live = bool(args.live)
     if live and not os.environ.get("MFF_RH_TOKEN"):
         print("--live needs MFF_RH_TOKEN", file=sys.stderr)
@@ -227,6 +271,7 @@ def cmd_arm(args: argparse.Namespace) -> int:
         transport=WebsocketGateway(token=token),
         engine=Engine(config=EngineConfig(), fills=FillLog(path=FILL_LOG, fsync=False),
                       governor=make_governor(risk_policy),
+                      risk_budget=risk_budget,
                       risk_state=risk_state, risk_state_path=state_path),
         broker=broker,
         quotes=quotes,
@@ -240,6 +285,14 @@ def cmd_arm(args: argparse.Namespace) -> int:
     print(f"risk  | policy {risk_policy.name} (1R=${risk_policy.risk_unit_usd:,.0f}, "
           f"daily stop ${risk_policy.daily_loss_limit_usd_effective() or 0:,.0f}) | "
           f"equity ${risk_state.equity_usd:,.2f} | peak ${risk_state.peak_equity_usd:,.2f}")
+    if risk_budget is not None:
+        print(f"budget| total ${risk_budget.max_total_premium_usd or 0:,.0f} | "
+              f"underlying ${risk_budget.max_underlying_premium_usd or 0:,.0f} | "
+              f"cluster ${risk_budget.max_cluster_premium_usd or 0:,.0f} | "
+              f"worst-case day ${risk_budget.daily_loss_limit_usd or 0:,.0f}")
+    else:
+        print("budget| NONE - open premium is not capped before the order "
+              f"(write {RISK_BUDGET.name} to change that)")
 
     async def pump() -> int:
         count = 0
@@ -541,6 +594,103 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
     return 0 if campaign.clean else 1
 
 
+def cmd_risk_budget(args: argparse.Namespace) -> int:
+    path = args.path or RISK_BUDGET
+    if args.risk_budget_cmd == "init":
+        if path.exists():
+            print(f"{path} already exists - review it, do not overwrite a risk limit",
+                  file=sys.stderr)
+            return 1
+        # The defaults are a shape, not a recommendation: total = 2R, one underlying
+        # = 2/3 of that, one cluster = 5/6. Review before arming.
+        budget = RiskBudget(
+            max_total_premium_usd=args.total,
+            max_underlying_premium_usd=round(args.total * 2 / 3, 2),
+            max_cluster_premium_usd=round(args.total * 5 / 6, 2),
+            daily_loss_limit_usd=args.daily,
+        )
+        budget.save(path)
+        print(f"wrote {path}")
+        print(f"  total ${budget.max_total_premium_usd:,.2f} | underlying "
+              f"${budget.max_underlying_premium_usd:,.2f} | cluster "
+              f"${budget.max_cluster_premium_usd:,.2f} | daily "
+              f"${budget.daily_loss_limit_usd:,.2f}")
+        print("review the numbers before arming; the file is reduce-only")
+        return 0
+
+    try:
+        budget = RiskBudget.load(path, missing_ok=False)
+    except RiskBudgetError as exc:
+        print(f"risk budget invalid: {exc}", file=sys.stderr)
+        return 1
+    assert budget is not None
+    if args.json:
+        print(json.dumps({"path": str(path), **budget.to_dict()}, indent=2))
+        return 0
+    print(f"risk budget | {path}")
+    for name, value in budget.caps().items():
+        print(f"  {name:<28} ${value:,.2f}")
+    print(f"  {'daily_loss_limit_usd':<28} "
+          f"{'$' + format(budget.daily_loss_limit_usd, ',.2f') if budget.daily_loss_limit_usd else 'none'}")
+    print(f"  clusters                     {len(budget.clusters)}")
+    for group in budget.clusters:
+        print(f"    {', '.join(sorted(group))}")
+    return 0
+
+
+def cmd_evidence(args: argparse.Namespace) -> int:
+    if args.evidence_cmd != "report":
+        return 2
+    if args.corpus is not None:
+        trades, meta = load_corpus(args.corpus)
+        source = SOURCE_CORPUS
+    else:
+        trades, meta = load_fills(args.fills or FILL_LOG)
+        source = "LIVE_FILLS"
+    if not trades:
+        print("no closed trades to measure", file=sys.stderr)
+        if meta.get("anomalies"):
+            print(f"  anomalies: {meta['anomalies']}", file=sys.stderr)
+        return 1
+    report = build_report(trades, source=source, draws=args.draws, seed=args.seed)
+    attribution = None
+    context_error = ""
+    if args.context is not None:
+        try:
+            attribution = attribute_context(trades, load_context(args.context))
+        except ContextError as exc:
+            # Optional context: a bad snapshot is ignored with a warning. It must
+            # never turn a research report into a failure, and it must never gate.
+            context_error = str(exc)
+    if args.json:
+        payload = {"report": report.to_dict(), "input": meta,
+                   "context": attribution.to_dict() if attribution else None,
+                   "context_error": context_error or None}
+        print(json.dumps(payload, indent=2))
+    else:
+        print(to_text(report))
+        if meta.get("anomalies") and any(meta["anomalies"].values()):
+            print(f"  input anomalies: {meta['anomalies']}")
+        if meta.get("open_positions"):
+            print(f"  open (not counted): {meta['open_positions']} positions, "
+                  f"${meta.get('open_premium_usd', 0):,.2f} premium")
+        if attribution is not None:
+            print()
+            print(attribution_text(attribution))
+        elif context_error:
+            print(f"  context ignored: {context_error}")
+    if args.md is not None:
+        args.md.parent.mkdir(parents=True, exist_ok=True)
+        body = to_markdown(report)
+        if attribution is not None:
+            body += ("\n## Scanner context (attribution only)\n\n```\n"
+                     + attribution_text(attribution) + "\n```\n")
+        args.md.write_text(body, encoding="utf-8")
+        if not args.json:
+            print(f"  wrote {args.md}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     handlers = {
@@ -554,6 +704,8 @@ def main(argv: list[str] | None = None) -> int:
         "desk": cmd_desk,
         "tca": cmd_tca,
         "fuzz": cmd_fuzz,
+        "risk-budget": cmd_risk_budget,
+        "evidence": cmd_evidence,
     }
     return handlers[args.cmd](args)
 
