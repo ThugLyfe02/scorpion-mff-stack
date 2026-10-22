@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass, field
@@ -22,7 +23,12 @@ from typing import Any, Protocol
 
 from .broker import BrokerError, QuoteProvider
 from .engine import Engine
-from .execution import ExecutionBook, ExecutionError
+from .execution import (
+    STATE_PARTIAL,
+    STATE_PENDING,
+    ExecutionBook,
+    ExecutionError,
+)
 from .fills import FillLog
 from .health import Heartbeat, LatencyBudget
 from .killswitch import KillSwitch
@@ -66,6 +72,7 @@ class Listener:
     fills: FillLog | None = None
     execution: ExecutionBook | None = None
     clock: Callable[[], float] = time.time
+    _lock: Any = field(default_factory=threading.RLock)
     processed: int = 0
     seen: dict[str, None] = field(default_factory=dict)   # message_id -> nothing
     seen_max: int = 5000                                  # bounded; oldest evicted
@@ -86,6 +93,11 @@ class Listener:
         return self.processed
 
     def handle(self, message: RawMessage) -> list[OrderIntent]:
+        """One event, serialized against the protective-exit poller."""
+        with self._lock:
+            return self._handle_locked(message)
+
+    def _handle_locked(self, message: RawMessage) -> list[OrderIntent]:
         """One event, handled end to end, synchronously. Returns the intents."""
         started = self.clock()
 
@@ -111,63 +123,8 @@ class Listener:
         intents = self.engine.on_signal(signal)
 
         trade_ts = self.clock()
-        for intent in intents:
-            cid = ""
-            if self.execution is not None:
-                cid = self.execution.client_id(intent, trade_ts, mid)
-                existing = self.execution.orders.get(cid)
-                if existing is not None:
-                    # A restart clears the in-memory `seen` ring. The durable
-                    # client id is tied to the Discord message id, so a redelivered
-                    # message maps to the order it already produced and is never
-                    # placed twice.
-                    self.engine.fills.record(
-                        event="duplicate", contract_key=intent.contract_key,
-                        qty=0, price=0.0, reason="execution_source_already_recorded",
-                        ts=trade_ts, accepted=False, note=mid or intent.contract_key)
-                    continue
-                try:
-                    cid = self.execution.record_intent(
-                        intent, ts=trade_ts, channel=signal.channel,
-                        source_id=mid).client_id
-                except ExecutionError as exc:
-                    # No durable intent means we must not place the order.
-                    self.engine.fills.record(
-                        event="alert", contract_key=intent.contract_key, qty=intent.qty,
-                        price=intent.limit, reason=f"execution_intent:{exc}",
-                        ts=trade_ts, accepted=False, note=intent.reason)
-                    continue
-            try:
-                ack = self.broker.place(intent)
-            except BrokerError as exc:
-                self._reject_intent(intent, cid, f"broker:{exc}", trade_ts)
-                continue
-            if not ack.ok:
-                self._reject_intent(intent, cid, ack.error or "broker_rejected", trade_ts)
-                continue
-            if self.execution is not None and cid:
-                try:
-                    self.execution.apply_ack(cid, ack, ts=trade_ts)
-                    self.execution.sync_engine(self.engine, trade_ts)
-                except ExecutionError as exc:
-                    # The broker filled, but the book cannot represent it. Re-sync
-                    # whatever did land, halt new buys (exits still run), and make
-                    # the desync impossible to miss.
-                    self.execution.sync_engine(self.engine, trade_ts)
-                    self.engine.halted = True
-                    self.engine.fills.record(
-                        event="alert", contract_key=intent.contract_key,
-                        qty=ack.qty, price=ack.price,
-                        reason=f"execution_desync:{exc}", ts=trade_ts,
-                        accepted=False, note=intent.reason)
-                    continue
-            if self.fills is not None:
-                note = f"{'dry' if ack.dry_run else 'live'}:{ack.broker_order_id}"
-                if ack.qty < intent.qty:
-                    note += f":partial:{ack.qty}/{intent.qty}"
-                self.fills.record(
-                    event="ack", contract_key=ack.contract_key, qty=ack.qty,
-                    price=ack.price, reason=intent.reason, ts=trade_ts, note=note)
+        self._place_intents(intents, channel=signal.channel, ts=trade_ts,
+                            source_prefix=mid)
 
         latency_ms = int((self.clock() - started) * 1000)
         self.budget.record(latency_ms)
@@ -179,6 +136,90 @@ class Listener:
                 latency_ms=latency_ms)
         self.processed += 1
         return intents
+
+    def _place_intents(self, intents: list[OrderIntent], *, channel: str,
+                       ts: float, source_prefix: str = "") -> None:
+        """Record, place and confirm each intent under the current lock."""
+        for intent in intents:
+            source_id = f"{source_prefix}:{intent.contract_key}" if source_prefix else ""
+            cid = ""
+            if self.execution is not None:
+                cid = self.execution.client_id(intent, ts, source_id)
+                existing = self.execution.orders.get(cid)
+                if existing is not None:
+                    # A restart clears the in-memory `seen` ring. The durable
+                    # client id is tied to the Discord message id, so a redelivered
+                    # message maps to the order it already produced and is never
+                    # placed twice.
+                    self.engine.fills.record(
+                        event="duplicate", contract_key=intent.contract_key,
+                        qty=0, price=0.0, reason="execution_source_already_recorded",
+                        ts=ts, accepted=False, note=source_id or intent.contract_key)
+                    continue
+                try:
+                    cid = self.execution.record_intent(
+                        intent, ts=ts, channel=channel, source_id=source_id).client_id
+                except ExecutionError as exc:
+                    # No durable intent means we must not place the order.
+                    self.engine.fills.record(
+                        event="alert", contract_key=intent.contract_key, qty=intent.qty,
+                        price=intent.limit, reason=f"execution_intent:{exc}",
+                        ts=ts, accepted=False, note=intent.reason)
+                    continue
+            try:
+                ack = self.broker.place(intent)
+            except BrokerError as exc:
+                self._reject_intent(intent, cid, f"broker:{exc}", ts)
+                continue
+            if not ack.ok:
+                self._reject_intent(intent, cid, ack.error or "broker_rejected", ts)
+                continue
+            if self.execution is not None and cid:
+                try:
+                    self.execution.apply_ack(cid, ack, ts=ts)
+                    self.execution.sync_engine(self.engine, ts)
+                except ExecutionError as exc:
+                    # The broker filled, but the book cannot represent it. Re-sync
+                    # whatever did land, halt new buys (exits still run), and make
+                    # the desync impossible to miss.
+                    self.execution.sync_engine(self.engine, ts)
+                    self.engine.halted = True
+                    self.engine.fills.record(
+                        event="alert", contract_key=intent.contract_key,
+                        qty=ack.qty, price=ack.price,
+                        reason=f"execution_desync:{exc}", ts=ts,
+                        accepted=False, note=intent.reason)
+                    continue
+            if self.fills is not None:
+                note = f"{'dry' if ack.dry_run else 'live'}:{ack.broker_order_id}"
+                if ack.qty < intent.qty:
+                    note += f":partial:{ack.qty}/{intent.qty}"
+                self.fills.record(
+                    event="ack", contract_key=ack.contract_key, qty=ack.qty,
+                    price=ack.price, reason=intent.reason, ts=ts, note=note)
+
+    def enforce_stops(self, now: float | None = None) -> list[OrderIntent]:
+        """Poll the breakeven stop for trimmed runners and place any exit.
+
+        Called from a background task in `arm`; the listener lock serializes it
+        against the Discord handler, so the engine book is never mutated by both.
+        A stop that is already PENDING/PARTIAL is not re-sent; a rejected one is
+        retried in the next 15-second bucket (the idempotency key changes).
+        """
+        with self._lock:
+            pending_keys: set[str] = set()
+            if self.execution is not None:
+                for order in self.execution.orders.values():
+                    if (order.state in (STATE_PENDING, STATE_PARTIAL)
+                            and order.intent.reason.startswith("stop:be")):
+                        pending_keys.add(order.contract_key)
+            ts = self.clock() if now is None else now
+            intents = [i for i in self.engine.protective_exits(now=ts)
+                       if i.contract_key not in pending_keys]
+            if intents:
+                self._place_intents(intents, channel="", ts=ts,
+                                    source_prefix=f"be:{int(ts) // 15}")
+            return intents
 
     def _reject_intent(self, intent: OrderIntent, cid: str, reason: str,
                        ts: float) -> None:

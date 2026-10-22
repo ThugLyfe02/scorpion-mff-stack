@@ -568,7 +568,7 @@ class ExecutionBook:
             self.realized_total += pnl
             self.peak_realized = max(self.peak_realized, self.realized_total)
             lot.qty -= executed
-            if order.intent.reason.startswith("trim:"):
+            if order.intent.reason.startswith("trim"):
                 lot.trimmed += 1
                 lot.breakeven_stop = lot.avg_price
             if lot.qty <= 0:

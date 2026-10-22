@@ -24,8 +24,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .fills import FillLog
-from .pricing import far_off_bid, marketable_limit, pct_off_bid
 from .governor import GovernorState, apply_contracts
+from .pricing import far_off_bid, marketable_limit, pct_off_bid
 from .risk import RiskBudget
 from .sizing import (
     MAX_CONCURRENT,
@@ -150,6 +150,42 @@ class Engine:
         if not admission.accepted:
             return 0, admission.reason_text
         return admission.qty, (admission.reason_text if admission.capped else "")
+
+    def protective_exits(self, now: float | None = None) -> list[OrderIntent]:
+        """Sell a trimmed runner whose bid has reached its breakeven stop.
+
+        The lock says "trim to 1 + move stop to breakeven". Until now the stop was
+        written onto the Position and never read: a runner could round-trip from
+        +30% to zero with no sell. This is a pure decision function; the listener
+        owns placement and the execution book owns confirmation.
+
+        It is deliberately narrow:
+
+        * only positions with `breakeven_stop` set (i.e. after a trim);
+        * only when a live bid is at or below the stop - a missing quote skips,
+          never guesses;
+        * the idempotency key changes every 15 seconds, so a rejected stop can be
+          retried on the next poll but a burst of polls cannot spam the broker.
+        """
+        ts = self.clock() if now is None else now
+        bucket = int(ts) // 15
+        out: list[OrderIntent] = []
+        for position in self.open_positions:
+            stop = position.breakeven_stop
+            if stop is None or position.contracts <= 0:
+                continue
+            quote = self._quote_for(position.contract_key, None)
+            if quote is None or quote.bid <= 0:
+                continue
+            if quote.bid > stop + 1e-9:
+                continue
+            key = position.contract_key
+            out.append(OrderIntent(
+                action="sell", qty=position.contracts, limit=quote.bid,
+                contract_key=key,
+                reason=f"stop:be@{stop:g}:bid={quote.bid:g}",
+                idempotency_key=f"{key}:be:{int(position.opened_ts)}:{bucket}"))
+        return out
 
     def _resolve(self, signal: Signal) -> Position | None:
         """Find the position a non-entry post refers to.

@@ -345,23 +345,46 @@ def cmd_arm(args: argparse.Namespace) -> int:
     else:
         print("budget| NONE - open premium is not capped before the order "
               f"(write {RISK_BUDGET.name} to change that)")
+    stop_poll_s = max(1.0, float(os.environ.get("MFF_STOP_POLL_S", "5")))
     pending = sum(1 for order in execution.orders.values()
                   if order.state in (STATE_PENDING, STATE_PARTIAL))
+    print(f"stops | breakeven poll every {stop_poll_s:g}s "
+          f"(MFF_STOP_POLL_S)")
     print(f"execution | {len(engine.open_positions)} restored position(s) | "
           f"{len(execution.orders)} confirmed order(s) | {pending} pending "
           f"(not auto-retried) | realised ${execution.realized_total:,.2f}")
 
+    async def stop_loop() -> None:
+        """Protective exits run off the Discord queue, serialized by the listener.
+
+        `to_thread` keeps a slow quote call from blocking the message pump; the
+        listener's RLock makes the engine book safe to touch from both.
+        """
+        while True:
+            await asyncio.sleep(stop_poll_s)
+            try:
+                await asyncio.to_thread(listener.enforce_stops)
+            except Exception as exc:  # noqa: BLE001 - the loop must survive
+                listener.engine.fills.record(
+                    event="alert", contract_key="", qty=0, price=0.0,
+                    reason=f"stop_loop:{type(exc).__name__}:{exc}"[:200],
+                    ts=time.time(), accepted=False)
+
     async def pump() -> int:
-        count = 0
-        async for message in listener.transport.messages():
-            intents = listener.handle(message)
-            kind = "trade" if intents else "none"
-            print(f"  {message.ts:>10.3f} {message.channel:<24} {kind:<6} "
-                  f"{len(intents)} intent(s) latency={listener.budget.worst_ms}ms")
-            count += 1
-            if args.limit is not None and count >= args.limit:
-                break
-        return count
+        stop_task = asyncio.create_task(stop_loop())
+        try:
+            count = 0
+            async for message in listener.transport.messages():
+                intents = listener.handle(message)
+                kind = "trade" if intents else "none"
+                print(f"  {message.ts:>10.3f} {message.channel:<24} {kind:<6} "
+                      f"{len(intents)} intent(s) latency={listener.budget.worst_ms}ms")
+                count += 1
+                if args.limit is not None and count >= args.limit:
+                    break
+            return count
+        finally:
+            stop_task.cancel()
 
     try:
         asyncio.run(pump())

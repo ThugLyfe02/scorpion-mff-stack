@@ -115,6 +115,27 @@ prior equity, peak, day and counters **once**. Subsequent syncs add only new rea
 P&L on top. Without it, the first sync would set equity to zero and erase a drawdown
 limit that had already been earned.
 
+
+## Protective breakeven exits
+
+The lock says "trim to 1 + move stop to breakeven". That stop used to be written onto
+the Position and never read. `arm` now starts a poll loop (default 5s,
+`MFF_STOP_POLL_S`) that calls `listener.enforce_stops()`:
+
+* only positions with `breakeven_stop` set — i.e. a runner after a trim — are eligible;
+* the exit is a sell of the remaining contracts at the current bid, only when the bid
+  is at or below the stop; a missing quote skips, never guesses;
+* the idempotency key changes every 15 seconds, so a rejected stop retries on the
+  next poll but a burst of polls cannot spam the broker;
+* an existing PENDING/PARTIAL stop is not re-sent;
+* the poller and the Discord handler share a listener RLock; the quote call runs in
+  `asyncio.to_thread`, so a slow feed cannot block the message pump;
+* the stop is a decision function in the engine and an ordinary placed order in the
+  execution book — reject/partial/restart semantics are the same as any other exit.
+
+This is a **breakeven runner stop**, not a general position stop. A position that has
+not been trimmed has no stop, by design; adding one would change the locked rule.
+
 ## Operator surface
 
 ```bash

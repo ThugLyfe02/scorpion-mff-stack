@@ -122,7 +122,7 @@ desk does not trade — which is why the governed number is only +$653 and not a
   forecast; it cannot price the calls he did not post.
 * Sessions are bucketed from a fixed UTC-04:00 offset (EDT), not a market calendar.
   `governor.session_for` is the function to replace when a real calendar arrives.
-* There is no position-level stop. Correlation is handled by the optional pre-trade
+* There is no general position-level stop. The one exception is the breakeven stop on a trimmed runner, enforced by the protective-exit poller in `EXECUTION.md`. Correlation is handled by the optional pre-trade
   cluster budget in `RISK.md` (a declared, conservative cap on premium at risk), not by
   a covariance model inside the governor. Two concurrent positions can still be the
   same ticker, same side, same expiry — the budget caps their combined premium, not
