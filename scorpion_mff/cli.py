@@ -14,14 +14,28 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
-from .broker import HttpQuoteProvider, PaperBroker, RobinhoodAgenticBroker, mask
-from .context import (ContextError, attribute as attribute_context,
-                      attribution_text, load as load_context)
+from .broker import HttpQuoteProvider, RobinhoodAgenticBroker, mask
+from .context import ContextError, attribution_text
+from .context import attribute as attribute_context
+from .context import load as load_context
 from .engine import Engine, EngineConfig
-from .evidence import (SOURCE_CORPUS, build_report, load_corpus, load_fills,
-                       to_markdown, to_text)
+from .evidence import (
+    SOURCE_CORPUS,
+    build_report,
+    load_corpus,
+    load_fills,
+    to_markdown,
+    to_text,
+)
+from .execution import (
+    STATE_PARTIAL,
+    STATE_PENDING,
+    ExecutionBook,
+    ExecutionError,
+)
 from .fills import FillLog
 from .health import Heartbeat, LatencyBudget
 from .killswitch import KillSwitch
@@ -35,6 +49,7 @@ FILL_LOG = ROOT / "live" / "fills.jsonl"
 HEARTBEAT = ROOT / "live" / "heartbeat.json"
 NO_TRADE = ROOT / "live" / "NO_TRADE"
 RISK_BUDGET = ROOT / "live" / "risk-budget.json"
+EXECUTION_LOG = ROOT / "live" / "execution.jsonl"
 
 __version__ = "0.2.0"
 
@@ -152,6 +167,14 @@ def _parser() -> argparse.ArgumentParser:
                      help="research-context JSON to join (attribution only; never sizes)")
     evr.add_argument("--md", type=Path, default=None, help="write a markdown report here")
     evr.add_argument("--json", action="store_true")
+
+    ex = sub.add_parser("execution", help="confirmed fills, positions and restart state")
+    ex_sub = ex.add_subparsers(dest="execution_cmd", required=True)
+    for name, helptext in (("show", "print confirmed orders, lots and realised P&L"),
+                           ("verify", "replay the log; non-zero exit if it is corrupt")):
+        sp = ex_sub.add_parser(name, help=helptext)
+        sp.add_argument("--path", type=Path, default=None)
+        sp.add_argument("--json", action="store_true")
     return p
 
 
@@ -267,12 +290,41 @@ def cmd_arm(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
     broker = RobinhoodAgenticBroker(dry_run=not live)
+
+    # Confirmed execution state. The engine is a decision cache; this log is the
+    # truth the broker would recognise. Load it before the first message, and seed
+    # its baseline from the persisted governor so enabling it mid-history cannot
+    # erase a drawdown.
+    try:
+        execution = ExecutionBook.load(EXECUTION_LOG)
+    except ExecutionError as exc:
+        print(f"{exc}\nrefusing to arm: a corrupt execution book could re-enter an "
+              f"open position or forget one", file=sys.stderr)
+        return 1
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    try:
+        execution.ensure_baseline(
+            equity_usd=risk_state.equity_usd,
+            peak_equity_usd=risk_state.peak_equity_usd,
+            day=risk_state.day or today,
+            realized_today_usd=risk_state.realized_today_usd,
+            trades_today=risk_state.trades_today,
+            consecutive_losses=risk_state.consecutive_losses)
+    except OSError as exc:
+        print(f"cannot persist the execution baseline: {exc}\nrefusing to arm",
+              file=sys.stderr)
+        return 1
+
+    engine = Engine(config=EngineConfig(), fills=FillLog(path=FILL_LOG, fsync=False),
+                    governor=make_governor(risk_policy),
+                    risk_budget=risk_budget,
+                    risk_state=risk_state, risk_state_path=state_path)
+    execution.sync_engine(engine, time.time())
+
     listener = Listener(
         transport=WebsocketGateway(token=token),
-        engine=Engine(config=EngineConfig(), fills=FillLog(path=FILL_LOG, fsync=False),
-                      governor=make_governor(risk_policy),
-                      risk_budget=risk_budget,
-                      risk_state=risk_state, risk_state_path=state_path),
+        engine=engine,
+        execution=execution,
         broker=broker,
         quotes=quotes,
         budget=LatencyBudget(),
@@ -293,6 +345,11 @@ def cmd_arm(args: argparse.Namespace) -> int:
     else:
         print("budget| NONE - open premium is not capped before the order "
               f"(write {RISK_BUDGET.name} to change that)")
+    pending = sum(1 for order in execution.orders.values()
+                  if order.state in (STATE_PENDING, STATE_PARTIAL))
+    print(f"execution | {len(engine.open_positions)} restored position(s) | "
+          f"{len(execution.orders)} confirmed order(s) | {pending} pending "
+          f"(not auto-retried) | realised ${execution.realized_total:,.2f}")
 
     async def pump() -> int:
         count = 0
@@ -524,7 +581,8 @@ def cmd_desk(args: argparse.Namespace) -> int:
 
 def cmd_tca(args: argparse.Namespace) -> int:
     """Execution quality. `path` needs bars (here); `fills` needs venue executions (live)."""
-    from . import historic, tca as tca_mod
+    from . import historic
+    from . import tca as tca_mod
 
     if args.tca_cmd == "fills":
         path = args.executions or (ROOT / "live" / "executions.jsonl")
@@ -691,6 +749,22 @@ def cmd_evidence(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_execution(args: argparse.Namespace) -> int:
+    path = args.path or EXECUTION_LOG
+    try:
+        book = ExecutionBook.load(path)
+    except ExecutionError as exc:
+        print(f"execution log invalid: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(book.snapshot(), indent=2))
+        return 0
+    print(book.report_text())
+    if args.execution_cmd == "verify":
+        print(f"verified | {len(book.orders)} orders replayed from {path}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     handlers = {
@@ -706,6 +780,7 @@ def main(argv: list[str] | None = None) -> int:
         "fuzz": cmd_fuzz,
         "risk-budget": cmd_risk_budget,
         "evidence": cmd_evidence,
+        "execution": cmd_execution,
     }
     return handlers[args.cmd](args)
 

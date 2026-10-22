@@ -366,7 +366,8 @@ class Engine:
             action="buy", qty=qty, limit=limit, contract_key=key,
             reason=(f"entry:{tier.value}:his_bid={signal.his_bid:g}:ask={quote.ask:g}"
                     + (f":budget={budget_note}" if budget_note else "")),
-            idempotency_key=f"{key}:buy:{self.stats.trades_today}",
+            idempotency_key=(f"{key}:buy:{time.strftime('%Y-%m-%d', time.gmtime(ts))}"
+                             f":{self.stats.trades_today}"),
         )
         self.fills.record(event="buy", contract_key=key, qty=qty, price=limit,
                           reason=intent.reason, ts=ts, latency_ms=latency_ms,
@@ -432,7 +433,7 @@ class Engine:
                              contract_key=key,
                              reason=(f"add:{tier.value}:{position.adds}/{self.config.add_allowed_per_position}"
                                      + (f":budget={budget_note}" if budget_note else "")),
-                             idempotency_key=f"{key}:add:{position.adds}")
+                             idempotency_key=f"{key}:add:{int(position.opened_ts)}:{position.adds}")
         self.fills.record(event="buy", contract_key=key, qty=qty, price=limit,
                           reason=intent.reason, ts=ts, latency_ms=latency_ms, note="add")
         return [intent]
@@ -467,7 +468,7 @@ class Engine:
         pct = f"{signal.pct:g}%" if signal.pct is not None else "n/a"
         intent = OrderIntent(action="sell", qty=qty, limit=price, contract_key=key,
                              reason=f"trim_to_{self.config.trim_target}+BE:pct={pct}",
-                             idempotency_key=f"{key}:trim:{position.trimmed}")
+                             idempotency_key=f"{key}:trim:{int(position.opened_ts)}:{position.trimmed}")
         self.fills.record(event="sell", contract_key=key, qty=qty, price=price,
                           reason=intent.reason, ts=ts, latency_ms=latency_ms,
                           note=f"stop->be@{position.avg_price:g}")
@@ -498,7 +499,7 @@ class Engine:
         self.stats.intents += 1
         pct = f"{signal.pct:g}%" if signal.pct is not None else "n/a"
         intent = OrderIntent(action="sell", qty=qty, limit=price, contract_key=key,
-                             reason=f"close:pct={pct}", idempotency_key=f"{key}:close")
+                             reason=f"close:pct={pct}", idempotency_key=f"{key}:close:{int(position.opened_ts)}")
         self.fills.record(event="sell", contract_key=key, qty=qty, price=price,
                           reason=intent.reason, ts=ts, latency_ms=latency_ms, note="flat")
         return [intent]

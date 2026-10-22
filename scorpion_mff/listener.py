@@ -16,11 +16,13 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Callable, Iterable, Protocol
+from typing import Any, Protocol
 
 from .broker import BrokerError, QuoteProvider
 from .engine import Engine
+from .execution import ExecutionBook, ExecutionError
 from .fills import FillLog
 from .health import Heartbeat, LatencyBudget
 from .killswitch import KillSwitch
@@ -62,6 +64,7 @@ class Listener:
     heartbeat: Heartbeat = field(default_factory=Heartbeat)
     kill: KillSwitch = field(default_factory=KillSwitch)
     fills: FillLog | None = None
+    execution: ExecutionBook | None = None
     clock: Callable[[], float] = time.time
     processed: int = 0
     seen: dict[str, None] = field(default_factory=dict)   # message_id -> nothing
@@ -107,20 +110,51 @@ class Listener:
         # still priced off what it actually resolves to.
         intents = self.engine.on_signal(signal)
 
+        trade_ts = self.clock()
         for intent in intents:
+            cid = ""
+            if self.execution is not None:
+                try:
+                    cid = self.execution.record_intent(
+                        intent, ts=trade_ts, channel=signal.channel).client_id
+                except ExecutionError as exc:
+                    # No durable intent means we must not place the order.
+                    self.engine.fills.record(
+                        event="alert", contract_key=intent.contract_key, qty=intent.qty,
+                        price=intent.limit, reason=f"execution_intent:{exc}",
+                        ts=trade_ts, accepted=False, note=intent.reason)
+                    continue
             try:
                 ack = self.broker.place(intent)
             except BrokerError as exc:
-                self.engine.fills.record(
-                    event="reject", contract_key=intent.contract_key, qty=intent.qty,
-                    price=intent.limit, reason=f"broker:{exc}", accepted=False,
-                    ts=self.clock(), note=intent.reason)
+                self._reject_intent(intent, cid, f"broker:{exc}", trade_ts)
                 continue
+            if not ack.ok:
+                self._reject_intent(intent, cid, ack.error or "broker_rejected", trade_ts)
+                continue
+            if self.execution is not None and cid:
+                try:
+                    self.execution.apply_ack(cid, ack, ts=trade_ts)
+                    self.execution.sync_engine(self.engine, trade_ts)
+                except ExecutionError as exc:
+                    # The broker filled, but the book cannot represent it. Re-sync
+                    # whatever did land, halt new buys (exits still run), and make
+                    # the desync impossible to miss.
+                    self.execution.sync_engine(self.engine, trade_ts)
+                    self.engine.halted = True
+                    self.engine.fills.record(
+                        event="alert", contract_key=intent.contract_key,
+                        qty=ack.qty, price=ack.price,
+                        reason=f"execution_desync:{exc}", ts=trade_ts,
+                        accepted=False, note=intent.reason)
+                    continue
             if self.fills is not None:
+                note = f"{'dry' if ack.dry_run else 'live'}:{ack.broker_order_id}"
+                if ack.qty < intent.qty:
+                    note += f":partial:{ack.qty}/{intent.qty}"
                 self.fills.record(
                     event="ack", contract_key=ack.contract_key, qty=ack.qty,
-                    price=ack.price, reason=intent.reason, ts=self.clock(),
-                    note=f"{'dry' if ack.dry_run else 'live'}:{ack.broker_order_id}")
+                    price=ack.price, reason=intent.reason, ts=trade_ts, note=note)
 
         latency_ms = int((self.clock() - started) * 1000)
         self.budget.record(latency_ms)
@@ -132,6 +166,22 @@ class Listener:
                 latency_ms=latency_ms)
         self.processed += 1
         return intents
+
+    def _reject_intent(self, intent: OrderIntent, cid: str, reason: str,
+                       ts: float) -> None:
+        """Record a failed order and undo the engine's optimistic mutation."""
+        if self.execution is not None and cid:
+            try:
+                self.execution.reject(cid, reason=reason, ts=ts)
+                self.execution.sync_engine(self.engine, ts)
+            except ExecutionError as exc:
+                # A rejection we cannot represent is a desync: stop new buys.
+                self.engine.halted = True
+                reason = f"{reason};execution:{exc}"
+        log = self.fills if self.fills is not None else self.engine.fills
+        log.record(event="reject", contract_key=intent.contract_key, qty=intent.qty,
+                   price=intent.limit, reason=reason, accepted=False, ts=ts,
+                   note=intent.reason)
 
     @property
     def breached_budget(self) -> bool:
@@ -155,7 +205,7 @@ class WebsocketGateway:
 
     async def messages(self) -> AsyncIterator[RawMessage]:
         try:
-            import websockets                      # optional dependency
+            import websockets  # optional dependency
         except ImportError as exc:                 # pragma: no cover - env dependent
             raise RuntimeError(
                 "the live Gateway needs the optional dependency: pip install websockets"

@@ -8,8 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from scorpion_mff.broker import PaperBroker, QuoteScript
+from scorpion_mff.broker import Ack, PaperBroker, QuoteScript
 from scorpion_mff.engine import Engine, EngineConfig
+from scorpion_mff.execution import (
+    STATE_PARTIAL,
+    STATE_REJECTED,
+    ExecutionBook,
+)
 from scorpion_mff.fills import FillLog
 from scorpion_mff.health import Heartbeat, LatencyBudget
 from scorpion_mff.killswitch import KillSwitch
@@ -133,3 +138,95 @@ def test_the_tape_annotations_match_what_the_pipeline_actually_does():
     assert lock.realized_usd == pytest.approx(data["expected_with_lock"]["realized_usd"])
     assert no_pipe.contracts_bought == data["expected_without_pipe_test"]["contracts_bought"]
     assert no_pipe.realized_usd == pytest.approx(data["expected_without_pipe_test"]["realized_usd"])
+
+
+# ── confirmed execution ──────────────────────────────────────────────────────
+def _entry_message(ts: float = 1000.0) -> RawMessage:
+    return RawMessage(channel="etf-options", channel_id="1231301953972207667", ts=ts,
+                      text="CALL TICKER QQQ STRIKE $719 Exp Today Current BID Price $1.01")
+
+
+class _FixedBroker:
+    def __init__(self, result):
+        self.result = result
+        self.calls = 0
+
+    def place(self, intent):
+        self.calls += 1
+        return self.result(intent)
+
+
+def test_an_acknowledged_entry_is_the_only_thing_that_reaches_the_book(tmp_path):
+    book = ExecutionBook(path=tmp_path / "execution.jsonl")
+    listener = build([], {QQQ: [(1.01, 1.05)]}, tmp_path)
+    listener.execution = book
+
+    listener.handle(_entry_message())
+    assert listener.engine.positions[QQQ].contracts == 1
+    assert len(book.orders) == 1
+    assert book.open_positions()[0].contracts == 1
+
+
+def test_a_broker_reject_rolls_the_engine_book_back(tmp_path):
+    book = ExecutionBook(path=tmp_path / "execution.jsonl")
+    listener = build([], {QQQ: [(1.01, 1.05)]}, tmp_path)
+    listener.execution = book
+    listener.broker = _FixedBroker(
+        lambda i: Ack(ok=False, contract_key=i.contract_key, qty=0, price=0.0,
+                      error="insufficient buying power"))
+
+    listener.handle(_entry_message())
+    assert listener.engine.positions == {}
+    order = next(iter(book.orders.values()))
+    assert order.state == STATE_REJECTED
+    assert book.open_positions() == []
+
+
+def test_a_partial_fill_resizes_the_engine_position(tmp_path):
+    book = ExecutionBook(path=tmp_path / "execution.jsonl")
+    listener = build([], {QQQ: [(1.01, 1.02)]}, tmp_path, pipe_test=False)
+    listener.execution = book
+    listener.broker = _FixedBroker(
+        lambda i: Ack(ok=True, contract_key=i.contract_key, qty=5, price=1.02,
+                      broker_order_id="partial-1"))
+
+    listener.handle(_entry_message())
+    assert listener.engine.positions[QQQ].contracts == 5
+    order = next(iter(book.orders.values()))
+    assert order.state == STATE_PARTIAL
+    assert order.filled_qty == 5
+
+
+def test_restarting_the_listener_restores_the_open_position(tmp_path):
+    path = tmp_path / "execution.jsonl"
+    book = ExecutionBook(path=path)
+    listener = build([], {QQQ: [(1.01, 1.05)]}, tmp_path)
+    listener.execution = book
+    listener.handle(_entry_message())
+    assert listener.engine.positions[QQQ].contracts == 1
+
+    restarted = ExecutionBook.load(path)
+    engine = Engine(config=EngineConfig(), fills=FillLog(), clock=lambda: 1000.0)
+    restarted.sync_engine(engine, 1000.0)
+    assert engine.positions[QQQ].contracts == 1
+
+
+def test_a_rejected_exit_restores_the_position_and_realised_pnl(tmp_path):
+    book = ExecutionBook(path=tmp_path / "execution.jsonl")
+    listener = build(msgs()[:1], {QQQ: [(1.01, 1.05), (1.11, 1.14)]}, tmp_path)
+    listener.execution = book
+    listener.handle(_entry_message())
+    assert listener.engine.positions[QQQ].contracts == 1
+
+    class RejectSell:
+        def place(self, intent):
+            return Ack(ok=False, contract_key=intent.contract_key, qty=0, price=0.0,
+                       error="sell rejected")
+
+    listener.broker = RejectSell()
+    listener.handle(RawMessage(channel="etf-options", channel_id="1231301953972207667",
+                               ts=1360.0, text="Close remaining for 10%"))
+
+    assert listener.engine.positions[QQQ].contracts == 1
+    assert listener.engine.stats.realized_usd == 0.0
+    assert listener.engine.governor_state.realized_today_usd == 0.0
