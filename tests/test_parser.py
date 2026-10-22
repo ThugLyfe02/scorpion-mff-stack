@@ -132,3 +132,29 @@ def test_channel_id_resolves_to_a_name():
 def test_parse_never_raises_on_garbage():
     for text in ("", "   ", "!!!", "\x00", "TICKER", "STRIKE", "@everyone"):
         assert parse(msg(text)) is not None
+
+
+# ── strike vs price ─────────────────────────────────────────────────────────
+def test_a_strike_dollar_amount_is_not_an_exit_price():
+    s = parse(msg("NVDA STRIKE $180 CALLS CLOSED"))
+    assert s.kind is AlertKind.CLOSE
+    assert s.strike == 180
+    assert s.price is None
+
+
+def test_a_dollar_strike_without_the_word_strike_is_not_an_exit_price():
+    s = parse(msg("NVDA $180 CALLS CLOSED"))
+    assert s.price is None
+
+
+def test_an_anchored_exit_price_still_wins_over_the_strike():
+    s = parse(msg("NVDA STRIKE $180 CALLS CLOSED AT 2.65"))
+    assert s.strike == 180
+    assert s.price == 2.65
+
+
+def test_an_entry_strike_does_not_become_the_posted_price():
+    s = parse(msg("CALL TICKER NVDA STRIKE $180 Exp Today Current BID Price $1.00"))
+    assert s.strike == 180
+    assert s.his_bid == 1.0
+    assert s.price == 1.0

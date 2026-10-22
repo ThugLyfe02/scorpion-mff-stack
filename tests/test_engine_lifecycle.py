@@ -21,7 +21,8 @@ import time
 from scorpion_mff.engine import Engine, EngineConfig
 from scorpion_mff.fills import FillLog
 from scorpion_mff.governor import Decision
-from scorpion_mff.types import AlertKind, Quote, Side, Signal
+from scorpion_mff.parser import parse
+from scorpion_mff.types import AlertKind, Quote, RawMessage, Side, Signal
 
 ET = "etf-options"
 HIGH = "high-confidence-options"
@@ -172,6 +173,25 @@ def test_a_close_for_a_different_known_expiry_does_not_close_the_held_one():
                    strike=719.0, expiry="2026-09-18", price=1.2, raw="close Sep18")
     assert eng.on_signal(close, Quote(1.19, 1.21), now=ts + 30) == []
     assert eng.positions["QQQ|CALL|719|0DTE"].is_open
+
+
+def test_a_close_naming_the_strike_does_not_sell_at_the_strike():
+    """Regression for a phantom $250k: the strike must never become the fill."""
+    eng = _engine()
+    ts = _ts("2026-03-10 10:00")
+    entry = parse(RawMessage(
+        channel=ET, channel_id="1", ts=ts,
+        text="CALL TICKER NVDA STRIKE $180 Exp Today Current BID Price $1.00"))
+    eng.on_signal(entry, Quote(1.00, 1.02), now=ts)
+
+    close = parse(RawMessage(
+        channel=ET, channel_id="1", ts=ts + 60,
+        text="NVDA STRIKE $180 CALLS CLOSED"))
+    intents = eng.on_signal(close, Quote(2.60, 2.65), now=ts + 60)
+
+    assert len(intents) == 1
+    assert intents[0].limit == 2.60          # the quote, not the $180 strike
+    assert round(eng.stats.realized_usd, 2) == 2212.00
 
 
 def test_add_governor_sees_the_position_channel():

@@ -79,6 +79,18 @@ a different known expiry, is never another position. The order intent now always
 names `position.contract_key`, not the post's spelling — otherwise an expiry-less exit
 would route an unroutable `...|?` key.
 
+### 6. A strike could become the exit price
+
+`NVDA STRIKE $180 CALLS CLOSED` (no `AT 2.65`) parsed the `$180` strike as the exit
+price. The engine resolved the held NVDA 180C, sold 14 contracts at $180, and booked a
+**$250,572 phantom profit** instead of the quote's $2.60. The same fallback made an
+entry's posted price equal its strike.
+
+**Fix:** `_DOLLAR_RE` refuses a dollar amount followed by option language (`STRIKE`,
+`CALLS`, `PUTS`, `EXP`, `CONTRACT`) and the price loop skips a bare amount equal to the
+parsed strike. Anchored prices (`AT 2.65`, `AVG 1.20`) still win. Regression tests parse
+the strike-only exit and assert the engine books the quote, not the strike.
+
 ---
 
 ## Part 2 — the pre-trade budget
