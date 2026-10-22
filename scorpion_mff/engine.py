@@ -25,6 +25,7 @@ from typing import Any, Callable
 from .fills import FillLog
 from .pricing import far_off_bid, marketable_limit, pct_off_bid
 from .governor import GovernorState, apply_contracts
+from .risk import RiskBudget
 from .sizing import (
     MAX_CONCURRENT,
     PIPE_TEST_CONTRACTS,
@@ -73,6 +74,7 @@ class Engine:
     blocked: Callable[[], bool] = lambda: False      # kill switch hook
     quotes: Any = None                               # QuoteProvider; see _quote_for
     governor: Any = None                             # governor.Governor or None
+    risk_budget: RiskBudget | None = None            # pre-trade worst-case budget
     risk_state: GovernorState = field(default_factory=GovernorState)
     risk_state_path: Any = None                      # persist risk state after each settle
     stats: EngineStats = field(default_factory=EngineStats)
@@ -129,6 +131,24 @@ class Engine:
     @property
     def open_positions(self) -> list[Position]:
         return [p for p in self.positions.values() if p.is_open]
+
+    def _admit_budget(self, *, ticker: str, qty: int, limit: float,
+                      ts: float) -> tuple[int, str]:
+        """Shrink a locked clip to the pre-trade risk budget, or refuse it.
+
+        Returns (qty, note). `note` is empty when no cap bound, so the fill log
+        only carries a budget reason when the budget actually did something.
+        """
+        if self.risk_budget is None:
+            return qty, ""
+        day = time.strftime("%Y-%m-%d", time.gmtime(ts))
+        self.governor_state.roll(day)
+        admission = self.risk_budget.admit(
+            self.open_positions, ticker=ticker, qty=qty, limit=limit,
+            realized_today_usd=self.governor_state.realized_today_usd)
+        if not admission.accepted:
+            return 0, admission.reason_text
+        return admission.qty, (admission.reason_text if admission.capped else "")
 
     def _resolve(self, signal: Signal) -> Position | None:
         """Find the position a non-entry post refers to.
@@ -218,6 +238,12 @@ class Engine:
                                   reason=f"expired:{expiry}", ts=ts, accepted=False)
                 self.stats.expired += 1
                 pos.contracts = 0
+                # Remove the dead key, not just its contracts. A contract key recurs
+                # ("QQQ|CALL|719|0DTE" is the same string every day it trades), so a
+                # zeroed-but-present entry turns every later entry in that contract
+                # into "already_open" - the hone goes silent on the one class of
+                # contract it trades most. The fill log keeps the expire record.
+                del self.positions[pos.contract_key]
             elif iso is None:
                 self.fills.record(event="alert", contract_key=pos.contract_key,
                                   qty=pos.contracts, price=pos.avg_price,
@@ -268,7 +294,10 @@ class Engine:
             return self._skip(signal, ts, "unparseable_contract", latency_ms)
         if key in self.closed:
             return self._skip(signal, ts, "already_closed:never_chase", latency_ms)
-        if key in self.positions:
+        # Defensive: only a position that still holds contracts may block a re-entry.
+        # Expiry removes the key (see _expire_carried); this also stops any future
+        # zero-contract path from resurrecting the "already_open" silence bug.
+        if key in self.positions and self.positions[key].is_open:
             return self._skip(signal, ts, "already_open", latency_ms)
         if len(self.open_positions) >= self.config.max_concurrent:
             return self._skip(signal, ts, f"max_concurrent:{self.config.max_concurrent}",
@@ -306,6 +335,14 @@ class Engine:
                 # A stand-down is a decision worth recording, never a silent drop.
                 return self._skip(signal, ts, f"governor:{decision.reason_text}", latency_ms)
 
+        # The risk budget prices the loss that has not happened yet: open premium
+        # plus this order must stay inside the same daily limit the governor
+        # enforces after the fact. Reduce-only, and consulted after the locked clip.
+        qty, budget_note = self._admit_budget(ticker=signal.ticker, qty=qty,
+                                              limit=limit, ts=ts)
+        if qty <= 0:
+            return self._skip(signal, ts, f"risk_budget:{budget_note}", latency_ms)
+
         position = Position(contract_key=key, ticker=signal.ticker, side=signal.side,
                             contracts=qty, avg_price=limit, opened_ts=ts,
                             channel=signal.channel)
@@ -314,7 +351,8 @@ class Engine:
         self.stats.intents += 1
         intent = OrderIntent(
             action="buy", qty=qty, limit=limit, contract_key=key,
-            reason=f"entry:{tier.value}:his_bid={signal.his_bid:g}:ask={quote.ask:g}",
+            reason=(f"entry:{tier.value}:his_bid={signal.his_bid:g}:ask={quote.ask:g}"
+                    + (f":budget={budget_note}" if budget_note else "")),
             idempotency_key=f"{key}:buy:{self.stats.trades_today}",
         )
         self.fills.record(event="buy", contract_key=key, qty=qty, price=limit,
@@ -328,6 +366,11 @@ class Engine:
         key = signal.contract_key or (position.contract_key if position else "")
         if position is None:
             return self._skip(signal, ts, "add_without_position", latency_ms, key)
+        if self.halted:
+            # STOP/stand-down halts buys. An add is a buy: it must not increase
+            # exposure on a desk that has been told to stand down, even though exits
+            # remain legal.
+            return self._reject(signal, ts, "halted:stand-down", latency_ms, key)
         if self.blocked():
             return self._reject(signal, ts, "halted:kill-switch", latency_ms, key)
         if position.adds >= self.config.add_allowed_per_position:
@@ -339,15 +382,37 @@ class Engine:
         if quote is None:
             return self._reject(signal, ts, "no_quote", latency_ms, key)
         limit = marketable_limit(price, quote.ask)
-        tier = tier_for_channel(signal.channel or position.ticker, is_first_of_day=False)
+        # The tier follows the POSITION's channel. Falling back to the ticker (the old
+        # behaviour) turned an add on a high-confidence position into a standard clip
+        # whenever the add post did not restate the channel.
+        tier = tier_for_channel(signal.channel or position.channel, is_first_of_day=False)
         qty = contracts_for(clip_budget(tier, is_add=True), limit)
+
+        # Adds are governed exactly like entries. They used to bypass the governor,
+        # which meant a stand-down, a loss ladder or a channel tilt could all be
+        # undone by the next "adding at 1.30" post.
+        if self.governor is not None:
+            decision = self.governor(self.governor_state, signal, ts)
+            qty = apply_contracts(qty, decision.factor)
+            if decision.stand_down or qty <= 0:
+                return self._skip(signal, ts, f"governor:{decision.reason_text}", latency_ms, key)
+
+        # An add is new premium at risk, so it is priced by the same budget. The
+        # existing position is already in the book, so the cap sees the true total.
+        qty, budget_note = self._admit_budget(ticker=position.ticker, qty=qty,
+                                              limit=limit, ts=ts)
+        if qty <= 0:
+            return self._skip(signal, ts, f"risk_budget:{budget_note}", latency_ms, key)
+
         total = position.contracts + qty
         position.avg_price = (position.avg_price * position.contracts + limit * qty) / total
         position.contracts = total
         position.adds += 1
         self.stats.intents += 1
-        intent = OrderIntent(action="buy", qty=qty, limit=limit, contract_key=key,
-                             reason=f"add:{tier.value}:{position.adds}/{self.config.add_allowed_per_position}",
+        intent = OrderIntent(action="buy", qty=qty, limit=limit,
+                             contract_key=key,
+                             reason=(f"add:{tier.value}:{position.adds}/{self.config.add_allowed_per_position}"
+                                     + (f":budget={budget_note}" if budget_note else "")),
                              idempotency_key=f"{key}:add:{position.adds}")
         self.fills.record(event="buy", contract_key=key, qty=qty, price=limit,
                           reason=intent.reason, ts=ts, latency_ms=latency_ms, note="add")
