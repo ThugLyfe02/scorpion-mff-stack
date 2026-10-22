@@ -162,6 +162,19 @@ def test_a_strong_live_record_can_certify_and_allocates_at_most_half():
     assert sum(report.allocation.values()) <= 0.5 + 1e-9
 
 
+def test_allocation_does_not_fund_a_thin_channel_that_looks_lucky():
+    """A five-trade 100% channel is not evidence, even if the pooled record is."""
+    trades = ([Trade(90.0 if i % 2 else 110.0, ts=float(i), channel="thick")
+               for i in range(40)]
+              + [Trade(95.0 if i % 2 else 105.0, ts=100.0 + i, channel="thin")
+                 for i in range(5)])
+    report = build_report(trades, source=SOURCE_LIVE, draws=500, permutations=50)
+    assert report.status in (STATUS_PROVISIONAL, STATUS_CERTIFIED)
+    assert report.allocation is not None
+    assert "thin" not in report.allocation
+    assert "thick" in report.allocation
+
+
 def test_corpus_evidence_can_never_size_even_when_the_record_is_strong():
     report = _report(SOURCE_CORPUS)
     assert report.status == STATUS_CALIBRATION
@@ -218,6 +231,24 @@ def test_fills_skip_unaccepted_rows_and_report_anomalies():
     assert len(trades) == 1 and trades[0].qty == 2  # oversell clipped to holding
     assert meta["anomalies"]["oversell"] == 1
     assert meta["anomalies"]["sell_without_position"] == 1
+
+
+def test_a_zero_sale_is_a_total_loss_not_a_missing_price():
+    records = [
+        {"event": "buy", "contract_key": "QQQ|CALL|719|0DTE", "qty": 5, "price": 1.0,
+         "ts": 1.0, "note": "etf-options", "accepted": True},
+        {"event": "sell", "contract_key": "QQQ|CALL|719|0DTE", "qty": 5, "price": 0.0,
+         "ts": 2.0, "accepted": True},
+    ]
+    trades, meta = trades_from_fills(records)
+    assert len(trades) == 1
+    assert trades[0].pnl_usd == pytest.approx(-500.0)
+    assert meta["anomalies"]["unpriced"] == 0
+
+    records[1].pop("price")
+    trades, meta = trades_from_fills(records)
+    assert trades == []
+    assert meta["anomalies"]["unpriced"] == 1
 
 
 def test_corpus_loader_prices_percent_exits_and_skips_missing_exits(tmp_path):

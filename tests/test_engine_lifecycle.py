@@ -121,6 +121,59 @@ def test_add_cannot_bypass_a_stand_down_governor():
     assert any("governor" in reason for reason in _reasons(eng))
 
 
+def test_a_named_unheld_contract_cannot_resolve_to_another_strike():
+    """A close for QQQ 720C must never close the held QQQ 719C."""
+    eng = _engine()
+    ts = _ts("2026-03-10 10:00")
+    eng.on_signal(_entry(ts, strike=719.0), Quote(1.0, 1.0), now=ts)
+    held = eng.positions["QQQ|CALL|719|0DTE"].contracts
+
+    close_720 = Signal(kind=AlertKind.CLOSE, channel=ET, ticker="QQQ", side=Side.CALL,
+                       strike=720.0, expiry="0DTE", price=1.2, raw="close 720")
+    intents = eng.on_signal(close_720, Quote(1.19, 1.21), now=ts + 30)
+
+    assert intents == []
+    assert eng.positions["QQQ|CALL|719|0DTE"].contracts == held
+    assert "QQQ|CALL|720|0DTE" not in eng.positions
+    assert "close_without_position" in _reasons(eng)
+
+
+def test_a_named_unheld_contract_cannot_receive_an_add():
+    eng = _engine()
+    ts = _ts("2026-03-10 10:00")
+    eng.on_signal(_entry(ts, strike=719.0), Quote(1.0, 1.0), now=ts)
+    held = eng.positions["QQQ|CALL|719|0DTE"].contracts
+
+    add_720 = _add(ts + 30, strike=720.0, price=1.2)
+    assert eng.on_signal(add_720, Quote(1.19, 1.21), now=ts + 30) == []
+    assert eng.positions["QQQ|CALL|719|0DTE"].contracts == held
+    assert eng.positions["QQQ|CALL|719|0DTE"].adds == 0
+
+
+def test_a_close_without_an_expiry_still_resolves_the_held_strike():
+    """A real exit may omit the expiry; ticker|side|strike is enough when unique."""
+    eng = _engine()
+    ts = _ts("2026-03-10 10:00")
+    eng.on_signal(_entry(ts, strike=719.0), Quote(1.0, 1.0), now=ts)
+
+    close = Signal(kind=AlertKind.CLOSE, channel=ET, ticker="QQQ", side=Side.CALL,
+                   strike=719.0, expiry="", price=1.2, raw="QQQ 719 calls closed")
+    intents = eng.on_signal(close, Quote(1.19, 1.21), now=ts + 30)
+    assert len(intents) == 1
+    assert intents[0].contract_key == "QQQ|CALL|719|0DTE"
+
+
+def test_a_close_for_a_different_known_expiry_does_not_close_the_held_one():
+    eng = _engine()
+    ts = _ts("2026-03-10 10:00")
+    eng.on_signal(_entry(ts, strike=719.0), Quote(1.0, 1.0), now=ts)
+
+    close = Signal(kind=AlertKind.CLOSE, channel=ET, ticker="QQQ", side=Side.CALL,
+                   strike=719.0, expiry="2026-09-18", price=1.2, raw="close Sep18")
+    assert eng.on_signal(close, Quote(1.19, 1.21), now=ts + 30) == []
+    assert eng.positions["QQQ|CALL|719|0DTE"].is_open
+
+
 def test_add_governor_sees_the_position_channel():
     """A channel tilt must apply to an add that omits the channel."""
     seen: list[str] = []

@@ -64,6 +64,21 @@ $4,500). Conservative, but wrong, and invisible in the log.
 
 **Fix:** fall back to `position.channel`.
 
+### 5. A close for one strike could close another
+
+`_resolve` used the full contract key only when it matched a held position, then
+fell through to ticker/side. A close for `QQQ 720C` while holding `QQQ 719C` matched
+the held 719 by ticker and side: the engine flattened the wrong contract and emitted
+a sell for a contract it never held. Reproduced: the 719 position disappeared and a
+`QQQ|CALL|720|0DTE` sell intent was produced.
+
+**Fix:** when a post carries a full contract key, resolve only that key. The one
+legitimate fallback is an *omitted expiry* (`QQQ 719 calls closed`): it resolves only
+when exactly one open position shares ticker, side and strike. A different strike, or
+a different known expiry, is never another position. The order intent now always
+names `position.contract_key`, not the post's spelling — otherwise an expiry-less exit
+would route an unroutable `...|?` key.
+
 ---
 
 ## Part 2 — the pre-trade budget

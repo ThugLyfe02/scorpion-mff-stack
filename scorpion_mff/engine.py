@@ -19,8 +19,9 @@ Rules implemented (live/RULES.lock.md):
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable
+from typing import Any
 
 from .fills import FillLog
 from .pricing import far_off_bid, marketable_limit, pct_off_bid
@@ -169,8 +170,20 @@ class Engine:
         answer is "no position", not "some position".
         """
         key = signal.contract_key
-        if key and key in self.positions:
-            return self.positions[key]
+        if key:
+            held = self.positions.get(key)
+            if held is not None:
+                return held
+            parts = key.split("|")
+            # The post named ticker/side/strike but omitted expiry ("QQQ 719 calls
+            # closed"). That is still a reference to one contract; resolve it only
+            # when exactly one open position shares ticker|side|strike. A different
+            # strike, or a different *known* expiry, is never another position.
+            if len(parts) == 4 and parts[3] in ("", "?"):
+                matches = [p for p in self.open_positions
+                           if p.contract_key.split("|")[:3] == parts[:3]]
+                return matches[0] if len(matches) == 1 else None
+            return None
 
         named_something = bool(signal.ticker or signal.side)
         if named_something:
@@ -363,7 +376,10 @@ class Engine:
     def _on_add(self, signal: Signal, quote: Quote | None, ts: float,
                 latency_ms: int | None) -> list[OrderIntent]:
         position = self._resolve(signal)
-        key = signal.contract_key or (position.contract_key if position else "")
+        # The order always names the position we resolved, never the post's spelling.
+        # An expiry-less exit ("QQQ 719 calls closed") must sell the held 0DTE
+        # contract, not a synthetic "QQQ|CALL|719|?" key the broker cannot route.
+        key = position.contract_key if position else (signal.contract_key or "")
         if position is None:
             return self._skip(signal, ts, "add_without_position", latency_ms, key)
         if self.halted:
@@ -424,7 +440,10 @@ class Engine:
     def _on_trim(self, signal: Signal, quote: Quote | None, ts: float,
                  latency_ms: int | None) -> list[OrderIntent]:
         position = self._resolve(signal)
-        key = signal.contract_key or (position.contract_key if position else "")
+        # The order always names the position we resolved, never the post's spelling.
+        # An expiry-less exit ("QQQ 719 calls closed") must sell the held 0DTE
+        # contract, not a synthetic "QQQ|CALL|719|?" key the broker cannot route.
+        key = position.contract_key if position else (signal.contract_key or "")
         if position is None:
             if self._ambiguous_exit(signal):
                 return self._alert(signal, ts, "ambiguous_exit:named_no_contract", latency_ms)
@@ -457,7 +476,10 @@ class Engine:
     def _on_close(self, signal: Signal, quote: Quote | None, ts: float,
                   latency_ms: int | None) -> list[OrderIntent]:
         position = self._resolve(signal)
-        key = signal.contract_key or (position.contract_key if position else "")
+        # The order always names the position we resolved, never the post's spelling.
+        # An expiry-less exit ("QQQ 719 calls closed") must sell the held 0DTE
+        # contract, not a synthetic "QQQ|CALL|719|?" key the broker cannot route.
+        key = position.contract_key if position else (signal.contract_key or "")
         if position is None:
             if self._ambiguous_exit(signal):
                 return self._alert(signal, ts, "ambiguous_exit:named_no_contract", latency_ms)

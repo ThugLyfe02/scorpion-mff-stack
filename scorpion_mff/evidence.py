@@ -210,8 +210,10 @@ def bootstrap_mean(xs: Sequence[float], *, draws: int = DEFAULT_DRAWS,
         lo_q, hi_q = adjust(lo_q), adjust(hi_q)
         method = "bca"
 
-    return Bootstrap(observed, quantile(boots, lo_q), quantile(boots, hi_q),
-                     p_value, b, method)
+    low, high = quantile(boots, lo_q), quantile(boots, hi_q)
+    if low > high:                    # extreme acceleration can cross the quantiles
+        low, high = high, low
+    return Bootstrap(observed, low, high, p_value, b, method)
 
 
 def bayesian_p_up(xs: Sequence[float], *, draws: int = DEFAULT_DRAWS,
@@ -478,6 +480,11 @@ def _allocation(channels: Sequence[ChannelEvidence]) -> dict[str, float] | None:
     """
     scores: dict[str, float] = {}
     for c in channels:
+        # A channel with five trades can look 100% posterior-positive. That is not
+        # evidence, and it does not get a weight just because the pooled record
+        # cleared the overall gate.
+        if c.status not in (STATUS_PROVISIONAL, STATUS_CERTIFIED):
+            continue
         if c.posterior_up <= 0.5 or c.shrunk_mean <= 0 or c.stdev <= 0:
             continue
         scores[c.channel] = (c.shrunk_mean / (c.stdev ** 2)) * (c.posterior_up - 0.5) * 2
@@ -608,6 +615,7 @@ def trades_from_fills(records: Iterable[Mapping[str, object]] | Iterable[object]
             event = str(row.get("event") or "")
             key = str(row.get("contract_key") or "")
             qty = as_int(row.get("qty"))
+            priced = row.get("price") is not None
             price = as_float(row.get("price"))
             ts = as_float(row.get("ts"))
             note = str(row.get("note") or "")
@@ -616,6 +624,7 @@ def trades_from_fills(records: Iterable[Mapping[str, object]] | Iterable[object]
             event = str(getattr(row, "event", ""))
             key = str(getattr(row, "contract_key", ""))
             qty = int(getattr(row, "qty", 0) or 0)
+            priced = getattr(row, "price", None) is not None
             price = float(getattr(row, "price", 0.0) or 0.0)
             ts = float(getattr(row, "ts", 0.0) or 0.0)
             note = str(getattr(row, "note", "") or "")
@@ -639,7 +648,7 @@ def trades_from_fills(records: Iterable[Mapping[str, object]] | Iterable[object]
                 anomalies["oversell"] += 1
                 qty = int(held["qty"])
             avg = float(held["avg"])
-            if price <= 0 or avg <= 0:
+            if not priced or price < 0 or avg <= 0:
                 anomalies["unpriced"] += 1
                 continue
             trades.append(Trade(pnl_usd=(price - avg) * qty * OPTION_MULTIPLIER, ts=ts,
