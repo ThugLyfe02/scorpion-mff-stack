@@ -230,3 +230,38 @@ def test_a_rejected_exit_restores_the_position_and_realised_pnl(tmp_path):
     assert listener.engine.positions[QQQ].contracts == 1
     assert listener.engine.stats.realized_usd == 0.0
     assert listener.engine.governor_state.realized_today_usd == 0.0
+
+
+def test_a_redelivered_message_cannot_place_a_second_order_after_restart(tmp_path):
+    path = tmp_path / "execution.jsonl"
+    message = RawMessage(channel="etf-options", channel_id="1231301953972207667",
+                         message_id="m-redelivered", ts=1000.0,
+                         text="CALL TICKER QQQ STRIKE $719 Exp Today Current BID Price $1.01")
+
+    book1 = ExecutionBook(path=path)
+    first = build([], {QQQ: [(1.01, 1.05)]}, tmp_path)
+    first.execution = book1
+    first.broker = _FixedBroker(
+        lambda i: Ack(ok=False, contract_key=i.contract_key, qty=0, price=0.0,
+                      error="rejected"))
+    first.handle(message)
+    assert next(iter(book1.orders.values())).state == STATE_REJECTED
+
+    book2 = ExecutionBook.load(path)
+    engine2 = Engine(config=EngineConfig(), fills=FillLog(), clock=lambda: 1000.0)
+    book2.sync_engine(engine2, 1000.0)
+    counting = _FixedBroker(
+        lambda i: Ack(ok=True, contract_key=i.contract_key, qty=i.qty,
+                      price=i.limit, broker_order_id="should-not-happen"))
+    second = Listener(
+        transport=TapeTransport([]), engine=engine2, execution=book2,
+        broker=counting, quotes=QuoteScript({QQQ: [(1.01, 1.05)]}),
+        fills=engine2.fills, budget=LatencyBudget(),
+        heartbeat=Heartbeat(path=tmp_path / "hb2.json", clock=lambda: 1000.0),
+        kill=KillSwitch(path=tmp_path / "NO_TRADE2", clock=lambda: 1000.0),
+        clock=lambda: 1000.0)
+
+    second.handle(message)
+    assert counting.calls == 0                # the durable id already exists
+    assert any(f.reason == "execution_source_already_recorded"
+               for f in engine2.fills.records)

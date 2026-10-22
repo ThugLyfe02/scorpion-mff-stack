@@ -29,7 +29,10 @@ Discord → engine (optimistic decision)
 For each intent:
 
 1. **Persist the intent** with a client order id. If the log cannot be written, the
-   order is not placed — no durable intent, no trade.
+   order is not placed — no durable intent, no trade. The client id includes the
+   Discord message id when there is one, so a redelivered message after a restart
+   maps to the order it already produced. The in-memory `seen` ring handles the
+   same-process case; the log handles the restart case.
 2. Call the broker.
 3. On `BrokerError` → append `reject`, sync the engine, log `reject`.
 4. On `Ack(ok=False)` → same rollback path. The old code ignored this completely.

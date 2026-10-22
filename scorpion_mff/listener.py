@@ -114,9 +114,22 @@ class Listener:
         for intent in intents:
             cid = ""
             if self.execution is not None:
+                cid = self.execution.client_id(intent, trade_ts, mid)
+                existing = self.execution.orders.get(cid)
+                if existing is not None:
+                    # A restart clears the in-memory `seen` ring. The durable
+                    # client id is tied to the Discord message id, so a redelivered
+                    # message maps to the order it already produced and is never
+                    # placed twice.
+                    self.engine.fills.record(
+                        event="duplicate", contract_key=intent.contract_key,
+                        qty=0, price=0.0, reason="execution_source_already_recorded",
+                        ts=trade_ts, accepted=False, note=mid or intent.contract_key)
+                    continue
                 try:
                     cid = self.execution.record_intent(
-                        intent, ts=trade_ts, channel=signal.channel).client_id
+                        intent, ts=trade_ts, channel=signal.channel,
+                        source_id=mid).client_id
                 except ExecutionError as exc:
                     # No durable intent means we must not place the order.
                     self.engine.fills.record(

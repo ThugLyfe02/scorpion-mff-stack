@@ -6,7 +6,7 @@ Trading stack for **Scorpion Capital**: MoneyForFun Discord options hone → Rob
 
 | Layer | State |
 |---|---|
-| Live Discord → RH executor | **Coded hot path built** — `scorpion_mff/` (Gateway → parser → state machine → RH adapter → fill log, kill switch, latency budget). **352 offline tests green.** See **`HOTPATH.md`**. Live wiring pending: RH endpoint confirmation, quote feed, Gateway token + MESSAGE_CONTENT intent. |
+| Live Discord → RH executor | **Coded hot path built** — `scorpion_mff/` (Gateway → parser → state machine → RH adapter → fill log, kill switch, latency budget). **353 offline tests green.** See **`HOTPATH.md`**. Live wiring pending: RH endpoint confirmation, quote feed, Gateway token + MESSAGE_CONTENT intent. |
 | Executor backtest | **Run over every alert on record** — 93 alerts / 59 days / 4 channels. Two live-path defects found and fixed (a carried position held a concurrency slot forever; an exit could not be attributed when two positions were open). See **`BACKTEST.md`**. |
 | Ops watchdog | **Built and proven** — `watch --once` reads the heartbeat + fill log and pages the phone (same bot as the desk digest) only when the hone is down, stale, or has raised an engine alert. Delivered live (message id 21). See **`HOTPATH.md`**. |
 | Risk layer | **Built** — a versioned, **reduce-only** risk policy (`live/policy.json`), a governor that turns it into a per-entry multiplier the engine cannot exceed, and a statistics layer (expectancy with confidence intervals, shrinkage, drawdown, runs test, channel allocation). Risk state is persisted so a restart cannot forget a drawdown; `arm` refuses without a valid, fresh, non-halted policy. See **`POLICY.md`**. |

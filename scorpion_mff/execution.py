@@ -95,6 +95,7 @@ class ExecOrder:
     broker_order_id: str = ""
     reason: str = ""
     first_fill_ts: float | None = None
+    source_id: str = ""
 
     @property
     def action(self) -> str:
@@ -115,7 +116,9 @@ class ExecOrder:
                 "filled_qty": self.filled_qty, "avg_price": round(self.avg_price, 4),
                 "state": self.state, "broker_order_id": self.broker_order_id,
                 "created_ts": self.created_ts, "first_fill_ts": self.first_fill_ts,
-                "reason": self.intent.reason, "error": self.reason}
+                "reason": self.intent.reason, "error": self.reason,
+                "source_id": self.source_id,
+                "idempotency_key": self.intent.idempotency_key}
 
 
 @dataclass
@@ -245,13 +248,13 @@ class ExecutionBook:
 
     # ── recording ─────────────────────────────────────────────────────────────
     @staticmethod
-    def client_id(intent: OrderIntent, ts: float) -> str:
+    def client_id(intent: OrderIntent, ts: float, source_id: str = "") -> str:
         base = intent.idempotency_key or f"{intent.contract_key}:{intent.action}"
-        return f"{base}@{utc_day(ts)}"
+        return f"{base}@{utc_day(ts)}" + (f"@{source_id}" if source_id else "")
 
     def record_intent(self, intent: OrderIntent, *, ts: float,
-                      channel: str = "") -> ExecOrder:
-        cid = self.client_id(intent, ts)
+                      channel: str = "", source_id: str = "") -> ExecOrder:
+        cid = self.client_id(intent, ts, source_id)
         existing = self.orders.get(cid)
         if existing is not None:
             if (existing.contract_key != intent.contract_key
@@ -262,7 +265,8 @@ class ExecutionBook:
         event = {"v": 1, "t": "intent", "cid": cid, "ts": ts,
                  "action": intent.action, "contract_key": intent.contract_key,
                  "qty": intent.qty, "limit": intent.limit, "channel": channel,
-                 "reason": intent.reason}
+                 "reason": intent.reason, "source_id": source_id,
+                 "idem": intent.idempotency_key}
         self._apply(event)
         self._emit(event)
         return self.orders[cid]
@@ -464,12 +468,13 @@ class ExecutionBook:
                 limit=float(event.get("limit") or 0.0),
                 contract_key=str(event.get("contract_key") or ""),
                 reason=str(event.get("reason") or ""),
-                idempotency_key=cid)
+                idempotency_key=str(event.get("idem") or cid))
             if self.orders.get(cid) is None:
                 self.orders[cid] = ExecOrder(
                     client_id=cid, intent=intent,
                     channel=str(event.get("channel") or ""),
-                    created_ts=float(event.get("ts") or 0.0))
+                    created_ts=float(event.get("ts") or 0.0),
+                    source_id=str(event.get("source_id") or ""))
             return
         if kind == "ack":
             order = self._order(str(event.get("cid") or ""))

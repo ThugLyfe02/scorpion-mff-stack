@@ -51,7 +51,7 @@ scheduler to be starved.
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install pytest            # tests only
-.venv/Scripts/python -m pytest tests -q               # 352 tests, offline
+.venv/Scripts/python -m pytest tests -q               # 353 tests, offline
 
 .venv/Scripts/python -m scorpion_mff.cli doctor       # rules, switches, broker mode
 .venv/Scripts/python -m scorpion_mff.cli replay tapes/sep8.json
