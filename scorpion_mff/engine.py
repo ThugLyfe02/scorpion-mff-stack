@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .fills import FillLog
+from .exposure import ExposureLimits, guard as exposure_guard
 from .pricing import far_off_bid, marketable_limit, pct_off_bid
 from .governor import GovernorState, apply_contracts
 from .sizing import (
@@ -73,6 +74,7 @@ class Engine:
     blocked: Callable[[], bool] = lambda: False      # kill switch hook
     quotes: Any = None                               # QuoteProvider; see _quote_for
     governor: Any = None                             # governor.Governor or None
+    exposure_limits: ExposureLimits | None = None    # correlated-book cap; off until set
     risk_state: GovernorState = field(default_factory=GovernorState)
     risk_state_path: Any = None                      # persist risk state after each settle
     stats: EngineStats = field(default_factory=EngineStats)
@@ -305,6 +307,15 @@ class Engine:
             if decision.stand_down or qty <= 0:
                 # A stand-down is a decision worth recording, never a silent drop.
                 return self._skip(signal, ts, f"governor:{decision.reason_text}", latency_ms)
+
+        # Concentration is the cap a position count cannot express. It is checked after
+        # sizing because the premium cap needs the sized quantity and limit; a refusal is
+        # a skip with a named reason, never a silent drop, and the book is unchanged.
+        if self.exposure_limits is not None:
+            verdict = exposure_guard(self.exposure_limits, self.open_positions, signal,
+                                     incoming_qty=qty, incoming_price=limit)
+            if not verdict.allowed:
+                return self._skip(signal, ts, f"exposure:{verdict.reason}", latency_ms)
 
         position = Position(contract_key=key, ticker=signal.ticker, side=signal.side,
                             contracts=qty, avg_price=limit, opened_ts=ts,

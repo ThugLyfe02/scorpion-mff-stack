@@ -122,8 +122,12 @@ desk does not trade — which is why the governed number is only +$653 and not a
   forecast; it cannot price the calls he did not post.
 * Sessions are bucketed from a fixed UTC-04:00 offset (EDT), not a market calendar.
   `governor.session_for` is the function to replace when a real calendar arrives.
-* There is no position-level stop and no correlation cap. Two concurrent positions can be
-  the same ticker, same side, same expiry.
+* There is no position-level stop. There **is** now a correlation cap - the
+  `scorpion_mff/exposure.py` guard refuses a second position in the same underlying, an
+  expiry cluster, or a per-underlying gross-premium breach - but it is **opt-in**: the
+  engine ships with `exposure_limits=None`, and `arm` activates it only when
+  `live/exposure.json` exists (`python -m scorpion_mff.cli exposure init` writes the
+  default). Enabling it is a rule decision, not a silent default.
 * Per-channel allocation is a *ranking*, not an automatic reallocation of size. Wiring the
   ranking into `channel_multipliers` is a decision for a human, on evidence that is still
   thin (7 trades in the top row).

@@ -118,6 +118,15 @@ def _parser() -> argparse.ArgumentParser:
     fz.add_argument("--iterations", type=int, default=3000)
     fz.add_argument("--seed", type=int, default=7)
     fz.add_argument("--json", action="store_true")
+
+    exp = sub.add_parser("exposure", help="correlated-book cap: init the limits, show the book")
+    exp_sub = exp.add_subparsers(dest="exposure_cmd", required=True)
+    e_init = exp_sub.add_parser("init", help="write default limits (refuses to overwrite)")
+    e_init.add_argument("--path", type=Path, default=None)
+    e_show = exp_sub.add_parser("show", help="rebuild the book from the fill log and show concentration")
+    e_show.add_argument("--path", type=Path, default=None, help="limits file (default live/exposure.json)")
+    e_show.add_argument("--fills", type=Path, default=None, help="fill log (default live/fills.jsonl)")
+    e_show.add_argument("--json", action="store_true")
     return p
 
 
@@ -222,11 +231,23 @@ def cmd_arm(args: argparse.Namespace) -> int:
               "Without it every entry would fail closed with no_quote - correct but useless.",
               file=sys.stderr)
         return 1
+    from . import exposure as exposure_mod
+    exposure_path = ROOT / "live" / "exposure.json"
+    exposure_limits = None
+    if exposure_path.exists():
+        try:
+            exposure_limits = exposure_mod.load_limits(exposure_path)
+        except (OSError, ValueError) as exc:
+            print(f"refusing to arm: invalid exposure limits at {exposure_path}: {exc}",
+                  file=sys.stderr)
+            return 1
+
     broker = RobinhoodAgenticBroker(dry_run=not live)
     listener = Listener(
         transport=WebsocketGateway(token=token),
         engine=Engine(config=EngineConfig(), fills=FillLog(path=FILL_LOG, fsync=False),
                       governor=make_governor(risk_policy),
+                      exposure_limits=exposure_limits,
                       risk_state=risk_state, risk_state_path=state_path),
         broker=broker,
         quotes=quotes,
@@ -524,6 +545,61 @@ def cmd_tca(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_exposure(args: argparse.Namespace) -> int:
+    """The correlated-book cap: write the limits file once, then inspect the book."""
+    from . import exposure as exposure_mod
+
+    path = args.path or (ROOT / "live" / "exposure.json")
+    if args.exposure_cmd == "init":
+        if Path(path).exists():
+            print(f"refusing to overwrite {path} - exposure limits are a decision, "
+                  "not a generated file")
+            return 2
+        limits = exposure_mod.ExposureLimits()
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(json.dumps(limits.to_dict(), indent=2) + "\n", encoding="utf-8")
+        print(f"wrote default exposure limits -> {path}")
+        print(json.dumps(limits.to_dict(), indent=2))
+        return 0
+
+    limits = None
+    if Path(path).exists():
+        try:
+            limits = exposure_mod.load_limits(path)
+        except (OSError, ValueError) as exc:
+            print(f"cannot read exposure limits at {path}: {exc}", file=sys.stderr)
+            return 2
+
+    fills_path = args.fills or FILL_LOG
+    fills = FillLog().replay_file(fills_path) if fills_path.exists() else []
+    positions = exposure_mod.positions_from_fills(fills)
+    book = exposure_mod.book_exposure(positions)
+
+    if args.json:
+        print(json.dumps({
+            "limits": limits.to_dict() if limits else {"active": False},
+            "book": book,
+        }, indent=2))
+        return 0
+
+    if limits is None:
+        print(f"exposure limits: OFF (no {path})")
+    else:
+        cap = limits.max_premium_per_underlying_usd
+        print(f"exposure limits: per underlying {limits.max_per_underlying} | "
+              f"per expiry {limits.max_per_expiry} | "
+              f"premium cap {'$' + f'{cap:,.0f}' if cap else 'off'}")
+    print(f"book: {book['positions']} position(s) | gross premium "
+          f"${book['gross_premium_usd']:,.2f} | net ${book['net_premium_usd']:,.2f}")
+    for ticker, row in book["per_underlying"].items():
+        print(f"  {ticker:<8} {row['positions']} pos {row['contracts']} contracts "
+              f"premium ${row['premium_usd']:,.2f} (calls {row['calls']} / puts {row['puts']})")
+    for expiry, row in book["per_expiry"].items():
+        print(f"  exp {expiry:<12} {row['positions']} pos {row['contracts']} contracts "
+              f"premium ${row['premium_usd']:,.2f}")
+    return 0
+
+
 def cmd_fuzz(args: argparse.Namespace) -> int:
     """Exit 1 on a violation, so CI can gate on it."""
     from . import fuzz
@@ -554,6 +630,7 @@ def main(argv: list[str] | None = None) -> int:
         "desk": cmd_desk,
         "tca": cmd_tca,
         "fuzz": cmd_fuzz,
+        "exposure": cmd_exposure,
     }
     return handlers[args.cmd](args)
 
