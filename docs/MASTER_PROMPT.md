@@ -105,8 +105,9 @@ than a number quietly moving.
     coverage               3/107 measurable (2.8%) - 97 contract-days have no bars
 
 Proven: deterministic executor, replay guarantee, compaction, sending discipline, circuit breaker,
-corpus ledger, risk-of-ruin (78.1% breakeven win haircut), mark-out (withholding), calendar and
-coverage, halt-as-event, audit bundles, supervision and metrics, executable lifecycles.
+corpus ledger, risk-of-ruin (78.1% breakeven win haircut), mark-out (withholding), mark-to-market
+(withholding), calendar and coverage, halt-as-event, audit bundles, supervision and metrics,
+executable lifecycles.
 
 Not proven: live venue `Sender` (needs one real ack payload, tokens stripped), live quote feed,
 mark-out at scale (needs bars for 97 contract-days), partial fills, portfolio-level exposure.

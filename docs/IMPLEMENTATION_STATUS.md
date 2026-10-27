@@ -107,3 +107,9 @@ Still requires environment/operator work:
       Levy area (= signed polygon area, = half realized quadratic variation under lead-lag),
       and a fit gate that refuses a level-3 fit on the 107-trade corpus with a named reason
       (14 non-constant features, floor of 140 samples). See `docs/FRONTIER_7.md`.
+- [x] mark-to-market (`marks.py`): the operator view the book was missing - unrealised P&L per
+      held position, at/through-cost flags, and a total that **withholds itself** (`None`) when
+      any open position cannot be priced or can only be priced with a stale quote, so a partial
+      sum never masquerades as the book's P&L. `split_stale` partitions quotes by age (a phantom
+      bid must not price a position), and `scorpion marks --check` is the cron tripwire: exit 1
+      when any position is at/below cost, unpriced, or stale-priced.

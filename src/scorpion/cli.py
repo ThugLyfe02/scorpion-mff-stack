@@ -11,6 +11,7 @@ from pathlib import Path
 from .broker import Quote
 from .config import Policy
 from .domain import EventKind, SignalEvent
+from .marks import mark, split_stale
 from .outbox import Dispatcher
 from .paper import PaperSender
 from .pipeline import Pipeline
@@ -129,6 +130,32 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         store.set_halt(True, result.reason)
         print(f"halted: {result.reason}", file=sys.stderr)
         return 2
+    return 0
+
+
+def cmd_marks(args: argparse.Namespace) -> int:
+    """Mark the open book to market. The total withholds itself when any held
+    position cannot be priced, or can only be priced with a stale quote - a partial
+    sum is not the book's P&L, and a phantom bid is not a price.
+
+    `--check` turns the report into a tripwire: it exits 1 when any held position
+    is at or below cost, unpriced, or stale-priced, so a cron can page on the book
+    the way `watch` pages on the hone."""
+    store = Store(args.db)
+    state, _ = replay(store.load_signals())
+    moment = datetime.now(UTC)
+    quotes = _load_quotes(Path(args.quotes), moment) if args.quotes else {}
+    fresh, stale = split_stale(quotes, moment, timedelta(seconds=args.max_age))
+    bids = {key: quote.bid for key, quote in fresh.items()}
+    report = mark(state, bids, stale=stale)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(report.to_text())
+    if args.check:
+        at_risk = (report.unpriced > 0 or report.stale > 0
+                   or any(m.at_or_below_cost for m in report.marks))
+        return 1 if at_risk else 0
     return 0
 
 
@@ -527,6 +554,16 @@ def main(argv: list[str] | None = None) -> int:
     rec.add_argument("--db", default="scorpion.db")
     rec.add_argument("--snapshot", required=True)
     rec.set_defaults(func=cmd_reconcile)
+
+    marks = sub.add_parser("marks", help="mark the open book to market, with withholding")
+    marks.add_argument("--db", default="scorpion.db")
+    marks.add_argument("--quotes", default=None, help="JSON map contract_key -> bid/ask")
+    marks.add_argument("--max-age", type=float, default=60.0,
+                       help="drop quotes older than this many seconds (default 60)")
+    marks.add_argument("--check", action="store_true",
+                       help="exit 1 when any position is at/below cost, unpriced, or stale")
+    marks.add_argument("--json", action="store_true")
+    marks.set_defaults(func=cmd_marks)
 
     res = sub.add_parser("research", help="corpus edge, win-haircut breakeven, sizing")
     res.add_argument("--corpus", default="mff-backtest/trades.csv")
