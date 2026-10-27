@@ -37,6 +37,7 @@ from .sizing import (
     contracts_for,
     tier_for_channel,
 )
+from .stops import breakeven_exit
 from .types import AlertKind, OrderIntent, Position, Quote, Signal
 
 
@@ -55,6 +56,8 @@ class EngineConfig:
     add_allowed_per_position: int = 1
     require_quote: bool = True          # fail closed: never guess a price
     pipe_test: bool = True              # 1 contract on the day's first trade
+    enforce_breakeven: bool = False     # opt-in: flatten at the armed BE stop on a quote
+    max_quote_age_s: float | None = None  # refuse a quote older than this (None = off)
 
 
 @dataclass
@@ -113,23 +116,46 @@ class Engine:
                                   reason=f"risk_state_unwritable:{exc}", ts=ts)
 
     # ── book helpers ─────────────────────────────────────────────────────────
-    def _quote_for(self, key: str, explicit: Quote | None) -> Quote | None:
-        """The quote for THIS decision.
+    def _quote_for(self, key: str, explicit: Quote | None, now: float) -> Quote | None:
+        """The quote for THIS decision - refused when missing or stale.
 
         An explicit quote always wins (that is what the tests and the replay
         scripts pass). Otherwise the provider is asked - and any failure becomes
         None, so the engine fails closed. An exit post that does not restate the
         contract has no key of its own; it is priced off the RESOLVED position,
         which is why this is called after _resolve, not before.
+
+        A quote older than `EngineConfig.max_quote_age_s` (when set) is refused
+        with a named alert: a cached price after a feed stall is a guess wearing
+        a quote's clothes, and this path fails closed rather than trade on it.
         """
-        if explicit is not None:
-            return explicit
-        if self.quotes is None or not key:
+        quote = explicit
+        if quote is None:
+            if self.quotes is None or not key:
+                return None
+            try:
+                quote = self.quotes.quote(key)
+            except Exception:            # QuoteError and friends: unpriceable != priced
+                return None
+        if quote is None:
             return None
-        try:
-            return self.quotes.quote(key)
-        except Exception:            # QuoteError and friends: unpriceable != priced
+        if self._quote_is_stale(quote, now):
+            self.fills.record(event="alert", contract_key=key, qty=0, price=0.0,
+                              reason=f"stale_quote:{now - quote.ts:.1f}s", ts=now,
+                              accepted=False)
             return None
+        return quote
+
+    def _quote_is_stale(self, quote: Quote, now: float) -> bool:
+        """True when `quote` is older than the configured ceiling.
+
+        Only a quote in the PAST relative to `now` is stale. A quote timestamped
+        ahead of the clock is clock skew, not staleness, and is out of scope here
+        - the offline tests run a fixed clock while explicit quotes carry a live
+        `time.time()` stamp, so a symmetric check would refuse every test quote.
+        """
+        max_age = self.config.max_quote_age_s
+        return max_age is not None and (now - quote.ts) > max_age
 
     @property
     def open_positions(self) -> list[Position]:
@@ -284,7 +310,7 @@ class Engine:
             # AlertKind.ENTRY already implies both; this keeps the invariant
             # local and explicit rather than trusting the classifier.
             return self._skip(signal, ts, "unparseable_contract", latency_ms)
-        quote = self._quote_for(key, quote)
+        quote = self._quote_for(key, quote, ts)
         if quote is None:
             return self._reject(signal, ts, "no_quote", latency_ms)
         if far_off_bid(signal.his_bid, quote.ask):
@@ -347,7 +373,7 @@ class Engine:
         price = signal.price if signal.price is not None else signal.his_bid
         if price is None:
             return self._reject(signal, ts, "no_price_for_add", latency_ms, key)
-        quote = self._quote_for(position.contract_key, quote)
+        quote = self._quote_for(position.contract_key, quote, ts)
         if quote is None:
             return self._reject(signal, ts, "no_quote", latency_ms, key)
         limit = marketable_limit(price, quote.ask)
@@ -379,7 +405,7 @@ class Engine:
             # move the stop to breakeven before recording the no-op.
             position.breakeven_stop = position.avg_price
             return self._skip(signal, ts, "nothing_to_trim", latency_ms, key)
-        quote = self._quote_for(position.contract_key, quote)
+        quote = self._quote_for(position.contract_key, quote, ts)
         price = signal.price if signal.price is not None else (
             quote.bid if quote is not None else None)
         if price is None:
@@ -411,7 +437,7 @@ class Engine:
                 closed_note = "close_without_position"
             return self._skip(signal, ts, closed_note, latency_ms, key)
         qty = position.contracts
-        quote = self._quote_for(position.contract_key, quote)
+        quote = self._quote_for(position.contract_key, quote, ts)
         price = signal.price if signal.price is not None else (
             quote.bid if quote is not None else None)
         if price is None:
@@ -426,6 +452,41 @@ class Engine:
                              reason=f"close:pct={pct}", idempotency_key=f"{key}:close")
         self.fills.record(event="sell", contract_key=key, qty=qty, price=price,
                           reason=intent.reason, ts=ts, latency_ms=latency_ms, note="flat")
+        return [intent]
+
+    # ── the breakeven stop, made live ────────────────────────────────────────
+    def on_quote(self, contract_key: str, quote: Quote, now: float | None = None,
+                 latency_ms: int | None = None) -> list[OrderIntent]:
+        """Enforce the breakeven stop the trim armed, on a fresh quote.
+
+        Off unless `EngineConfig.enforce_breakeven` is set. When on, a bid at or
+        through a position's `breakeven_stop` flattens the whole remainder at the
+        bid actually seen - never the stop price - so realised P&L stays honest
+        when the market gaps through. This is the missing half of "trim to 1 + BE":
+        the trim armed the stop; this fires it.
+        """
+        if not self.config.enforce_breakeven:
+            return []
+        ts = self.clock() if now is None else now
+        if self._quote_is_stale(quote, ts):
+            # A stale bid must not fire a stop: selling at a price that no longer
+            # exists is the same lie as buying at one, and the fill log stays honest
+            # only if the stop fires on a bid we could actually have hit.
+            return []
+        position = self.positions.get(contract_key)
+        if position is None or not position.is_open:
+            return []
+        intent = breakeven_exit(position, quote.bid)
+        if intent is None:
+            return []
+        self._book_result((intent.limit - position.avg_price) * intent.qty * 100, ts)
+        position.contracts = 0
+        self.closed.add(position.contract_key)
+        del self.positions[position.contract_key]
+        self.stats.intents += 1
+        self.fills.record(event="sell", contract_key=intent.contract_key, qty=intent.qty,
+                          price=intent.limit, reason=intent.reason, ts=ts,
+                          latency_ms=latency_ms, note="breakeven_stop")
         return [intent]
 
     # ── logging helpers ──────────────────────────────────────────────────────

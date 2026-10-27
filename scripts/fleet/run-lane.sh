@@ -120,14 +120,44 @@ else
 fi
 
 # ── the agent -> gate -> fix loop ───────────────────────────────────────────
+#
+# Token cost is a real budget line, and it is mostly burned in four places:
+#   1. `--thinking high` on a frontier model (output tokens, per turn);
+#   2. re-sending the FULL build brief on every fix round (input tokens);
+#   3. re-sending the FULL gate log on every fix round (input tokens);
+#   4. RESUMING the same `--session-id` on every fix round - pi reloads the whole
+#      prior transcript (brief + build + every tool call) before adding the fix
+#      prompt, so the "tail-only" fix turn was still paying for round 1 in full.
+#
+# The lane's configured thinking level is for the build turn. A fix turn is
+# mechanical - read the failure, fix it, re-run the gate - so it runs one level
+# below the build, sees only the failure block (never the green dots above it),
+# and gets a FRESH session. The working tree is the agent's memory: the changes
+# it made in round 1 are on disk, and `read` is cheaper than re-transmitting the
+# whole conversation that produced them.
 run_agent() {
   local prompt="$1"
+  local thinking="${2:-$THINKING}"
+  local session="${3:-fleet-$LANE_ID}"
   ( cd "$WORKDIR" && pi --print \
       --model "$MODEL" \
-      --thinking "$THINKING" \
-      --session-id "fleet-$LANE_ID" \
+      --thinking "$thinking" \
+      --session-id "$session" \
       --approve \
       "$prompt" ) >"$AGENT_LOG" 2>&1 || true
+}
+
+gate_brief() {
+  # The gate stops at the first failing tool (`set -e`), so the failure is always
+  # near the end. pytest's green dots above the FAILURES block are noise the
+  # agent does not need re-sent: when a FAILURES/ERRORS block exists, send from
+  # there to the end. Otherwise (ruff/mypy fail first, and their log is already
+  # short) fall back to the raw tail.
+  if grep -qE '^=+ (FAILURES|ERRORS) =+' "$GATE_LOG"; then
+    sed -n '/^=* \(FAILURES\|ERRORS\) =*/,$p' "$GATE_LOG"
+  else
+    tail -n 120 "$GATE_LOG"
+  fi
 }
 
 run_gate() {
@@ -136,7 +166,7 @@ run_gate() {
 
 if [ "$NO_AGENT" -eq 0 ]; then
   log "building with $MODEL (thinking=$THINKING)"
-  run_agent "$PROMPT"
+  run_agent "$PROMPT" "$THINKING"
 else
   log "agent skipped (--no-agent); gating the tree as-is"
 fi
@@ -151,11 +181,15 @@ while [ "$round" -le "$ROUNDS" ]; do
     break
   fi
   if [ "$round" -lt "$ROUNDS" ] && [ "$NO_AGENT" -eq 0 ]; then
-    log "gate red; returning failures to the agent for a fix"
-    run_agent "$(printf '%s\n\nThe quality gate failed after your changes. Read the output below, '
-      'fix every failure in the source or the tests, and re-run the gate yourself until it is '
-      'green. Do not lower the gate, silence it, or add ignores. Gate output:\n\n%s' \
-      "$PROMPT" "$(cat "$GATE_LOG")")"
+    log "gate red; returning a compact fix brief to the agent"
+    # The full brief was already given in round 1. Sending it again plus the
+    # whole log is the fleet's largest avoidable token sink; a fix round needs
+    # only the failing block and the instruction not to weaken the gate. A
+    # fresh session id means the agent does NOT reload round 1's transcript -
+    # it reads the working tree instead, which already holds its changes.
+    fix_prompt="The quality gate (ruff -> mypy --strict -> pytest, in that order) failed after your changes. Read the failing block below, fix every failure in the source or the tests, and re-run the gate yourself until it is green. Do not lower the gate, silence it, or add ignores. Read any file you need; change only what the failure names. Gate output (failure block):"
+    fix_prompt="$fix_prompt"$'\n\n'"$(gate_brief)"
+    run_agent "$fix_prompt" "low" "fleet-$LANE_ID-r$round"
   fi
   round=$((round + 1))
 done

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://pi.dev/schemas/settings.schema.json",
+  "defaultThinkingLevel": "low",
+  "thinkingBudgets": {
+    "minimal": 512,
+    "low": 1024,
+    "medium": 6144,
+    "high": 12288
+  },
+  "showCacheMissNotices": false
+}

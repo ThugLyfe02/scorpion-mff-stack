@@ -51,8 +51,26 @@ def _parser() -> argparse.ArgumentParser:
     arm.add_argument("--live", action="store_true",
                      help="place REAL orders (needs MFF_RH_TOKEN)")
     arm.add_argument("--limit", type=int, default=None, help="stop after N events")
+    arm.add_argument("--enforce-breakeven", action="store_true",
+                     help="poll quotes and flatten any position at/through its BE stop")
+    arm.add_argument("--max-quote-age", type=float, default=5.0,
+                     help="refuse a quote older than this many seconds (default 5)")
 
     sub.add_parser("status", help="kill-switch state + tail of the fill log")
+
+    ver = sub.add_parser("verify", help="validate the fill log for gaps, duplicates, torn rows")
+    ver.add_argument("--fills", type=Path, default=None,
+                     help="fill log (default live/fills.jsonl)")
+
+    marks = sub.add_parser("marks", help="mark the open book to market (unrealised P&L)")
+    marks.add_argument("--fills", type=Path, default=None,
+                       help="fill log (default live/fills.jsonl)")
+    marks.add_argument("--quotes", type=Path, default=None,
+                       help="JSON quotes file; else the live quote feed when configured")
+    marks.add_argument("--json", action="store_true", help="machine-readable marks")
+    marks.add_argument("--check", action="store_true",
+                       help="exit 1 when any armed breakeven stop is through, "
+                            "or the book cannot be priced")
 
     bt = sub.add_parser("backtest", help="run the executor over the historical alert corpus")
     bt.add_argument("--corpus", type=Path, default=None,
@@ -256,10 +274,13 @@ def cmd_arm(args: argparse.Namespace) -> int:
     broker = RobinhoodAgenticBroker(dry_run=not live)
     listener = Listener(
         transport=WebsocketGateway(token=token),
-        engine=Engine(config=EngineConfig(), fills=FillLog(path=FILL_LOG, fsync=False),
-                      governor=make_governor(risk_policy),
-                      exposure_limits=exposure_limits,
-                      risk_state=risk_state, risk_state_path=state_path),
+        engine=Engine(
+            config=EngineConfig(enforce_breakeven=bool(args.enforce_breakeven),
+                                 max_quote_age_s=args.max_quote_age),
+            fills=FillLog(path=FILL_LOG, fsync=False),
+            governor=make_governor(risk_policy),
+            exposure_limits=exposure_limits,
+            risk_state=risk_state, risk_state_path=state_path),
         broker=broker,
         quotes=quotes,
         budget=LatencyBudget(),
@@ -278,9 +299,11 @@ def cmd_arm(args: argparse.Namespace) -> int:
         count = 0
         async for message in listener.transport.messages():
             intents = listener.handle(message)
+            stops = listener.refresh_stops()
             kind = "trade" if intents else "none"
             print(f"  {message.ts:>10.3f} {message.channel:<24} {kind:<6} "
-                  f"{len(intents)} intent(s) latency={listener.budget.worst_ms}ms")
+                  f"{len(intents)} intent(s) {len(stops)} stop(s) "
+                  f"latency={listener.budget.worst_ms}ms")
             count += 1
             if args.limit is not None and count >= args.limit:
                 break
@@ -291,6 +314,91 @@ def cmd_arm(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("interrupted")
     return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """The fill log is the product; verify it can be read back intact.
+
+    A gap means a lost decision, a duplicate means a double-counted fill, and a
+    torn last line means a crash mid-append. None may pass silently: a book
+    reconstructed from a corrupt log would trade on a lie.
+    """
+    fills_path = args.fills or FILL_LOG
+    if not fills_path.exists():
+        print(f"no fill log yet at {fills_path}")
+        return 0
+    problems = FillLog().verify_file(fills_path)
+    rows = FillLog().replay_file(fills_path)
+    print(f"fill log: {len(rows)} rows at {fills_path}")
+    if problems:
+        for problem in problems:
+            print(f"  PROBLEM {problem}")
+        print(f"{len(problems)} problem(s): the log cannot be trusted as-is")
+        return 1
+    print("intact: sequence contiguous, every row readable")
+    return 0
+
+
+def cmd_marks(args: argparse.Namespace) -> int:
+    """The open book, marked to market: what it is worth right now, and whether
+    any armed breakeven stop is through. Total is withheld when any position
+    cannot be priced - a partial total would be a lie in a summary."""
+    from . import stops as stops_mod
+
+    fills_path = args.fills or FILL_LOG
+    fills = FillLog().replay_file(fills_path) if fills_path.exists() else []
+    book = stops_mod.book_from_fills(fills)
+
+    if args.quotes is not None:
+        bids = stops_mod.load_bids(args.quotes)
+    else:
+        provider = HttpQuoteProvider()
+        bids = {}
+        for key in book:
+            try:
+                quote = provider.quote(key)
+            except Exception:
+                quote = None
+            if quote is not None:
+                bids[key] = quote.bid
+
+    marks = stops_mod.mark_book(book.values(), bids)
+    total = marks.total_unrealized_usd
+    # A stop that is through is a decision the engine owes but has not made; a
+    # book that cannot be priced is the 9/8 failure in different clothes. Either
+    # is a page, so `--check` is the cron tripwire the report's `watch` sibling
+    # is not: it pages on the book's P&L, not on the heartbeat.
+    at_risk = marks.unpriced > 0 or marks.stopped_count > 0
+
+    if args.json:
+        print(json.dumps({
+            "positions": len(book),
+            "priced": marks.priced,
+            "unpriced": marks.unpriced,
+            "stopped_count": marks.stopped_count,
+            "total_unrealized_usd": total,
+            "marks": [
+                {"contract_key": m.contract_key, "contracts": m.contracts,
+                 "avg_price": m.avg_price, "bid": m.bid,
+                 "unrealized_usd": m.unrealized_usd,
+                 "breakeven_stop": m.breakeven_stop, "stopped": m.stopped}
+                for m in marks.marks
+            ],
+        }, indent=2))
+        return 1 if (args.check and at_risk) else 0
+
+    print(f"book: {len(book)} position(s) | priced {marks.priced} | "
+          f"unpriced {marks.unpriced} | stopped {marks.stopped_count}")
+    if total is None:
+        print("unrealised P&L: WITHHELD (some position cannot be priced)")
+    else:
+        print(f"unrealised P&L: ${total:,.2f}")
+    for m in marks.marks:
+        flag = "STOP" if m.stopped else "    "
+        print(f"  {flag} {m.contracts:>3}x {m.contract_key:<28} "
+              f"avg {m.avg_price:<7.2f} bid {m.bid:<7.2f} "
+              f"unreal ${m.unrealized_usd:>9,.2f}")
+    return 1 if (args.check and at_risk) else 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -639,6 +747,8 @@ def main(argv: list[str] | None = None) -> int:
         "replay": cmd_replay,
         "arm": cmd_arm,
         "status": cmd_status,
+        "verify": cmd_verify,
+        "marks": cmd_marks,
         "backtest": cmd_backtest,
         "watch": cmd_watch,
         "policy": cmd_policy,

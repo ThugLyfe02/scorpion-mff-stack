@@ -109,19 +109,7 @@ class Listener:
         intents = self.engine.on_signal(signal)
 
         for intent in intents:
-            try:
-                ack = self.broker.place(intent)
-            except BrokerError as exc:
-                self.engine.fills.record(
-                    event="reject", contract_key=intent.contract_key, qty=intent.qty,
-                    price=intent.limit, reason=f"broker:{exc}", accepted=False,
-                    ts=self.clock(), note=intent.reason)
-                continue
-            if self.fills is not None:
-                self.fills.record(
-                    event="ack", contract_key=ack.contract_key, qty=ack.qty,
-                    price=ack.price, reason=intent.reason, ts=self.clock(),
-                    note=f"{'dry' if ack.dry_run else 'live'}:{ack.broker_order_id}")
+            self._place(intent)
 
         latency_ms = int((self.clock() - started) * 1000)
         self.budget.record(latency_ms)
@@ -133,6 +121,45 @@ class Listener:
                 latency_ms=latency_ms)
         self.processed += 1
         return intents
+
+    def _place(self, intent: OrderIntent) -> None:
+        """Place one intent and record the ack or the refusal, never raising."""
+        try:
+            ack = self.broker.place(intent)
+        except BrokerError as exc:
+            self.engine.fills.record(
+                event="reject", contract_key=intent.contract_key, qty=intent.qty,
+                price=intent.limit, reason=f"broker:{exc}", accepted=False,
+                ts=self.clock(), note=intent.reason)
+            return
+        if self.fills is not None:
+            self.fills.record(
+                event="ack", contract_key=ack.contract_key, qty=ack.qty,
+                price=ack.price, reason=intent.reason, ts=self.clock(),
+                note=f"{'dry' if ack.dry_run else 'live'}:{ack.broker_order_id}")
+
+    def refresh_stops(self) -> list[OrderIntent]:
+        """Poll quotes for open positions and fire any armed breakeven stop.
+
+        A no-op unless the engine opted in (`EngineConfig.enforce_breakeven`). The
+        live pump calls this on its cadence so "trim to 1 + BE" is enforced between
+        Discord events, not only when the next post arrives. A quote feed failure
+        skips the position - fail closed, never guess a fill.
+        """
+        if not self.engine.config.enforce_breakeven:
+            return []
+        placed: list[OrderIntent] = []
+        for position in self.engine.open_positions:
+            try:
+                quote = self.quotes.quote(position.contract_key)
+            except Exception:      # QuoteError and friends: unpriceable != priced
+                continue
+            if quote is None:
+                continue
+            for intent in self.engine.on_quote(position.contract_key, quote):
+                self._place(intent)
+                placed.append(intent)
+        return placed
 
     @property
     def breached_budget(self) -> bool:

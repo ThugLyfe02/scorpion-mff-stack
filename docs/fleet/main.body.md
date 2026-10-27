@@ -5,8 +5,11 @@ with the reduce-only governor, the correlated-book cap, the fill log, the kill
 switch, and offline replay over the full alert corpus.
 
 **What it is:** parser → state machine → RH adapter → fill log → kill switch, all
-deterministic, standard-library-only, fail-closed. 271 tests green, `ruff` clean,
-`mypy --strict` clean.
+deterministic, standard-library-only, fail-closed — plus the breakeven stop the trim
+armed but nothing read back (`stops.py`, opt-in via `--enforce-breakeven`), a
+mark-to-market view whose total withholds itself when the book cannot be priced
+(`marks --check`), and fill-log integrity verification (`verify`). 295 tests green,
+`ruff` clean, `mypy --strict` clean.
 
 **Gate:** `scripts/gate.sh` — ruff → mypy `--strict` → pytest, all green.
 

@@ -97,6 +97,40 @@ class FillLog:
             out.append(Fill(**json.loads(line)))
         return out
 
+    def verify_file(self, path: str | os.PathLike[str]) -> list[str]:
+        """Validate an on-disk fill log for the defects that would corrupt the book.
+
+        Returns a list of human-readable problems; empty means the log is
+        trustworthy. Each check is a seam the 9/8 post-mortem could not answer
+        because no log existed at all - so the log that now exists must be able
+        to say whether it is intact:
+
+          * every non-blank line parses back into a Fill (a torn last line from a
+            crash mid-append is named, never skipped);
+          * sequence numbers are strictly increasing from 1 - a gap is a lost
+            decision, a duplicate is a double-counted fill, and either makes the
+            book reconstructed by `book_from_fills` diverge from what happened.
+        """
+        problems: list[str] = []
+        prev_seq = 0
+        for line_no, line in enumerate(
+            Path(path).read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if not line.strip():
+                continue
+            try:
+                fill = Fill(**json.loads(line))
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                problems.append(f"line {line_no}: unreadable row ({exc})")
+                continue
+            if fill.seq != prev_seq + 1:
+                problems.append(
+                    f"line {line_no}: seq {fill.seq} after {prev_seq} "
+                    f"(expected {prev_seq + 1})"
+                )
+            prev_seq = fill.seq
+        return problems
+
     def reasons(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         for f in self.records:

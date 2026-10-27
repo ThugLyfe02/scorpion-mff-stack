@@ -122,12 +122,17 @@ desk does not trade — which is why the governed number is only +$653 and not a
   forecast; it cannot price the calls he did not post.
 * Sessions are bucketed from a fixed UTC-04:00 offset (EDT), not a market calendar.
   `governor.session_for` is the function to replace when a real calendar arrives.
-* There is no position-level stop. There **is** now a correlation cap - the
-  `scorpion_mff/exposure.py` guard refuses a second position in the same underlying, an
-  expiry cluster, or a per-underlying gross-premium breach - but it is **opt-in**: the
-  engine ships with `exposure_limits=None`, and `arm` activates it only when
-  `live/exposure.json` exists (`python -m scorpion_mff.cli exposure init` writes the
-  default). Enabling it is a rule decision, not a silent default.
+* The position-level stop is narrow and opt-in. `scorpion_mff/stops.py` now enforces the
+  **breakeven** stop the trim already armed - the engine wrote `stop->be@...` and set
+  `Position.breakeven_stop`, but nothing read it back, so "trim to 1 + BE" was a comment
+  rather than a property of the book. A bid at or through the stop flattens the remainder
+  at the bid actually seen (never the stop price, so a gap is priced honestly). It ships
+  **off** (`EngineConfig.enforce_breakeven=False`; `arm --enforce-breakeven` turns it on)
+  and it is a *breakeven* stop only - not a stop-loss on a full position. The
+  correlated-book cap (`scorpion_mff/exposure.py`) is opt-in the same way: the engine
+  ships with `exposure_limits=None`, and `arm` activates it when `live/exposure.json`
+  exists (`python -m scorpion_mff.cli exposure init` writes the default). Enabling either
+  is a rule decision, not a silent default.
 * Per-channel allocation is a *ranking*, not an automatic reallocation of size. Wiring the
   ranking into `channel_multipliers` is a decision for a human, on evidence that is still
   thin (7 trades in the top row).

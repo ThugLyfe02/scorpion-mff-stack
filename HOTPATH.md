@@ -202,9 +202,35 @@ Credentials (never committed): `MFF_TELEGRAM_TOKEN` + `MFF_TELEGRAM_CHAT`
 (`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` are accepted as fallbacks, so one `.env` serves
 both desks).
 
-**What it does not do:** it does not restart anything, does not page on position-level P&L,
-and cannot tell a quiet market from a dead feed — it knows only whether the process is
-beating and whether the engine raised something it could not act on.
+**What it does not do:** it does not restart anything, and cannot tell a quiet market from
+a dead feed — it knows only whether the process is beating and whether the engine raised
+something it could not act on. Position-level risk is a different tripwire: `marks --check`
+exits 1 when an armed breakeven stop is through or the book cannot be priced, so a cron can
+page on the book the way `watch --once` pages on the hone.
+
+## Position stops, marks, and log integrity (`stops.py`)
+
+The lock says a trim leaves "1 contract + breakeven stop". The engine armed that stop
+(`Position.breakeven_stop`, and `stop->be@...` in the fill log) but nothing ever read it
+back — a later quote below breakeven did nothing, so the stop was a note rather than a
+fact. `stops.py` closes that seam in three directions, each a pure function of
+(book, quote) so a replay can reproduce every one of them:
+
+* **`breakeven_exit` / `engine.on_quote`** — a bid at or through the armed stop flattens
+  the remainder at the bid actually seen, never the stop price, so a gap through the stop
+  is priced honestly. Opt-in via `EngineConfig.enforce_breakeven`; `arm --enforce-breakeven`
+  turns it on, and `Listener.refresh_stops` polls quotes on the live pump's cadence so the
+  stop fires between Discord events, not only when the next post arrives.
+* **`marks` (`python -m scorpion_mff.cli marks`)** — marks the open book to a live bid
+  (unrealised P&L, at/through-cost and through-stop flags) and **withholds the total** when
+  any position cannot be priced, because a partial total presented as "the book's P&L" is
+  the same lie the fill log was built to prevent. `marks --check` is the cron tripwire:
+  exit 1 when a stop is through or the book cannot be priced.
+* **`verify` (`python -m scorpion_mff.cli verify`)** — validates the fill log can be read
+  back into the book it describes: every row parses and sequence numbers are contiguous. A
+  gap is a lost decision, a duplicate is a double-counted fill, and a torn last line is a
+  crash mid-append. `book_from_fills` rebuilds the book (stops included) so `marks` never
+  reads a second source of truth.
 
 
 ## Adversarial hardening (`fuzz`)
