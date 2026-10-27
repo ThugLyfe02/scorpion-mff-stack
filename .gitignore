@@ -4,6 +4,9 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# the fleet's isolated build worktrees are machine state, not source
+.worktrees/
+
 # live runtime state: this is machine state, not source. The kill switch file is
 # deliberately NOT ignored - an arm-blocking file must be visible in the tree.
 live/fills.jsonl
