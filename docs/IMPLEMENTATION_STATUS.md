@@ -102,3 +102,8 @@ Still requires environment/operator work:
 - [x] failure injection: every prefix of the applied log is replayed and compared with the
       state the live pipeline held at that point; a deleted row shows up as a sequence gap and
       a corrupted payload raises instead of being skipped
+- [x] path signatures (`signature.py`): the truncated signature of a piecewise-linear path by
+      exact tensor-exponential composition, the lead-lag transform of a univariate series, the
+      Levy area (= signed polygon area, = half realized quadratic variation under lead-lag),
+      and a fit gate that refuses a level-3 fit on the 107-trade corpus with a named reason
+      (14 non-constant features, floor of 140 samples). See `docs/FRONTIER_7.md`.

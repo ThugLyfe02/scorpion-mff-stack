@@ -12,6 +12,7 @@ deterministic signal/replay infrastructure, and a Ross-style gapper research des
 | Durable audit | **SQLite WAL event/effect/heartbeat store implemented** |
 | Execution | **Paper/shadow + review-only boundary implemented**; no autonomous live submission |
 | Backtest / signal corpus | Legacy evidence in `mff-backtest/`; correctness caveats documented |
+| Research frontier | **Path signatures built** — exact truncated signature, lead-lag transform, Levy area, and a fit gate that refuses a level-3 fit on 107 trades. See `docs/FRONTIER_7.md` |
 | Gapper scanner | Agent research only — no scanner binary |
 
 The former browser/LLM cron path is retained only as operational history. It must not be treated as a

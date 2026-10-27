@@ -469,6 +469,37 @@ def cmd_series(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_signature(args: argparse.Namespace) -> int:
+    """Compute a truncated path signature, with the fit gate stated up front."""
+    from .signature import SignatureError, lead_lag, render, report
+
+    if args.path:
+        raw = json.loads(Path(args.path).read_text(encoding="utf-8"))
+    else:
+        raw = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]]
+    if not isinstance(raw, list):
+        print(json.dumps({"ok": False, "error": "path must be a JSON array"}), file=sys.stderr)
+        return 2
+    try:
+        if raw and all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) for value in raw
+        ):
+            payload = report(
+                lead_lag([float(value) for value in raw]), level=args.level, samples=args.samples
+            )
+            payload["lead_lag"] = True
+        else:
+            payload = report(raw, level=args.level, samples=args.samples)
+    except SignatureError as error:
+        print(json.dumps({"ok": False, "error": str(error)}), file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(render(payload))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scorpion", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -595,6 +626,15 @@ def main(argv: list[str] | None = None) -> int:
     srs.add_argument("--tail", type=int, default=None)
     srs.add_argument("--json", action="store_true")
     srs.set_defaults(func=cmd_series)
+
+    sig = sub.add_parser("signature", help="compute a truncated path signature")
+    sig.add_argument("--path", default=None,
+                     help="JSON array of vertices, or of numbers for a lead-lag series")
+    sig.add_argument("--level", type=int, default=3)
+    sig.add_argument("--samples", type=int, default=107,
+                     help="corpus size against which the fit gate is measured")
+    sig.add_argument("--json", action="store_true")
+    sig.set_defaults(func=cmd_signature)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
