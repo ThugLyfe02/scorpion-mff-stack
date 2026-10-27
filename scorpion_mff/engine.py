@@ -18,14 +18,17 @@ Rules implemented (live/RULES.lock.md):
 
 from __future__ import annotations
 
+import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
 
+from .broker import QuoteProvider
+from .exposure import ExposureLimits
+from .exposure import guard as exposure_guard
 from .fills import FillLog
-from .exposure import ExposureLimits, guard as exposure_guard
+from .governor import Governor, GovernorState, apply_contracts
 from .pricing import far_off_bid, marketable_limit, pct_off_bid
-from .governor import GovernorState, apply_contracts
 from .sizing import (
     MAX_CONCURRENT,
     PIPE_TEST_CONTRACTS,
@@ -72,11 +75,11 @@ class Engine:
     fills: FillLog = field(default_factory=FillLog)
     clock: Callable[[], float] = time.time
     blocked: Callable[[], bool] = lambda: False      # kill switch hook
-    quotes: Any = None                               # QuoteProvider; see _quote_for
-    governor: Any = None                             # governor.Governor or None
+    quotes: QuoteProvider | None = None              # fail closed: see _quote_for
+    governor: Governor | None = None                 # reduce-only, consulted after sizing
     exposure_limits: ExposureLimits | None = None    # correlated-book cap; off until set
     risk_state: GovernorState = field(default_factory=GovernorState)
-    risk_state_path: Any = None                      # persist risk state after each settle
+    risk_state_path: str | os.PathLike[str] | None = None  # persist after each settle
     stats: EngineStats = field(default_factory=EngineStats)
 
     positions: dict[str, Position] = field(default_factory=dict)
@@ -237,8 +240,8 @@ class Engine:
         ts = self.clock() if now is None else now
         self._roll_day(ts)
         if not signal.actionable:
-            self._skip(signal, ts, f"ignored:{signal.ignore_reason.value if signal.ignore_reason else 'unknown'}",
-                       latency_ms)
+            reason = signal.ignore_reason.value if signal.ignore_reason else "unknown"
+            self._skip(signal, ts, f"ignored:{reason}", latency_ms)
             return []
 
         handler = {
@@ -293,10 +296,8 @@ class Engine:
         tier = tier_for_channel(signal.channel,
                                 is_first_of_day=first_of_day and self.config.pipe_test)
         limit = marketable_limit(signal.his_bid, quote.ask)
-        if tier is Tier.PIPE:
-            qty = PIPE_TEST_CONTRACTS
-        else:
-            qty = contracts_for(clip_budget(tier), limit)
+        qty = (PIPE_TEST_CONTRACTS if tier is Tier.PIPE
+               else contracts_for(clip_budget(tier), limit))
 
         # The governor can only shrink the locked clip. It is consulted AFTER the
         # locked size exists, so "reduce-only" is structural rather than a promise:
@@ -404,7 +405,10 @@ class Engine:
         if position is None:
             if self._ambiguous_exit(signal):
                 return self._alert(signal, ts, "ambiguous_exit:named_no_contract", latency_ms)
-            closed_note = "already_closed:never_chase" if signal.contract_key in self.closed else "close_without_position"
+            if signal.contract_key in self.closed:
+                closed_note = "already_closed:never_chase"
+            else:
+                closed_note = "close_without_position"
             return self._skip(signal, ts, closed_note, latency_ms, key)
         qty = position.contracts
         quote = self._quote_for(position.contract_key, quote)

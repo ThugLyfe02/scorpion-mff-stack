@@ -18,8 +18,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from .types import OrderIntent, Quote
 
@@ -152,10 +153,9 @@ class RobinhoodAgenticBroker:
                 self.acks.append(ack)
                 return ack
             last_error = self._describe(status, body)
-            if status in (429,) or 500 <= status < 600:
-                if attempt < self.retries:
-                    self.sleep(self._retry_after(body, attempt))
-                    continue
+            if (status in (429,) or 500 <= status < 600) and attempt < self.retries:
+                self.sleep(self._retry_after(body, attempt))
+                continue
             break
         raise BrokerError(f"{intent.action} {intent.qty} {intent.contract_key}: {last_error}")
 
@@ -170,6 +170,7 @@ class RobinhoodAgenticBroker:
             "time_in_force": "gtc",
             "reason": intent.reason[:120],
         }
+        idempotency_key = intent.idempotency_key or f"{intent.contract_key}:{intent.action}"
         req = urllib.request.Request(
             url=f"{self.base_url.rstrip('/')}/orders",
             data=json.dumps(payload).encode("utf-8"),
@@ -178,7 +179,7 @@ class RobinhoodAgenticBroker:
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 "Authorization": f"Bearer {self.token}",
-                "Idempotency-Key": intent.idempotency_key or f"{intent.contract_key}:{intent.action}",
+                "Idempotency-Key": idempotency_key,
             },
         )
         return req

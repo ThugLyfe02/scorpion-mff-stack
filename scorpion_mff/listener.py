@@ -16,8 +16,9 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Callable, Iterable, Protocol
+from typing import Any, Protocol
 
 from .broker import BrokerError, QuoteProvider
 from .engine import Engine
@@ -155,7 +156,7 @@ class WebsocketGateway:
 
     async def messages(self) -> AsyncIterator[RawMessage]:
         try:
-            import websockets                      # optional dependency
+            import websockets  # optional dependency
         except ImportError as exc:                 # pragma: no cover - env dependent
             raise RuntimeError(
                 "the live Gateway needs the optional dependency: pip install websockets"
@@ -170,7 +171,8 @@ class WebsocketGateway:
                 "d": {
                     "token": self.token,
                     "intents": INTENTS_GUILD_MESSAGES | INTENT_MESSAGE_CONTENT,
-                    "properties": {"os": "windows", "browser": "scorpion-mff", "device": "scorpion-mff"},
+                    "properties": {"os": "windows", "browser": "scorpion-mff",
+                                   "device": "scorpion-mff"},
                 },
             }))
             beat = asyncio.create_task(self._heartbeat(ws, interval))

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import pytest
 
-from scorpion_mff.broker import QuoteScript
 from scorpion_mff.engine import Engine, EngineConfig
 from scorpion_mff.fills import FillLog
 from scorpion_mff.parser import parse

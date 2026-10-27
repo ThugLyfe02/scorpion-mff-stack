@@ -17,7 +17,8 @@ than guessing a number.
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from .types import AlertKind, IgnoreReason, RawMessage, Side, Signal
 

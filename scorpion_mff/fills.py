@@ -12,9 +12,9 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Iterable
 from dataclasses import asdict
 from pathlib import Path
-from typing import Iterable
 
 from .types import Fill
 

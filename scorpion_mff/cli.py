@@ -16,7 +16,7 @@ import os
 import sys
 from pathlib import Path
 
-from .broker import HttpQuoteProvider, PaperBroker, RobinhoodAgenticBroker, mask
+from .broker import HttpQuoteProvider, RobinhoodAgenticBroker, mask
 from .engine import Engine, EngineConfig
 from .fills import FillLog
 from .health import Heartbeat, LatencyBudget
@@ -55,7 +55,8 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="kill-switch state + tail of the fill log")
 
     bt = sub.add_parser("backtest", help="run the executor over the historical alert corpus")
-    bt.add_argument("--corpus", type=Path, default=None, help="trades.json (default: mff-backtest/bt_full)")
+    bt.add_argument("--corpus", type=Path, default=None,
+                    help="trades.json (default: mff-backtest/bt_full)")
     bt.add_argument("--ask-multiple", type=float, default=1.05,
                     help="how far through his posted bid we pay (default 1.05)")
     bt.add_argument("--exit-slippage", type=float, default=1.0,
@@ -99,7 +100,8 @@ def _parser() -> argparse.ArgumentParser:
     sim.add_argument("--json", action="store_true")
 
     desk = sub.add_parser("desk", help="expectancy, drawdown and allocation from the record")
-    desk.add_argument("--risk-unit", type=float, default=None, help="1R in USD (default: policy, else $1500)")
+    desk.add_argument("--risk-unit", type=float, default=None,
+                      help="1R in USD (default: policy, else $1500)")
     desk.add_argument("--json", action="store_true")
     desk.add_argument("--md", type=Path, default=None, help="write the markdown report here")
 
@@ -123,9 +125,12 @@ def _parser() -> argparse.ArgumentParser:
     exp_sub = exp.add_subparsers(dest="exposure_cmd", required=True)
     e_init = exp_sub.add_parser("init", help="write default limits (refuses to overwrite)")
     e_init.add_argument("--path", type=Path, default=None)
-    e_show = exp_sub.add_parser("show", help="rebuild the book from the fill log and show concentration")
-    e_show.add_argument("--path", type=Path, default=None, help="limits file (default live/exposure.json)")
-    e_show.add_argument("--fills", type=Path, default=None, help="fill log (default live/fills.jsonl)")
+    e_show = exp_sub.add_parser("show",
+                                help="rebuild the book from the fill log and show concentration")
+    e_show.add_argument("--path", type=Path, default=None,
+                        help="limits file (default live/exposure.json)")
+    e_show.add_argument("--fills", type=Path, default=None,
+                        help="fill log (default live/fills.jsonl)")
     e_show.add_argument("--json", action="store_true")
     return p
 
@@ -133,6 +138,11 @@ def _parser() -> argparse.ArgumentParser:
 def cmd_doctor(args: argparse.Namespace) -> int:
     kill = KillSwitch(path=NO_TRADE)
     hb = Heartbeat(path=HEARTBEAT)
+    if os.environ.get("DISCORD_BOT_TOKEN"):
+        discord_token = "present"
+    else:
+        discord_token = "MISSING (arm will refuse)"
+    broker_mode = "DRY (no orders leave the box)" if not os.environ.get("MFF_RH_LIVE") else "LIVE"
     lines = [
         f"scorpion-mff {__version__}",
         "",
@@ -146,10 +156,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         f"heartbeat                   {hb.path}",
         f"fill log                    {FILL_LOG}",
         "",
-        f"discord token               {'present' if os.environ.get('DISCORD_BOT_TOKEN') else 'MISSING (arm will refuse)'}",
+        f"discord token               {discord_token}",
         f"robinhood token             {mask(os.environ.get('MFF_RH_TOKEN', ''))}",
         f"robinhood base              {os.environ.get('MFF_RH_BASE', 'https://api.robinhood.com')}",
-        f"broker mode                 {'DRY (no orders leave the box)' if not os.environ.get('MFF_RH_LIVE') else 'LIVE'}",
+        f"broker mode                 {broker_mode}",
         "",
         "locked rules:",
         "  entry limit = min(live_ask, his_bid * 1.15); skip if ask > +25% off his bid",
@@ -187,7 +197,8 @@ def cmd_arm(args: argparse.Namespace) -> int:
         return 1
     kill = KillSwitch(path=NO_TRADE)
     if kill.active():
-        print(f"kill switch is active: {kill.status()}  (delete {kill.path} to arm)", file=sys.stderr)
+        print(f"kill switch is active: {kill.status()}  "
+              f"(delete {kill.path} to arm)", file=sys.stderr)
         return 1
 
     # The risk policy is a precondition, not a decoration. A missing, invalid or
@@ -255,8 +266,9 @@ def cmd_arm(args: argparse.Namespace) -> int:
         heartbeat=Heartbeat(path=HEARTBEAT),
         kill=kill,
     )
+    quotes_status = "configured" if quotes.configured else "NOT configured (entries will reject)"
     print(f"armed | broker={'LIVE' if live else 'DRY'} | "
-          f"quotes={'configured' if quotes.configured else 'NOT configured (entries will reject)'} | "
+          f"quotes={quotes_status} | "
           f"channels={','.join(CHANNEL_IDS)}")
     print(f"risk  | policy {risk_policy.name} (1R=${risk_policy.risk_unit_usd:,.0f}, "
           f"daily stop ${risk_policy.daily_loss_limit_usd_effective() or 0:,.0f}) | "
@@ -475,7 +487,8 @@ def cmd_desk(args: argparse.Namespace) -> int:
         print(json.dumps({
             "overall": desk.overall.to_dict(),
             "channels": {name: stats.to_dict() for name, stats in desk.channels.items()},
-            "ranking": [{"channel": name, "score": round(score, 4)} for name, score, _ in desk.ranking],
+            "ranking": [{"channel": name, "score": round(score, 4)}
+                        for name, score, _ in desk.ranking],
             "drawdown": desk.dd.to_dict(),
             "runs_test": desk.runs,
             "streak_expectations": [{"length": n, "expected": round(v, 2)}
@@ -492,24 +505,25 @@ def cmd_desk(args: argparse.Namespace) -> int:
 
 def cmd_tca(args: argparse.Namespace) -> int:
     """Execution quality. `path` needs bars (here); `fills` needs venue executions (live)."""
-    from . import historic, tca as tca_mod
+    from . import historic
+    from . import tca as tca_mod
 
     if args.tca_cmd == "fills":
         path = args.executions or (ROOT / "live" / "executions.jsonl")
         log = tca_mod.ExecutionLog.load(path)
-        report = tca_mod.FillReport(executions=log.records)
+        fill_report = tca_mod.FillReport(executions=log.records)
         if args.json:
             print(json.dumps({"executions": len(log.records),
-                              "mean_cost_bps": round(report.mean_cost_bps, 1),
-                              "p90_cost_bps": round(report.p90_cost_bps, 1),
-                              "total_cost_usd": report.total_cost_usd,
-                              "at_or_better_pct": round(report.at_or_better_share, 1),
-                              "partial_pct": round(report.partial_share, 1),
-                              "latency_p90_ms": round(report.latency_p90_ms, 1),
-                              "suggested_ask_multiple": report.suggested_ask_multiple(),
+                              "mean_cost_bps": round(fill_report.mean_cost_bps, 1),
+                              "p90_cost_bps": round(fill_report.p90_cost_bps, 1),
+                              "total_cost_usd": fill_report.total_cost_usd,
+                              "at_or_better_pct": round(fill_report.at_or_better_share, 1),
+                              "partial_pct": round(fill_report.partial_share, 1),
+                              "latency_p90_ms": round(fill_report.latency_p90_ms, 1),
+                              "suggested_ask_multiple": fill_report.suggested_ask_multiple(),
                               "source": str(path)}, indent=2))
             return 0
-        print(report.to_text())
+        print(fill_report.to_text())
         if not log.records:
             print(f"  (looked in {path})")
         return 0
@@ -519,27 +533,28 @@ def cmd_tca(args: argparse.Namespace) -> int:
     if not barsets:
         print(f"no bar series under {bars_dir} - nothing to analyse", file=sys.stderr)
         return 2
-    report = tca_mod.analyse_paths(barsets, historic.load_trades(),
-                                   ask_multiple=args.ask_multiple)
+    path_report = tca_mod.analyse_paths(barsets, historic.load_trades(),
+                                        ask_multiple=args.ask_multiple)
     if args.md is not None:
         args.md.parent.mkdir(parents=True, exist_ok=True)
-        args.md.write_text(report.to_markdown(), encoding="utf-8")
+        args.md.write_text(path_report.to_markdown(), encoding="utf-8")
     if args.json:
+        measurable = path_report.measurable_enough
         print(json.dumps({
-            "barsets": report.barsets, "joined": report.n,
-            "measurable": len(report.measurable),
-            "entry_before_coverage": report.n - len(report.in_coverage),
-            "aggregates_withheld": not report.measurable_enough,
-            "mae_median_pct": round(report.mae_median, 2) if report.measurable_enough else None,
-            "mfe_median_pct": round(report.mfe_median, 2) if report.measurable_enough else None,
-            "stop30_hit_pct": round(report.stop30_share, 1) if report.measurable_enough else None,
-            "carry_median_pct": round(report.carry_median, 2),
-            "expired_pct": round(report.expired_share, 1),
-            "unmatched": report.unmatched,
-            "rows": [r.to_dict() for r in report.rows],
+            "barsets": path_report.barsets, "joined": path_report.n,
+            "measurable": len(path_report.measurable),
+            "entry_before_coverage": path_report.n - len(path_report.in_coverage),
+            "aggregates_withheld": not measurable,
+            "mae_median_pct": round(path_report.mae_median, 2) if measurable else None,
+            "mfe_median_pct": round(path_report.mfe_median, 2) if measurable else None,
+            "stop30_hit_pct": round(path_report.stop30_share, 1) if measurable else None,
+            "carry_median_pct": round(path_report.carry_median, 2),
+            "expired_pct": round(path_report.expired_share, 1),
+            "unmatched": path_report.unmatched,
+            "rows": [r.to_dict() for r in path_report.rows],
         }, indent=2))
         return 0
-    print(report.to_text())
+    print(path_report.to_text())
     if args.md is not None:
         print(f"\nmarkdown report -> {args.md}")
     return 0
@@ -555,14 +570,14 @@ def cmd_exposure(args: argparse.Namespace) -> int:
             print(f"refusing to overwrite {path} - exposure limits are a decision, "
                   "not a generated file")
             return 2
-        limits = exposure_mod.ExposureLimits()
+        init_limits = exposure_mod.ExposureLimits()
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(json.dumps(limits.to_dict(), indent=2) + "\n", encoding="utf-8")
+        Path(path).write_text(json.dumps(init_limits.to_dict(), indent=2) + "\n", encoding="utf-8")
         print(f"wrote default exposure limits -> {path}")
-        print(json.dumps(limits.to_dict(), indent=2))
+        print(json.dumps(init_limits.to_dict(), indent=2))
         return 0
 
-    limits = None
+    limits: exposure_mod.ExposureLimits | None = None
     if Path(path).exists():
         try:
             limits = exposure_mod.load_limits(path)

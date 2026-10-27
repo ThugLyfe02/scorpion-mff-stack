@@ -26,8 +26,8 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 from .policy import MAX_MULTIPLIER, Policy
 from .types import Signal
@@ -79,7 +79,7 @@ class GovernorState:
     def drawdown_usd(self) -> float:
         return max(0.0, self.peak_equity_usd - self.equity_usd)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {"day": self.day, "realized_today_usd": round(self.realized_today_usd, 2),
                 "trades_today": self.trades_today,
                 "consecutive_losses": self.consecutive_losses,
@@ -88,7 +88,7 @@ class GovernorState:
                 "halted_reason": self.halted_reason}
 
     @classmethod
-    def from_dict(cls, payload: dict) -> "GovernorState":
+    def from_dict(cls, payload: dict[str, Any]) -> GovernorState:
         return cls(day=str(payload.get("day") or ""),
                    realized_today_usd=float(payload.get("realized_today_usd") or 0.0),
                    trades_today=int(payload.get("trades_today") or 0),
@@ -97,7 +97,7 @@ class GovernorState:
                    peak_equity_usd=float(payload.get("peak_equity_usd") or 0.0),
                    halted_reason=str(payload.get("halted_reason") or ""))
 
-    def save(self, path) -> None:
+    def save(self, path: str | os.PathLike[str]) -> None:
         """Atomic write: a torn risk file must not parse as "no drawdown"."""
         from pathlib import Path
         p = Path(path)
@@ -107,7 +107,7 @@ class GovernorState:
         os.replace(tmp, p)
 
     @classmethod
-    def load(cls, path, *, missing_ok: bool = True) -> "GovernorState":
+    def load(cls, path: str | os.PathLike[str], *, missing_ok: bool = True) -> GovernorState:
         """Read persisted state. A corrupt file is an error, never a silent reset."""
         from pathlib import Path
         p = Path(path)
@@ -127,7 +127,7 @@ class Decision:
     stand_down: bool
     reasons: tuple[str, ...] = ()
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {"factor": round(self.factor, 4), "stand_down": self.stand_down,
                 "reasons": list(self.reasons)}
 
@@ -190,10 +190,10 @@ def decide(policy: Policy, state: GovernorState, *, channel: str = "",
         reasons.append(f"daily_stop:{realized_r:.2f}R/${-state.realized_today_usd:,.0f}")
 
     # 2. Drawdown ladder, shallow to deep.
-    for step in policy.ladder:
-        if step.applies(realized_r):
-            factors.append(step.factor)
-            reasons.append(f"ladder:{step.at_r:+.1f}R->x{step.factor:g}")
+    for rung in policy.ladder:
+        if rung.applies(realized_r):
+            factors.append(rung.factor)
+            reasons.append(f"ladder:{rung.at_r:+.1f}R->x{rung.factor:g}")
 
     # 3. Drawdown from the equity peak (the account-level version of the same idea).
     if policy.max_drawdown_r is not None and r:
@@ -206,10 +206,11 @@ def decide(policy: Policy, state: GovernorState, *, channel: str = "",
             reasons.append(breach)
 
     # 4. Loss streaks. The count is recorded so the log explains the threshold it hit.
-    for step in policy.loss_streak:
-        if step.applies(state.consecutive_losses):
-            factors.append(step.factor)
-            reasons.append(f"streak:{step.at}->x{step.factor:g}(n={state.consecutive_losses})")
+    for streak_step in policy.loss_streak:
+        if streak_step.applies(state.consecutive_losses):
+            factors.append(streak_step.factor)
+            reasons.append(f"streak:{streak_step.at}->x{streak_step.factor:g}"
+                           f"(n={state.consecutive_losses})")
 
     # 5. Channel and session tilts. Reduce-only by validation, clamped anyway.
     channel_factor = policy.channel_multipliers.get(channel, 1.0)

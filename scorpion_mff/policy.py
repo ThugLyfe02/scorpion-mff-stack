@@ -28,12 +28,13 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 DEFAULT_R_USD = 1500.0
 DEFAULT_POLICY_PATH = Path("live/policy.json")
 MAX_MULTIPLIER = 1.0
-STALE_AFTER_MINUTES = 7 * 24 * 60          # a week: long enough to be useful, short enough to notice
+# A week: long enough to be useful, short enough to notice.
+STALE_AFTER_MINUTES = 7 * 24 * 60
 
 
 class PolicyError(Exception):
@@ -145,7 +146,8 @@ def _problems(payload: dict[str, Any]) -> list[str]:
     num("stale_after_minutes", low=1, required=False)
 
     if payload.get("daily_loss_limit_r") is None and payload.get("daily_loss_limit_usd") is None:
-        bad.append("daily_loss_limit_r/daily_loss_limit_usd: at least one hard daily stop is required")
+        bad.append("daily_loss_limit_r/daily_loss_limit_usd: "
+                   "at least one hard daily stop is required")
 
     ladder = payload.get("ladder") or []
     if not isinstance(ladder, list):
@@ -178,7 +180,8 @@ def _problems(payload: dict[str, Any]) -> list[str]:
         if not isinstance(at, int) or at < 1:
             bad.append(f"loss_streak[{i}].at: must be an integer >= 1, got {at!r}")
         if not isinstance(factor, (int, float)) or not 0.0 <= factor <= MAX_MULTIPLIER:
-            bad.append(f"loss_streak[{i}].factor: must be within 0..{MAX_MULTIPLIER}, got {factor!r}")
+            bad.append(f"loss_streak[{i}].factor: must be within "
+                       f"0..{MAX_MULTIPLIER}, got {factor!r}")
 
     for key in ("channel_multipliers", "session_multipliers"):
         table = payload.get(key) or {}
@@ -246,7 +249,7 @@ def write(policy: Policy, path: str | Path = DEFAULT_POLICY_PATH) -> Path:
 
 def baseline(name: str = "baseline-v1", *, written_utc: float | None = None,
              provenance: str = "hand-written; derived from BACKTEST.md, review before arming",
-             **overrides) -> Policy:
+             **overrides: Any) -> Policy:
     """The starting policy. Deliberately mild: it must not change the corpus result much.
 
     The ladder is expressed in R and checked against the corpus in `policy simulate`,
@@ -279,12 +282,13 @@ def baseline(name: str = "baseline-v1", *, written_utc: float | None = None,
 
 def summarise(policy: Policy, now: float | None = None) -> str:
     """The one-screen view an operator reads before arming."""
+    daily_stop_r = policy.daily_loss_limit_r if policy.daily_loss_limit_r is not None else "-"
     lines = [
         f"policy {policy.name}  (schema v{policy.version})",
         f"  written    : {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(policy.written_utc))}"
         if policy.written_utc else "  written    : (undated)",
         f"  risk unit  : ${policy.risk_unit_usd:,.0f}  (1R)",
-        f"  daily stop : {policy.daily_loss_limit_r if policy.daily_loss_limit_r is not None else '-'}R"
+        f"  daily stop : {daily_stop_r}R"
         f" / ${policy.daily_loss_limit_usd_effective() or 0:,.0f}",
     ]
     if policy.max_drawdown_r is not None:
