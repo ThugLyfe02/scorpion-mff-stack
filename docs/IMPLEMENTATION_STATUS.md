@@ -69,6 +69,17 @@ Implemented in this change:
 - [x] an applied-event log (`applied_events`): fills are events, not side effects, so the book
       is a pure function of its log - and `scorpion verify` replays it and diffs the result
       against the live state, halting on any divergence
+- [x] the long-running dispatcher (`scorpion service`, `service.py`): one bounded pass per tick
+      (rebuild the book from its log, recover in-flight sends, reconcile, dispatch, settle), a
+      jittered cadence with exponential idle backoff, and the two refusals a loop must honour -
+      a halted desk never dispatches, and an UNKNOWN send blocks new orders until the venue says
+      what happened (`--once` gives cron a single-tick form with the same exit codes)
+- [x] a metrics series (`scorpion series`): one bounded JSONL row per tick carrying dispatch,
+      reconciliation, unknown and halt state, summarised to totals, rates and the live tail -
+      so "did the dispatcher stop dispatching" is a file's answer, not a guess
+- [x] automatic reconciliation on UNKNOWN rows: the loop resolves every UNKNOWN send against
+      the venue lookup on each tick it exists (the tri-state lookup is the only retry
+      authority; it never blind-retries), and clears the block the moment the last one resolves
 
 Still requires environment/operator work:
 
@@ -82,8 +93,6 @@ Still requires environment/operator work:
 - [ ] a concrete venue `Sender` behind `Dispatcher` (protocol is defined; no vendor is wired)
 - [ ] position/cash snapshot feed for reconciliation (the comparison is built, the source is not)
 - [ ] pre-market bars so exit levels and path statistics can be verified rather than assumed
-- [ ] operator surface beyond the CLI: a long-running dispatcher loop with backoff jitter
-- [ ] structured metrics/export for the dispatcher and reconciliation (counts exist, series do not)
 - [x] compaction (`scorpion compact`): snapshot at a sequence with a sha256 digest, re-read
       it, and only then truncate - `keep_tail` preserves a forensic window; the resumed book is
       compared with the pre-compaction book in tests, and `verify_snapshot` re-checks the tail
@@ -93,4 +102,3 @@ Still requires environment/operator work:
 - [x] failure injection: every prefix of the applied log is replayed and compared with the
       state the live pipeline held at that point; a deleted row shows up as a sequence gap and
       a corrupted payload raises instead of being skipped
-- [ ] automatic reconciliation trigger on any UNKNOWN row (the resolver exists; the scheduler does not)

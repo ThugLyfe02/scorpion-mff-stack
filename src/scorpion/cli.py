@@ -407,6 +407,68 @@ def cmd_health(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_service(args: argparse.Namespace) -> int:
+    """Run the dispatcher as a service: one bounded pass per tick, until told to stop."""
+    from .service import Service, ServiceConfig
+    from .snapshot import SnapshotError
+
+    store = Store(args.db)
+    moment = datetime.now(UTC)
+    quotes = _load_quotes(Path(args.quotes), moment) if args.quotes else {}
+    references: dict[str, Decimal] = {}
+    if args.references:
+        references = {
+            key: Decimal(str(value))
+            for key, value in json.loads(
+                Path(args.references).read_text(encoding="utf-8")
+            ).items()
+        }
+    config = ServiceConfig(
+        cadence_seconds=args.cadence,
+        jitter_seconds=args.jitter,
+        idle_backoff_seconds=args.idle_backoff,
+        max_backoff_seconds=args.max_backoff,
+        max_ticks=args.max_ticks,
+        owner=args.owner,
+        live=args.live,
+        series_path=Path(args.series) if args.series else None,
+        series_cap=args.series_cap,
+        reconcile_on_unknown=not args.no_reconcile,
+        recover_after_seconds=args.recover_after,
+        stale_after_seconds=args.stale_after,
+    )
+    service = Service(
+        store,
+        sender=PaperSender(),
+        policy=Policy(live_submission_enabled=args.live),
+        quotes=quotes,
+        references=references,
+        config=config,
+        seed=args.seed,
+    )
+    try:
+        if args.once:
+            report = service.step()
+            print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+            return report.exit_code
+        return service.run()
+    except SnapshotError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, indent=2, sort_keys=True))
+        return 2
+
+
+def cmd_series(args: argparse.Namespace) -> int:
+    """Summarise the metrics series a service writes."""
+    from .service import read_series, render_series, summarize_series
+
+    summary = summarize_series(read_series(Path(args.path), tail=args.tail))
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+    else:
+        print(render_series(summary))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scorpion", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -507,6 +569,32 @@ def main(argv: list[str] | None = None) -> int:
     health = sub.add_parser("health", help="heartbeats, halt flag, pending effects")
     health.add_argument("--db", default="scorpion.db")
     health.set_defaults(func=cmd_health)
+
+    svc = sub.add_parser("service", help="run the dispatcher loop with jittered cadence")
+    svc.add_argument("--db", default="scorpion.db")
+    svc.add_argument("--quotes", default=None, help="JSON map contract_key -> bid/ask")
+    svc.add_argument("--references", default=None, help="JSON map contract_key -> his bid")
+    svc.add_argument("--live", action="store_true", help="allow real submission")
+    svc.add_argument("--owner", default="service")
+    svc.add_argument("--cadence", type=float, default=1.0)
+    svc.add_argument("--jitter", type=float, default=0.25)
+    svc.add_argument("--idle-backoff", type=float, default=2.0)
+    svc.add_argument("--max-backoff", type=float, default=60.0)
+    svc.add_argument("--max-ticks", type=int, default=None)
+    svc.add_argument("--once", action="store_true", help="run one tick and exit")
+    svc.add_argument("--series", default=None, help="path to the metrics series JSONL")
+    svc.add_argument("--series-cap", type=int, default=10000)
+    svc.add_argument("--no-reconcile", action="store_true")
+    svc.add_argument("--recover-after", type=int, default=0)
+    svc.add_argument("--stale-after", type=int, default=1800)
+    svc.add_argument("--seed", type=int, default=None)
+    svc.set_defaults(func=cmd_service)
+
+    srs = sub.add_parser("series", help="summarise a service metrics series")
+    srs.add_argument("--path", required=True)
+    srs.add_argument("--tail", type=int, default=None)
+    srs.add_argument("--json", action="store_true")
+    srs.set_defaults(func=cmd_series)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
