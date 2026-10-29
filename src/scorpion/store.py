@@ -9,7 +9,14 @@ import json
 import pathlib
 import sqlite3
 
-from .accuracy import AssociationEvidence, DecisionEvidence, LabeledDecision, percentile
+from .accuracy import (
+    ACTIONABLE_KINDS,
+    AssociationEvidence,
+    DecisionEvidence,
+    LabeledDecision,
+    percentile,
+)
+from .calibration import CalibrationObservation
 from .domain import Effect, EventKind, RawDiscordMessage, SignalEvent
 from .shadow import ShadowComparison, ShadowPrediction
 
@@ -119,6 +126,27 @@ CREATE TABLE IF NOT EXISTS shadow_predictions (
     UNIQUE(event_id, model_name, model_version)
 );
 
+CREATE TABLE IF NOT EXISTS review_items (
+    review_id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL UNIQUE,
+    message_id TEXT NOT NULL,
+    disposition TEXT NOT NULL,
+    priority_score REAL NOT NULL,
+    tier TEXT NOT NULL,
+    reason_codes_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'OPEN',
+    assignee TEXT NOT NULL DEFAULT '',
+    evidence_json TEXT NOT NULL,
+    created_ts_utc TEXT NOT NULL,
+    updated_ts_utc TEXT NOT NULL,
+    resolved_ts_utc TEXT,
+    resolution TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY(event_id) REFERENCES signal_events(event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_review_items_open
+    ON review_items(status, tier, priority_score DESC);
+CREATE INDEX IF NOT EXISTS idx_review_items_event ON review_items(event_id);
+
 CREATE TABLE IF NOT EXISTS heartbeats (
     component TEXT PRIMARY KEY,
     last_seen_ts_utc TEXT NOT NULL,
@@ -133,6 +161,18 @@ CREATE TABLE IF NOT EXISTS runtime_flags (
 """
 
 
+class SafetyLatchClearError(RuntimeError):
+    """A fail-closed integrity halt requires explicit verified recovery."""
+
+
+_SAFETY_LATCH_PREFIXES = (
+    "replay_integrity_divergence",
+    "durable_integrity_violation",
+    "post_commit_verification_failed:",
+    "raw_recovery_failed:",
+)
+
+
 class Store:
     def __init__(self, path: str | pathlib.Path) -> None:
         self.path = str(path)
@@ -145,6 +185,8 @@ class Store:
         db.row_factory = sqlite3.Row
         try:
             db.execute("PRAGMA busy_timeout=5000")
+            db.execute("PRAGMA foreign_keys=ON")
+            db.execute("PRAGMA synchronous=FULL")
             yield db
         finally:
             db.close()
@@ -229,7 +271,7 @@ class Store:
         with self.connect() as db:
             db.execute(
                 "UPDATE raw_processing SET status='PENDING',updated_ts_utc=?,error=? "
-                "WHERE raw_event_id=?",
+                "WHERE raw_event_id=? AND status!='DONE'",
                 (now, error[:500], raw_event_id),
             )
 
@@ -468,6 +510,72 @@ class Store:
                 ),
             )
 
+    def load_decision_audit(self, event_id: str) -> dict[str, object] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM decision_audit WHERE event_id=?", (event_id,)
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def load_decision_audits(self) -> list[dict[str, object]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM decision_audit ORDER BY created_ts_utc, event_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def calibration_observations(self) -> list[CalibrationObservation]:
+        """Every adjudicated event with the parser evidence that produced it.
+
+        A contract adjudication is a stricter label than a kind adjudication: when the
+        reviewer named a contract, the parse is correct only if it matches both the event kind
+        and the contract key.
+        """
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT a.expected_kind,a.expected_contract_key,s.kind AS predicted_kind,
+                       s.contract_key AS predicted_contract_key,d.parser_rule,
+                       d.parser_confidence
+                FROM adjudications a
+                JOIN signal_events s ON s.event_id=a.event_id
+                JOIN decision_audit d ON d.event_id=a.event_id
+                ORDER BY a.adjudicated_ts_utc, a.event_id
+                """
+            ).fetchall()
+        observations: list[CalibrationObservation] = []
+        for row in rows:
+            expected = EventKind(row["expected_kind"])
+            predicted = EventKind(row["predicted_kind"])
+            expected_contract = row["expected_contract_key"]
+            contract_ok = (
+                expected_contract is None
+                or expected_contract == row["predicted_contract_key"]
+            )
+            observations.append(
+                CalibrationObservation(
+                    rule_id=str(row["parser_rule"]),
+                    stated_confidence=float(row["parser_confidence"]),
+                    correct=expected is predicted and contract_ok,
+                    actionable=predicted in ACTIONABLE_KINDS,
+                )
+            )
+        return observations
+
+    def adjudicated_messages(self) -> list[dict[str, object]]:
+        """Adjudications keyed by Discord message, for candidate-parser comparison."""
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT s.message_id,a.event_id,a.expected_kind,a.expected_contract_key,
+                       a.reviewer,a.adjudicated_ts_utc,a.note
+                FROM adjudications a
+                JOIN signal_events s ON s.event_id=a.event_id
+                ORDER BY a.adjudicated_ts_utc, a.event_id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def heartbeat(self, component: str, **metadata: object) -> None:
         now = datetime.datetime.now(datetime.UTC).isoformat()
         with self.connect() as db:
@@ -482,7 +590,13 @@ class Store:
                 (component, now, json.dumps(metadata, sort_keys=True)),
             )
 
-    def set_halt(self, halted: bool, reason: str) -> None:
+    def set_halt(self, halted: bool, reason: str, *, verified: bool = False) -> None:
+        if not halted and not verified:
+            current_halted, current_reason = self.runtime_halt()
+            if current_halted and current_reason.startswith(_SAFETY_LATCH_PREFIXES):
+                raise SafetyLatchClearError(
+                    f"safety latch requires verified recovery: {current_reason}"
+                )
         now = datetime.datetime.now(datetime.UTC).isoformat()
         value = json.dumps({"halted": halted, "reason": reason}, sort_keys=True)
         with self.connect() as db:
@@ -495,6 +609,14 @@ class Store:
                 """,
                 (value, now),
             )
+
+    def runtime_halt(self) -> tuple[bool, str]:
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM runtime_flags WHERE key='halt'").fetchone()
+        if row is None:
+            return False, ""
+        payload = json.loads(row["value"])
+        return bool(payload.get("halted", False)), str(payload.get("reason", ""))
 
     def health_snapshot(self) -> dict[str, object]:
         with self.connect() as db:
