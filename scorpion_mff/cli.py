@@ -33,6 +33,7 @@ from .broker import (
     RobinhoodAgenticBroker,
     mask,
 )
+from .drift import MIN_SAMPLES
 from .engine import Engine, EngineConfig
 from .fills import FillLog
 from .gateway import GatewayFatalError
@@ -308,6 +309,17 @@ def _parser() -> argparse.ArgumentParser:
     sh.add_argument("--venue-transport", default="", metavar="REASON",
                     help="shadow venue does not answer; the order must stay unknown")
     sh.add_argument("--json", action="store_true", help="machine-readable parity report")
+
+    dr = sub.add_parser(
+        "drift",
+        help="alert-to-fill drift: decision, send, venue answer, cost - and what the "
+             "sample cannot support")
+    dr.add_argument("--fills", type=Path, default=None,
+                    help="fill log (default live/fills.jsonl)")
+    dr.add_argument("--floor", type=int, default=None,
+                    help=f"minimum timed/priced orders before any suggestion "
+                         f"(default {MIN_SAMPLES})")
+    dr.add_argument("--json", action="store_true", help="machine-readable drift report")
     return p
 
 
@@ -1202,6 +1214,39 @@ def _emit_parity(report: ParityReport, args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def cmd_drift(args: argparse.Namespace) -> int:
+    """`drift`: the measured post -> decision -> send -> answer -> price distribution.
+
+    Exits 0 whenever the log could be read, even when it is empty: having no orders on
+    record is a fact about the desk, not an error in the command. The refusal to
+    *suggest* a threshold is printed as a result (`REFUSED - n < floor`), which is what
+    the `docs/GEMS.md` latency gate has always asked for.
+    """
+    from . import drift as drift_mod
+
+    path = args.fills or FILL_LOG
+    try:
+        rows = FillLog().replay_file(path) if Path(path).exists() else []
+    except (OSError, ValueError) as exc:
+        print(f"cannot read {path}: {exc}", file=sys.stderr)
+        return 2
+    try:
+        floor = drift_mod.MIN_SAMPLES if args.floor is None else int(args.floor)
+        result = drift_mod.report(rows, floor=floor)
+    except ValueError as exc:
+        print(f"invalid drift request: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        payload = result.to_dict()
+        payload["source"] = str(path)
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(result.to_text())
+        if not rows:
+            print(f"  (looked in {path})")
+    return 0
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
     from . import watch as watch_mod
 
@@ -1829,6 +1874,7 @@ def main(argv: list[str] | None = None) -> int:
         "book": cmd_book,
         "expiry": cmd_expiry,
         "shadow": cmd_shadow,
+        "drift": cmd_drift,
     }
     return handlers[args.cmd](args)
 

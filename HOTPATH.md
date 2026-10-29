@@ -158,6 +158,8 @@ python -m venv .venv
 .venv/Scripts/python -m scorpion_mff.cli shadow tapes/sep8.json  # same tape through the
                                                       #   decision wiring and the live
                                                       #   wiring; exit 1 on a divergence
+.venv/Scripts/python -m scorpion_mff.cli drift        # decision -> send -> answer -> price
+                                                      #   per order; REFUSED under 20
 .venv/Scripts/python -m scorpion_mff.cli expiry audit # 40/93 same-day, 65/93 no close,
                                                       #   0/40 force-close, assignment REFUSED
 .venv/Scripts/python -m scorpion_mff.cli recover      # resolve crash-left intents from a
@@ -197,10 +199,12 @@ the HTTP order shape (against a real local server: idempotency key, retry ladder
 PR#1 ports, the ET calendar, the 0DTE cutoff matrix, the one-probe breaker, the tri-state
 ledger, and `recover` are also proven offline. Since the confirmed-execution book, the
 cumulative ack, the split fill, the oversell clamp, the restart replay and the
-`sync_engine` drawdown restore are proven offline too - 768 tests, `docs/GEMS.md` is the
+`sync_engine` drawdown restore are proven offline too - 787 tests, `docs/GEMS.md` is the
 one-command index. Most recently, shadow-live parity (`parity.py`, G21) proves the live
 wiring does not change a decision: the sep8 tape produces byte-identical intents, rows and
-book state through the plain decision path and through the full confirmed-execution ladder.
+book state through the plain decision path and through the full confirmed-execution ladder;
+and alert-to-fill drift (`drift.py`, G22) measures each hop of a real order and refuses to
+suggest a latency budget under twenty timed answers.
 
 **Not yet proven — needs your credentials or a decision:**
 
@@ -744,6 +748,50 @@ session can be diffed against the offline replay of the same tape without replay
 session. What parity does **not** cover is deliberate: ticks are events created by time
 and have no tape counterpart (that is `drift`/`expiry` territory), and no real venue answer
 has been priced - the credentialed unknown is unchanged.
+
+## Alert-to-fill drift (`drift.py`)
+
+A latency budget cannot be derived from the fill log this lane had, because the log could
+not separate the two clocks. `_place` stamped the terminal `ack` with the **send** instant,
+so a 40ms venue answer and a 9-second one produced identical rows. The measurement was
+impossible, not merely unbuilt - which is why "no latency-to-edge threshold" stayed a
+closed gate in `docs/GEMS.md` rather than a missing feature.
+
+`_place` now stamps the intent at the send instant and the terminal at the instant the
+venue answered, with the round trip in `latency_ms`; a breaker refusal is stamped at zero
+because it never reached a venue. `drift.py` joins the rows on the idempotency key the
+ledger already uses and reports one journey per order:
+
+```text
+decision  engine buy/sell row      -> how long the ladder took to send
+send      intent row               -> the venue's own round trip
+answer    ack/reject/unknown row   -> the confirmed price, and the cost of it
+```
+
+Two price joins are reported: `fill - limit` (what we paid away from our own order, positive
+is adverse on both sides) and `fill - his_bid` (what we paid over the number the post
+showed), plus the pricing rule itself as `limit - his_bid` in bps. The distribution is
+p50/p90/p99/max with the sample count attached to every line.
+
+The refusals are the point:
+
+| Situation | Report |
+|---|---|
+| fewer than 20 timed answers | `REFUSED - n < floor 20`; no budget suggested |
+| fewer than 20 priced+timed orders | `latency -> edge REFUSED`; no correlation quoted |
+| an intent with no terminal | `unresolved`, with its key - never counted as fast |
+| a breaker refusal | `breaker`, round trip **none** - it never reached a venue |
+| an intent with no decision row | `no_decision` - the start is unknown, not zero |
+
+Above the floor the budget is the observed p99 rounded up to 250ms (a ceiling from the
+latency distribution, not an edge claim), and `latency_to_edge` reports the median paid-bps
+on each side of the median delay plus a Spearman rank correlation labelled *descriptive
+only; this is not a causal slope*. With no live fill yet, the report is empty and says so.
+
+```bash
+python -m scorpion_mff.cli drift            # the distribution, or the refusal
+python -m scorpion_mff.cli drift --json     # machine-readable; `withheld` names every gap
+```
 
 ## Adversarial hardening (`fuzz`)
 

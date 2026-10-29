@@ -27,6 +27,7 @@ Layering, all stdlib:
     execution_book - confirmed execution state: cumulative acks, partials, restart replay
     venue     - the venue positions feed: a stamped snapshot, refused when it is not evidence
     parity    - shadow-live parity: one tape, two wirings, the same decisions or a named divergence
+    drift     - alert-to-fill drift: decision -> send -> venue answer -> price, per order
 
 Everything except the live Gateway transport and the RH HTTP call is pure and
 unit-tested offline. `listener.WebsocketGateway` needs the optional `websockets`

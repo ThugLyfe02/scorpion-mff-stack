@@ -164,6 +164,16 @@ python -m scorpion_mff.cli marks --check      # withholds an unpriceable total
   **Built** (`tca.FillReport.suggested_ask_multiple` returns None under the floor), waiting
   on the first real ack.
 
+The clock now has a measurement of its own: `scorpion_mff/drift.py` (G22) joins every order
+as decision -> send -> venue answer -> price on the idempotency key and reports each hop's
+distribution. `Listener._place` stamps the terminal at the **answer** instant, with the
+round trip in `latency_ms`; before this pass the ack reused the send timestamp, so the
+measurement was impossible rather than unbuilt. Every suggestion is withheld under 20 timed
+answers (`python -m scorpion_mff.cli drift` prints `REFUSED - n < floor 20`), and above it
+the budget is a p99-derived ceiling plus a *descriptive-only* latency-to-edge view. That
+moves the "no latency-to-edge threshold" gate from unmeasured to measured-and-refusing; the
+policy decision still needs a real sample.
+
 If credentials stay blocked, Move 1, Move 2 and the offline half of Move 3 still ship. The
 lane's job is to be ready the day they clear, not to pretend they cleared.
 

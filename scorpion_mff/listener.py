@@ -48,6 +48,16 @@ class GatewayTransport(Protocol):
     def messages(self) -> AsyncIterator[RawMessage]: ...
 
 
+def _elapsed_ms(start: float, end: float) -> int:
+    """Milliseconds between two clock readings, never negative.
+
+    A clock is allowed to be coarse (a test's fixed clock) or to step backwards (an NTP
+    adjustment). A negative latency is not a measurement, and a -3000ms sample would
+    quietly poison the p90 `drift` reports, so it clamps to zero.
+    """
+    return max(0, int(round((end - start) * 1000)))
+
+
 @dataclass
 class TapeTransport:
     """Yields recorded messages. delay_s=0 replays as fast as the CPU allows."""
@@ -173,56 +183,72 @@ class Listener:
         idempotency key travels in the note, so the ledger can match the intent
         to its terminal even after the process died and came back.
 
+        The intent and terminal rows are stamped at DIFFERENT instants. The intent row
+        carries the send instant; the terminal row carries the instant the venue
+        answered and the round trip in `latency_ms`. That distinction is the whole input
+        of `drift.py`: a fill log that stamps an ack with the moment the order was sent
+        cannot answer how long the venue took, which is the one number a latency-to-edge
+        threshold would have to be built on. It also keeps the two failures legible in
+        the log - a 400ms answer and a 9s answer are different incidents.
+
         The circuit breaker gates BUYS only: while it is open, a new entry is
         refused before it reaches the venue, but an exit is always attempted -
         the kill-switch invariant (you must be able to leave a position you are
         in) survives a transport outage.
         """
         key = intent_key(intent)
-        now = self.clock()
+        sent = self.clock()
         if self.fills is not None:
             self.fills.record(
                 event="intent", contract_key=intent.contract_key, qty=intent.qty,
                 price=intent.limit, reason=intent.reason, accepted=True,
-                ts=now, note=key)
-        if intent.action == "buy" and not self.breaker.allow(now):
+                ts=sent, note=key)
+        if intent.action == "buy" and not self.breaker.allow(sent):
             if self.fills is not None:
+                # A breaker refusal never reaches a venue, so its round trip is zero
+                # by definition: stamping it with `self.clock()` would report a hop
+                # that did not happen and pollute the latency distribution.
                 self.fills.record(
                     event="reject", contract_key=intent.contract_key, qty=intent.qty,
                     price=intent.limit, reason="breaker_open", accepted=False,
-                    ts=now, note=key)
+                    ts=sent, latency_ms=0, note=key)
             return
         # The confirmed book records what was SENT, not what was considered: the
         # breaker refusal above never reaches a venue, so it has no place in a book
         # of confirmed execution. From here on, every outcome is folded in.
-        booked = self._book_intent(intent, key, now)
+        booked = self._book_intent(intent, key, sent)
         try:
             ack = self.broker.place(intent)
         except TransportError as exc:
-            self._on_transport_failure(intent, key, now, exc, booked)
+            answered = self.clock()
+            self._on_transport_failure(intent, key, answered, exc, booked,
+                                       sent=sent)
             return
         except BrokerError as exc:
             # A business reject is the venue answering: transport is working, so
             # it breaks the streak of consecutive transport failures rather than
             # tripping the breaker.
+            answered = self.clock()
             self.breaker.record_success()
             if self.fills is not None:
                 self.fills.record(
                     event="reject", contract_key=intent.contract_key, qty=intent.qty,
                     price=intent.limit, reason=f"broker:{exc}", accepted=False,
-                    ts=now, note=key)
-            self._book_reject(intent, booked, f"broker:{exc}", now)
+                    ts=answered, latency_ms=_elapsed_ms(sent, answered), note=key)
+            self._book_reject(intent, booked, f"broker:{exc}", answered)
             return
+        answered = self.clock()
         self.breaker.record_success()
         if self.fills is not None:
             self.fills.record(
                 event="ack", contract_key=ack.contract_key, qty=ack.qty,
-                price=ack.price, reason=intent.reason, ts=now,
-                note=key)
-        self._book_ack(intent, booked, ack, now)
+                price=ack.price, reason=intent.reason, ts=answered,
+                latency_ms=_elapsed_ms(sent, answered), note=key)
+        self._book_ack(intent, booked, ack, answered)
 
     def _on_transport_failure(self, intent: OrderIntent, key: str, now: float,
-                              exc: TransportError, booked: str = "") -> None:
+                              exc: TransportError, booked: str = "",
+                              *, sent: float | None = None) -> None:
         """Quarantine an order the venue may or may not have: never fake a terminal.
 
         A transport error is not a rejection. It means the socket died and the answer
@@ -250,7 +276,8 @@ class Listener:
             self.fills.record(
                 event=TRANSPORT_UNKNOWN, contract_key=intent.contract_key,
                 qty=intent.qty, price=intent.limit, reason=reason, accepted=False,
-                ts=now, note=key)
+                ts=now, note=key,
+                latency_ms=(_elapsed_ms(sent, now) if sent is not None else None))
             if self.breaker.state is BreakerState.OPEN and not was_open:
                 # One alert per open transition: a page, not a per-tick stream.
                 self.fills.record(

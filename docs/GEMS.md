@@ -15,11 +15,11 @@ python -m pytest --version         # if this fails, use .venv/Scripts/python.exe
 
 If the venv is not active, replace `python` with `.venv/Scripts/python.exe` (Windows)
 or `.venv/bin/python` (POSIX). `scripts/gate.sh` resolves the venv itself and is the
-single top-level check: `ruff -> mypy --strict -> pytest`, currently **768 passed**
+single top-level check: `ruff -> mypy --strict -> pytest`, currently **787 passed**
 (513 at the 3.a red-team, plus the three transport-quarantine tests added by final
 integration that close O1, plus the offline Gateway lifecycle suite, plus the
 confirmed-exit join and the operator flatten added by G19/G20, plus the shadow-live
-parity harness added by G21).
+parity harness added by G21 and the alert-to-fill drift measurement added by G22).
 
 ## The one-line index
 
@@ -46,6 +46,7 @@ parity harness added by G21).
 | G19 | a running bot that thinks it exited because the venue has not answered | `python -m pytest tests/test_confirmed_exits.py -q` |
 | G20 | an operator with no way to get flat that does not invent a price or sell twice | `python -m pytest tests/test_flatten.py -q` |
 | G21 | a live wiring that changes the decision it is carrying | `python -m scorpion_mff.cli shadow tapes/sep8.json` |
+| G22 | a latency threshold chosen before the alert-to-fill distribution exists | `python -m scorpion_mff.cli drift` |
 
 Each gem follows the same shape: **what it is**, **the acceptance command**, **the
 invariant**, **the failure mode it buys down**, and the **3.a red-team record** for it.
@@ -725,6 +726,64 @@ venue answer - that is still the credentialed unknown.
 
 ---
 
+## G22. A latency threshold is not chosen before the distribution exists
+
+`scorpion_mff/drift.py` + `python -m scorpion_mff.cli drift`. The stack could say what it
+decided and how long the decision took, but not how long each hop between a Discord post
+and a venue fill actually took, or what that delay cost in price. The fill log could not
+answer it even in principle: `_place` stamped the terminal `ack` with the **send** instant,
+so a 40ms answer and a 9-second one produced the same row. The measurement was impossible,
+not merely unbuilt.
+
+**Acceptance (one command):** `python -m scorpion_mff.cli drift` -> exit 0, with (on the
+empty desk):
+
+```
+drift  orders=0  priced=0  timed=0  unanswered=0  floor=20
+decision -> send    (no samples)
+send -> answer      (no samples)
+decision -> answer  (no samples)
+cost vs limit       (no samples)
+posted bid -> limit (no samples)
+paid vs posted bid  (no samples)
+latency budget     REFUSED - 0 timed answer(s) < floor 20
+latency -> edge    REFUSED - 0 priced+timed order(s) < floor 20
+```
+
+**Invariant:** every order is joined on the idempotency key the intent and its terminal
+already share, and carries four instants: the engine's `buy`/`sell` row (decision), the
+`intent` row (send), the terminal at the instant the venue answered, and the confirmed
+price. `decision -> send` is the ladder's own cost; `send -> answer` is the venue's;
+`decision -> answer` is the number a ceiling applies to. Two price joins are reported:
+`fill - limit` (what we paid away from our own order, positive is adverse on both sides)
+and `fill - his_bid` (what we paid over the number the post showed), plus the pricing
+rule itself as `limit - his_bid` in bps. An intent with no terminal is `unresolved`, not
+fast; a breaker refusal is `breaker` with **no** round trip because it never reached a
+venue; a `recovered`/`not_sent` row is a settlement and contributes no price; an intent
+with no decision row is named, not given a zero start.
+
+**The refusal is the floor.** Under `MIN_SAMPLES = 20` timed answers, the report prints the
+observed distribution and withholds `suggest_latency_budget_ms()` and `latency_to_edge()`,
+naming the floor and the count. Above it, the budget is the observed p99 rounded up to
+250ms (a **ceiling** derived from the latency distribution), and `latency_to_edge` reports
+the median paid-bps on each side of the median delay plus a Spearman rank correlation -
+labelled *descriptive only; this is not a causal slope*, because at this size a fit would
+be arithmetic with a confidence interval doing no work. A rank correlation is `None`, not
+zero, when either side never varies: that is no information, not no effect.
+
+**Failure mode it buys down:** a latency budget picked by feel ("sub-second is fast") and
+then quoted as if it were derived from the record; or an edge claim made by correlating
+delay and price across two different populations (all fills with all latencies) instead of
+orders that have both. The other half is the seam itself: a log that cannot separate a
+slow venue from a slow decision cannot tell you which one to fix.
+
+**What is not built:** a real venue sample. `drift` is empty until the first credentialed
+fill, and it refuses to suggest anything until there are twenty. No fitted latency-to-edge
+model, no per-channel threshold, no alert on a latency regression - each needs a live
+sample first, and the report is the trigger for that conversation, not a substitute.
+
+---
+
 ## What we deliberately do not build
 
 These are not backlog items with an ETA. They are gates that would have to open before the
@@ -734,7 +793,7 @@ component would be honest, and until then the refusal is the feature.
 |---|---|---|
 | **No third parser** | Two parsers for one Discord vocabulary is two sources of truth. The live lane has exactly one deterministic parser and one engine; PR#1's control plane is never imported. A new shape is a change to `parser.py` plus fixtures, not a parallel grammar. | `scorpion_mff/parser.py` + `tests/test_parser.py`, `tests/test_contract_anchor.py`, and the `fuzz` corpus. |
 | **No conformal sizing on 93 trades** | 93 alerts over 59 sessions, 40 same-day, only 30 with a recorded exit time, clustered by day and ticker. Exchangeability is not credible at that size, so a conformal interval would be numerically valid and semantically empty. A coverage claim needs a live sample across regimes, a pre-registered nonconformity score, and a held-out period. | Expectancy with confidence intervals and shrinkage (`desk`), whose uncertainty is disclosed in `POLICY.md`; no per-trade coverage guarantee is claimed. |
-| **No latency-to-edge threshold without measured alert-to-fill drift** | Latency is measured (`replay ... worst 0ms, budget 10000ms, breaches 0`), but there is no measured **alert-to-fill drift** linking a delay to a worse price or a missed edge. Choosing a threshold before that measurement is choosing a number, not a policy. The gate is paired `MESSAGE_CREATE -> intent -> ack -> fill` timestamps and realised edge per event; the threshold must be derived from that distribution. | `LatencyBudget`, per-event latency rows, and the fill log. The budget is a ceiling, not an edge claim. |
+| **No latency-to-edge threshold below twenty priced pairs** | The measurement now exists (`drift.py`): decision -> send -> venue answer -> price, joined per order on the idempotency key, with the answer stamped at the instant it arrived. A threshold is still a **policy**, and under 20 priced+timed orders the report withholds it by name. Above the floor it reports the observed distribution and a rank correlation, explicitly *descriptive*, never a fitted slope: at that sample size a slope would be arithmetic with a confidence interval doing no work. | `python -m scorpion_mff.cli drift` prints the distribution and `REFUSED - n < floor 20`; `suggest_latency_budget_ms` is a p99 ceiling derived from the latency distribution (a budget), not an edge claim; `latency_to_edge` is the descriptive view and returns `None` under the floor. |
 | **No LLM in the path** | The live path is parser -> engine -> pricing -> broker. An LLM turn is unbounded and nondeterministic, and 9/8 is the proof that a queue between a post and an order is the failure. The LLM stays in the gapper desk, ops, and digest; it never sits between a post and an exit. | Deterministic code, `fuzz` determinism, replay parity, and the `NO_TRADE` kill switch. |
 
 ### Known unported surfaces (from 3.a) — not silent omissions
@@ -835,10 +894,11 @@ place. The corpus backtest and the 9/8 replay are unchanged (they have no transp
 The short version, in the order that fails fastest:
 
 ```bash
-./scripts/gate.sh                                            # ruff -> mypy -> pytest, 768
+./scripts/gate.sh                                            # ruff -> mypy -> pytest, 787
 python -m scorpion_mff.cli backtest                          # 93/91/405/$57,951.00
 python -m scorpion_mff.cli replay tapes/sep8.json            # 4/2/6/$211.00, 0 breaches
 python -m scorpion_mff.cli shadow tapes/sep8.json            # 4 events, PARITY, identical digest
+python -m scorpion_mff.cli drift                             # the distribution, or REFUSED
 python -m scorpion_mff.cli expiry audit                      # 40/93, 65/93, 0/40, 10/40, REFUSED
 python -m scorpion_mff.cli fuzz --iterations 5000 --seed 7   # CLEAN
 python -m scorpion_mff.cli doctor                            # spread gate OFF, broker DRY
@@ -861,6 +921,7 @@ python -m pytest tests/test_venue_feed.py -q                               # 47
 python -m pytest tests/test_confirmed_exits.py -q                          # 14
 python -m pytest tests/test_flatten.py -q                                  # 14
 python -m pytest tests/test_parity.py -q                                   # 32
+python -m pytest tests/test_drift.py -q                                    # 19
 ```
 
 A failure in any of these is a gem failing, not a flaky test: every command is offline,
