@@ -15,10 +15,11 @@ python -m pytest --version         # if this fails, use .venv/Scripts/python.exe
 
 If the venv is not active, replace `python` with `.venv/Scripts/python.exe` (Windows)
 or `.venv/bin/python` (POSIX). `scripts/gate.sh` resolves the venv itself and is the
-single top-level check: `ruff -> mypy --strict -> pytest`, currently **736 passed**
+single top-level check: `ruff -> mypy --strict -> pytest`, currently **768 passed**
 (513 at the 3.a red-team, plus the three transport-quarantine tests added by final
 integration that close O1, plus the offline Gateway lifecycle suite, plus the
-confirmed-exit join and the operator flatten added by G19/G20).
+confirmed-exit join and the operator flatten added by G19/G20, plus the shadow-live
+parity harness added by G21).
 
 ## The one-line index
 
@@ -44,6 +45,7 @@ confirmed-exit join and the operator flatten added by G19/G20).
 | G18 | a venue book that is stale, undatable, or not a book at all | `python -m pytest tests/test_venue_feed.py -q` |
 | G19 | a running bot that thinks it exited because the venue has not answered | `python -m pytest tests/test_confirmed_exits.py -q` |
 | G20 | an operator with no way to get flat that does not invent a price or sell twice | `python -m pytest tests/test_flatten.py -q` |
+| G21 | a live wiring that changes the decision it is carrying | `python -m scorpion_mff.cli shadow tapes/sep8.json` |
 
 Each gem follows the same shape: **what it is**, **the acceptance command**, **the
 invariant**, **the failure mode it buys down**, and the **3.a red-team record** for it.
@@ -670,6 +672,59 @@ decisions.
 
 ---
 
+## G21. The live wiring must not change the decision it is carrying
+
+`scorpion_mff/parity.py` + `python -m scorpion_mff.cli shadow`. `replay` proves what the
+executor *decides*; nothing proved that the machinery bolted on **after** the decision -
+the confirmed-execution book, the in-flight exit guard, the realised-P&L alignment, the
+breaker, the scheduled reconcile - leaves that decision alone. A hit-rate test cannot see
+the difference: two wirings can realise the same dollars by trading different contracts.
+
+**Acceptance (one command):** `python -m scorpion_mff.cli shadow tapes/sep8.json`
+-> exit 0, with:
+
+```
+parity  reference=replay  candidate=shadow  events=4  matched=4  PARITY
+  replay  events   4  buys   2  sells   2  skips   0  rejects   0  digest 55f9ac1a4b377e53
+  shadow  events   4  buys   2  sells   2  skips   0  rejects   0  digest 55f9ac1a4b377e53
+  venue   fill@limit
+```
+
+**Invariant:** one tape, two wirings, one scripted clock. The **reference** runs parser ->
+engine -> `PaperBroker`; the **candidate** is the live ladder, where every send goes through
+`ShadowBroker` (a venue *model* with no URL, token, transport or retry) and every answer is
+folded into an `ExecutionBook`. After every message the harness compares, in order: the
+intents (action, quantity, limit, contract, reason, idempotency key), every decision row
+those intents produced (`buy`, `sell`, `intent`, `ack`, `skip`, `reject`,
+`transport_unknown`) with its reason and accepted flag, and the engine's book
+(positions, realised P&L, trades today, closed contracts, halt flag, in-flight exit set).
+A trace is `TRACE_SCHEMA = 1` JSON, so `shadow --trace-dir DIR` writes `replay.json` and
+`shadow.json` and `shadow --diff A B` compares two *recorded* traces without the tape.
+`arm --trace live/shadow.json` records a real session through the same `handle` hook, which
+is what makes last Tuesday diffable against today's replay.
+
+**The harness is proven to fail.** `--venue-fill 0.5` produces a divergence at the event
+that bought, caused by `venue answer differs (cumulative ack quantity or price)` and a
+second one naming the in-flight exit set; `--venue-reject` changes the *next* exit from a
+sell to `close_without_position`, caused by `shadow venue refused the order`;
+`--venue-transport` leaves the sold contract in `inflight[...]` and names the transport
+model. `--venue-fill 2.0`, a dual reject/transport policy, an empty tape, a missing tape and
+a trace from another schema are all exit 2: parity over no evidence is not a pass.
+
+**Failure mode it buys down:** a safety feature that silently becomes a strategy change.
+The confirmed book is allowed to *change the book* - that is its job - but it must not
+change a parsed post's decision without the change being the explicit consequence of a
+venue answer. Without this harness, the first evidence of that would be a P&L difference
+weeks later with no event to point at, which is exactly the class of failure this lane
+exists to remove.
+
+**What is not built:** parity is over *events only*. Ticks are events created by time, not
+by a post, so they have no tape counterpart; measuring the clock is `drift`'s job (the
+next gem) and the cutoff stays `expiry.py`'s. Parity also says nothing about pricing a real
+venue answer - that is still the credentialed unknown.
+
+---
+
 ## What we deliberately do not build
 
 These are not backlog items with an ETA. They are gates that would have to open before the
@@ -780,9 +835,10 @@ place. The corpus backtest and the 9/8 replay are unchanged (they have no transp
 The short version, in the order that fails fastest:
 
 ```bash
-./scripts/gate.sh                                            # ruff -> mypy -> pytest, 736
+./scripts/gate.sh                                            # ruff -> mypy -> pytest, 768
 python -m scorpion_mff.cli backtest                          # 93/91/405/$57,951.00
 python -m scorpion_mff.cli replay tapes/sep8.json            # 4/2/6/$211.00, 0 breaches
+python -m scorpion_mff.cli shadow tapes/sep8.json            # 4 events, PARITY, identical digest
 python -m scorpion_mff.cli expiry audit                      # 40/93, 65/93, 0/40, 10/40, REFUSED
 python -m scorpion_mff.cli fuzz --iterations 5000 --seed 7   # CLEAN
 python -m scorpion_mff.cli doctor                            # spread gate OFF, broker DRY
@@ -804,6 +860,7 @@ python -m pytest tests/test_execution_book.py -q                            # 66
 python -m pytest tests/test_venue_feed.py -q                               # 47
 python -m pytest tests/test_confirmed_exits.py -q                          # 14
 python -m pytest tests/test_flatten.py -q                                  # 14
+python -m pytest tests/test_parity.py -q                                   # 32
 ```
 
 A failure in any of these is a gem failing, not a flaky test: every command is offline,

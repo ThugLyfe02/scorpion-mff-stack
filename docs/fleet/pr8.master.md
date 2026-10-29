@@ -131,20 +131,41 @@ python -m scorpion_mff.cli reconcile --snapshot tests/fixtures/venue-positions.j
 Run the *same* listener/engine code over a recorded live session and prove decision
 parity with the offline replay, then take one credentialed round trip.
 
+**Status: the offline half is BUILT** (`scorpion_mff/parity.py`, G21, 32 tests). One tape
+runs through two wirings over one scripted clock - the decision path (parser -> engine ->
+`PaperBroker`) and the live ladder (same events -> `ShadowBroker`, a venue *model* with no
+URL, token, transport or retry -> `ExecutionBook`). After every message the harness compares
+the intents (with reasons and idempotency keys), every decision row, and the engine's book
+(positions, realised P&L, trades, closed set, halt, in-flight exits). The sep8 tape is
+byte-identical across both: `PARITY`, one digest. `--venue-fill`, `--venue-reject` and
+`--venue-transport` force the states a live venue produces, and the harness names each
+divergence with its cause - it is proven to fail, not merely reported green.
+`shadow --trace-dir DIR` emits a reviewer-runnable trace manifest, `shadow --diff A B`
+compares two recorded traces, and `arm --trace` records a real session through the same
+`handle` hook, so a live Tuesday can be diffed against today's replay without the tape.
+What remains is exactly the credential-shaped part: no real ack has been priced, so the
+venue's field names and the `tca fills` calibration are still unconfirmed.
+
 Acceptance:
 
 ```bash
+python -m scorpion_mff.cli shadow tapes/sep8.json   # PARITY, exit 0; exit 1 names the event
 python -m scorpion_mff.cli replay tapes/<session>.json
 python -m scorpion_mff.cli tca fills          # refuses under 10 priced fills
 python -m scorpion_mff.cli marks --check      # withholds an unpriceable total
 ```
 
 - Shadow and replay produce identical intents per event, in order, with the same reasons.
+  **Built**: `compare_modes` is the assertion, the trace digest is the artefact, and the
+  three forced venue models are the proof that it can fail.
 - One real ack is captured with tokens stripped; the credential never appears in an error string.
+  **Open** - credentialed.
 - `ask_multiple` changes only on `tca fills` evidence; before ten priced fills it refuses.
+  **Built** (`tca.FillReport.suggested_ask_multiple` returns None under the floor), waiting
+  on the first real ack.
 
-If credentials stay blocked, Move 1 and Move 2 still ship. The lane's job is to be
-ready the day they clear, not to pretend they cleared.
+If credentials stay blocked, Move 1, Move 2 and the offline half of Move 3 still ship. The
+lane's job is to be ready the day they clear, not to pretend they cleared.
 
 ---
 

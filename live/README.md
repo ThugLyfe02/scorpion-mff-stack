@@ -14,5 +14,6 @@ This folder is for **shared, drift-resistant** state your coding collaborator an
 | `execution.jsonl` | **Machine state, never committed.** The confirmed-execution event log (`scorpion_mff/execution_book.py`): intent, ack, fill, reject, unknown, expire, baseline. Replayed by `book show / replay / verify / sync` |
 | `venue-snapshot.json` | **Machine state, never committed.** The venue's positions, written by the adapter and read by the scheduled reconcile (`arm --venue-snapshot`, or `MFF_VENUE_URL` for the HTTP feed). An undatable or stale file is refused, never treated as a flat book |
 | `executions.jsonl` | **Machine state, never committed.** One `tca.Execution` per filled order, written by `book export`; the input to `tca fills` |
+| `traces/` | **Evidence, optionally committed.** `parity.Trace` JSON: one decision per message, written by `shadow --trace-dir DIR` or `arm --trace`. `shadow --diff A B` compares two recorded traces without the tape, which is what makes a live session reviewable after the fact |
 
 Bot/agent should write here; humans review in PRs.

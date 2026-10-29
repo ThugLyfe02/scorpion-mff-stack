@@ -155,6 +155,9 @@ python -m venv .venv
 .venv/Scripts/python -m scorpion_mff.cli doctor       # rules, switches, broker mode,
                                                       #   spread-gate setting (OFF unless armed)
 .venv/Scripts/python -m scorpion_mff.cli replay tapes/sep8.json
+.venv/Scripts/python -m scorpion_mff.cli shadow tapes/sep8.json  # same tape through the
+                                                      #   decision wiring and the live
+                                                      #   wiring; exit 1 on a divergence
 .venv/Scripts/python -m scorpion_mff.cli expiry audit # 40/93 same-day, 65/93 no close,
                                                       #   0/40 force-close, assignment REFUSED
 .venv/Scripts/python -m scorpion_mff.cli recover      # resolve crash-left intents from a
@@ -194,8 +197,10 @@ the HTTP order shape (against a real local server: idempotency key, retry ladder
 PR#1 ports, the ET calendar, the 0DTE cutoff matrix, the one-probe breaker, the tri-state
 ledger, and `recover` are also proven offline. Since the confirmed-execution book, the
 cumulative ack, the split fill, the oversell clamp, the restart replay and the
-`sync_engine` drawdown restore are proven offline too - 708 tests, `docs/GEMS.md` is the
-one-command index.
+`sync_engine` drawdown restore are proven offline too - 768 tests, `docs/GEMS.md` is the
+one-command index. Most recently, shadow-live parity (`parity.py`, G21) proves the live
+wiring does not change a decision: the sep8 tape produces byte-identical intents, rows and
+book state through the plain decision path and through the full confirmed-execution ladder.
 
 **Not yet proven — needs your credentials or a decision:**
 
@@ -695,6 +700,50 @@ python -m scorpion_mff.cli arm --venue-snapshot live/venue-snapshot.json --venue
 47 tests (`tests/test_venue_feed.py`) cover the taxonomy, the cadence, the de-duplicated
 page, the no-halt-on-a-dead-feed rule, the confirmed-book comparison, and the HTTP adapter
 against a real local server.
+
+## Shadow-live parity (`parity.py`)
+
+`replay` answers "what would the executor decide?". It does not answer "does the live
+machinery still agree with that decision?", and a hit-rate comparison cannot: two wirings
+can realise the same dollars on different contracts. After G17-G20 the live path grew a
+confirmed-execution book, an in-flight exit guard, realised-P&L alignment, a breaker and a
+scheduled reconcile - five places where a decision can move without a test noticing.
+
+So the same tape runs through two wirings over one scripted clock:
+
+```text
+reference   messages -> parser -> engine -> PaperBroker                    (the decision)
+candidate   messages -> parser -> engine -> ShadowBroker -> ExecutionBook  (the live ladder)
+```
+
+`ShadowBroker` is a venue **model**: no URL, no token, no transport, no retry. It answers
+`place()` so the ladder downstream of the decision runs for real. A policy can make it
+fill at the limit (the default, identical to `PaperBroker`), fill a fraction (a partial),
+refuse (`reject`) or go silent (`transport`), which is how the harness is proven to catch
+the states a live venue will eventually produce.
+
+After every message the trace records the intents (action, quantity, limit, contract,
+reason, idempotency key), every decision row with its reason, and the engine's book:
+positions, realised P&L, trades today, closed contracts, the halt flag and the in-flight
+exit set. `compare()` walks those in a fixed order and reports every divergence - not the
+first - with the most likely cause drawn from the rows themselves. A cause with no row
+behind it is printed as `unexplained`, which is the honest answer, not a story.
+
+```bash
+python -m scorpion_mff.cli shadow tapes/sep8.json                     # PARITY, exit 0
+python -m scorpion_mff.cli shadow tapes/sep8.json --venue-reject nope # exit 1, named cause
+python -m scorpion_mff.cli shadow tapes/sep8.json --trace-dir traces  # replays a reviewer can
+                                                                      #   diff later
+python -m scorpion_mff.cli shadow --diff traces/replay.json traces/shadow.json
+python -m scorpion_mff.cli arm --trace live/shadow.json               # record a real session
+```
+
+The trace is `TRACE_SCHEMA = 1` JSON with a content digest, written atomically. `arm
+--trace` attaches the recorder to the same `handle` the trade path already runs, so a live
+session can be diffed against the offline replay of the same tape without replaying the
+session. What parity does **not** cover is deliberate: ticks are events created by time
+and have no tape counterpart (that is `drift`/`expiry` territory), and no real venue answer
+has been priced - the credentialed unknown is unchanged.
 
 ## Adversarial hardening (`fuzz`)
 

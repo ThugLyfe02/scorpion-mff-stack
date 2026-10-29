@@ -23,6 +23,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .broker import (
     HttpQuoteProvider,
@@ -42,6 +43,9 @@ from .listener import Listener, TapeTransport, WebsocketGateway
 from .parser import CHANNEL_IDS, EXCLUDED_CHANNEL_IDS, EXCLUDED_TICKERS
 from .replay import load_quotes, load_tape, replay
 from .types import Fill, RawMessage
+
+if TYPE_CHECKING:                       # `parity` imports the listener; keep it out of
+    from .parity import ParityReport  # the module import graph at runtime
 
 ROOT = Path(__file__).resolve().parent.parent
 FILL_LOG = ROOT / "live" / "fills.jsonl"
@@ -102,6 +106,9 @@ def _parser() -> argparse.ArgumentParser:
                      help="scheduled reconcile cadence (default 300s)")
     arm.add_argument("--venue-max-age", type=float, default=120.0, metavar="SECONDS",
                      help="refuse a venue snapshot older than this (default 120s)")
+    arm.add_argument("--trace", type=Path, default=None,
+                     help="record one decision trace per event (JSON) so the live session "
+                          "can be diffed against the offline replay with `shadow --diff`")
 
     sub.add_parser("status", help="kill-switch state + tail of the fill log")
 
@@ -282,6 +289,25 @@ def _parser() -> argparse.ArgumentParser:
     xa.add_argument("--cutoff-minutes", type=int, default=15,
                     help="flatten window before the close (default 15 -> 15:45 ET)")
     xa.add_argument("--json", action="store_true", help="machine-readable audit")
+
+    sh = sub.add_parser(
+        "shadow",
+        help="run one tape through the decision wiring and the live wiring, then compare")
+    sh.add_argument("tape", type=Path, nargs="?", default=None,
+                    help="recorded tape (messages + quotes), e.g. tapes/sep8.json")
+    sh.add_argument("--diff", nargs=2, metavar=("REFERENCE", "CANDIDATE"), default=None,
+                    help="compare two recorded traces instead of running a tape")
+    sh.add_argument("--trace-dir", type=Path, default=None,
+                    help="write replay.json and shadow.json here (a manifest a reviewer runs)")
+    sh.add_argument("--no-pipe-test", action="store_true",
+                    help="size the first trade at full clip on both wirings")
+    sh.add_argument("--venue-fill", type=float, default=1.0, metavar="FRACTION",
+                    help="shadow venue fill fraction (default 1.0; <1 models a partial)")
+    sh.add_argument("--venue-reject", default="", metavar="REASON",
+                    help="shadow venue refuses every order with this reason")
+    sh.add_argument("--venue-transport", default="", metavar="REASON",
+                    help="shadow venue does not answer; the order must stay unknown")
+    sh.add_argument("--json", action="store_true", help="machine-readable parity report")
     return p
 
 
@@ -539,6 +565,13 @@ def cmd_arm(args: argparse.Namespace) -> int:
         venue_feed=venue_feed,
         venue_every_s=float(args.venue_every),
     )
+    if args.trace is not None:
+        # A live session's decisions become an artefact. The recorder is attached to the
+        # same `handle` the trade path runs, so the trace cannot describe a different code
+        # path than the one that decided - and `shadow --diff` can compare last Tuesday's
+        # session with today's replay without replaying the session itself.
+        from .parity import Trace as TraceMod
+        listener.trace = TraceMod(mode="live", tape="gateway")
 
     def record_gateway_alert(reason: str, note: str) -> None:
         # A reconnect is routine; a gap, zombie or fatal close is a decision-level
@@ -591,6 +624,10 @@ def cmd_arm(args: argparse.Namespace) -> int:
         return 1
     except KeyboardInterrupt:
         print("interrupted")
+    finally:
+        if listener.trace is not None and args.trace is not None:
+            saved = listener.trace.save(args.trace)
+            print(f"trace  | {len(listener.trace.events)} event(s) -> {saved}")
     return 0
 
 
@@ -1097,6 +1134,72 @@ def cmd_expiry(args: argparse.Namespace) -> int:
     unclosed = audit["no_explicit_close"]
     assert isinstance(unclosed, dict)
     return 0 if unclosed["consistent_with_floor"] else 1
+
+
+def cmd_shadow(args: argparse.Namespace) -> int:
+    """`shadow`: the same tape through the decision wiring and the live wiring.
+
+    Exit 0 means every event produced the same intents, the same decision rows with the
+    same reasons and keys, and the same book state. Exit 1 names the first difference and
+    its likely cause. Exit 2 means there was nothing trustworthy to compare - an empty
+    tape, a malformed trace, an invalid venue model - because a parity run over no
+    evidence is not a pass, it is a green light with the bulb removed.
+    """
+    from . import parity as parity_mod
+
+    if args.diff is not None:
+        try:
+            reference = parity_mod.Trace.load(args.diff[0])
+            candidate = parity_mod.Trace.load(args.diff[1])
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        return _emit_parity(parity_mod.compare(reference, candidate), args)
+
+    if args.tape is None:
+        print("shadow needs a tape, or --diff REFERENCE CANDIDATE", file=sys.stderr)
+        return 2
+    try:
+        tape = load_tape(args.tape)
+        quotes = load_quotes(args.tape)
+        venue = parity_mod.VenuePolicy(
+            fill_fraction=float(args.venue_fill),
+            reject=str(args.venue_reject or ""),
+            transport=str(args.venue_transport or ""),
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"cannot shadow {args.tape}: {exc}", file=sys.stderr)
+        return 2
+    if not tape:
+        print(f"{args.tape} has no messages - parity over nothing is not a pass",
+              file=sys.stderr)
+        return 2
+
+    cfg = EngineConfig(pipe_test=not args.no_pipe_test)
+    try:
+        report = parity_mod.compare_modes(
+            tape, quotes, engine_config=cfg, venue=venue, tape_name=str(args.tape))
+    except ValueError as exc:
+        print(f"parity could not run: {exc}", file=sys.stderr)
+        return 2
+
+    if args.trace_dir is not None:
+        # A reviewer can re-run the comparison without the tape, which is the point of a
+        # manifest: the artefact travels, the branch does not.
+        directory = Path(args.trace_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        report.reference.save(directory / "replay.json")
+        report.candidate.save(directory / "shadow.json")
+    return _emit_parity(report, args)
+
+
+def _emit_parity(report: ParityReport, args: argparse.Namespace) -> int:
+    """Print a parity report and translate its verdict into the process exit code."""
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(report.to_text())
+    return 0 if report.ok else 1
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
@@ -1725,6 +1828,7 @@ def main(argv: list[str] | None = None) -> int:
         "reconcile": cmd_reconcile,
         "book": cmd_book,
         "expiry": cmd_expiry,
+        "shadow": cmd_shadow,
     }
     return handlers[args.cmd](args)
 

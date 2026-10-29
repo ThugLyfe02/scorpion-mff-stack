@@ -37,6 +37,7 @@ from .gateway import (
 from .health import Heartbeat, LatencyBudget
 from .killswitch import KillSwitch
 from .ledger import TRANSPORT_UNKNOWN
+from .parity import Trace
 from .parser import CHANNEL_IDS, parse
 from .reconcile import ReconcileReport, VenuePosition
 from .types import OrderIntent, RawMessage
@@ -98,6 +99,11 @@ class Listener:
     # redelivered ack would apply the same correction twice; with it the second ack of
     # a partial applies only the new contracts. Keyed by the book's client id.
     aligned_orders: dict[str, float] = field(default_factory=dict)
+    # An optional decision trace (`parity.py`). When attached, every handled message
+    # contributes one record built from the objects this method already produced, so a
+    # real session can be diffed against the offline replay event by event. Off by
+    # default: tracing is an evidence act, not a side effect of running.
+    trace: Trace | None = None
 
     def __post_init__(self) -> None:
         if self.fills is None:
@@ -150,6 +156,12 @@ class Listener:
                 event="latency", contract_key=signal.contract_key, qty=0, price=0.0,
                 reason=f"decision:{signal.kind.value}", ts=self.clock(),
                 latency_ms=latency_ms)
+        if self.trace is not None and self.fills is not None:
+            # Recorded after the latency row so one event contributes one complete slice
+            # of the log. A trace must never change a decision, so this call reads and
+            # appends nothing to the book: `Trace` is a recorder, not a participant.
+            self.trace.record(message=message, signal=signal, intents=intents,
+                              engine=self.engine, rows=self.fills.records)
         self.processed += 1
         return intents
 
