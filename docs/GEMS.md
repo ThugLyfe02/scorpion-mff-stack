@@ -15,7 +15,7 @@ python -m pytest --version         # if this fails, use .venv/Scripts/python.exe
 
 If the venv is not active, replace `python` with `.venv/Scripts/python.exe` (Windows)
 or `.venv/bin/python` (POSIX). `scripts/gate.sh` resolves the venv itself and is the
-single top-level check: `ruff -> mypy --strict -> pytest`, currently **733 passed**
+single top-level check: `ruff -> mypy --strict -> pytest`, currently **735 passed**
 (513 at the 3.a red-team, plus the three transport-quarantine tests added by final
 integration that close O1, plus the offline Gateway lifecycle suite, plus the
 confirmed-exit join and the operator flatten added by G19/G20).
@@ -593,7 +593,7 @@ was rejected, partially filled or never answered left the bot flat, with the con
 `closed` and "never chase" refusing to exit again - while the venue still held the risk.
 
 **Acceptance (one command):** `python -m pytest tests/test_confirmed_exits.py -q` ->
-12 passed.
+14 passed.
 
 **Invariant:** after every venue answer, the engine's position for that contract is the
 confirmed book's position, and `exit_in_flight` is exactly the set of contracts with a
@@ -612,6 +612,12 @@ P&L is moved onto the confirmed fill (`confirmed - already_applied`, idempotent 
 redelivered ack); a partial reverses the P&L for the unfilled remainder, and a refused or
 unknown exit reverses the whole assumption. The correction goes through
 `correct_result`, so the trade counter and loss streak do not advance twice.
+
+The **restart** path is in the same invariant: `sync_engine` now restores
+`exit_in_flight` from the book's unresolved sells (`SyncReport.in_flight_sells`), so a
+process that arms with a sell the venue never answered cannot send a second one. Without
+that, the guard existed only in the process that sent the first sell - the one process a
+restart is not.
 
 **Failure mode it buys down:** the quiet asymmetry that costs the most money - the
 engine is flat (and locked out of exiting) while the venue holds a lot, or the engine
@@ -774,7 +780,7 @@ place. The corpus backtest and the 9/8 replay are unchanged (they have no transp
 The short version, in the order that fails fastest:
 
 ```bash
-./scripts/gate.sh                                            # ruff -> mypy -> pytest, 733
+./scripts/gate.sh                                            # ruff -> mypy -> pytest, 735
 python -m scorpion_mff.cli backtest                          # 93/91/405/$57,951.00
 python -m scorpion_mff.cli replay tapes/sep8.json            # 4/2/6/$211.00, 0 breaches
 python -m scorpion_mff.cli expiry audit                      # 40/93, 65/93, 0/40, 10/40, REFUSED
@@ -796,7 +802,7 @@ python -m pytest tests/test_gateway.py -q                                   # 20
 python -m pytest tests/test_risk_budget.py -q                               # 24
 python -m pytest tests/test_execution_book.py -q                            # 66
 python -m pytest tests/test_venue_feed.py -q                               # 47
-python -m pytest tests/test_confirmed_exits.py -q                          # 12
+python -m pytest tests/test_confirmed_exits.py -q                          # 14
 python -m pytest tests/test_flatten.py -q                                  # 13
 ```
 

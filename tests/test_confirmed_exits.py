@@ -28,7 +28,7 @@ from scorpion_mff.fills import FillLog
 from scorpion_mff.health import Heartbeat, LatencyBudget
 from scorpion_mff.killswitch import KillSwitch
 from scorpion_mff.listener import Listener, TapeTransport
-from scorpion_mff.types import OrderIntent, RawMessage
+from scorpion_mff.types import AlertKind, OrderIntent, Quote, RawMessage, Side, Signal
 
 T0 = 1_757_340_000.0                       # 2025-09-08 10:00 ET (a regular session)
 CH = "etf-options"
@@ -324,3 +324,44 @@ def test_the_correction_is_idempotent_under_a_redelivered_ack(tmp_path):
         Ack(ok=True, contract_key=QQQ, qty=qty, price=1.42), T0 + 61)
     assert harness.engine.stats.realized_usd == pytest.approx(corrected)
     assert corrected == pytest.approx(round((1.42 - 1.05) * qty * 100, 2))
+
+
+# ── the restart path restores the guard, not just the position ─────────────
+def _engine_reasons(engine: Engine) -> list[str]:
+    return [row.reason for row in engine.fills.records]
+
+
+def test_a_restart_restores_the_in_flight_guard_from_the_book():
+    engine = Engine(fills=FillLog(), clock=lambda: T0)
+    book = ExecutionBook()
+    buy = book.record_intent(
+        OrderIntent(action="buy", qty=2, limit=1.05, contract_key=QQQ,
+                    reason="entry:test", idempotency_key=f"{QQQ}:buy:1"), ts=T0)
+    book.apply_ack(buy.client_id, Ack(ok=True, contract_key=QQQ, qty=2, price=1.05),
+                   ts=T0)
+    book.record_intent(
+        OrderIntent(action="sell", qty=2, limit=1.50, contract_key=QQQ,
+                    reason="close", idempotency_key=f"{QQQ}:close:1"), ts=T0 + 30)
+
+    report = book.sync_engine(engine, T0 + 60)
+    assert report.in_flight_sells == 1
+    assert engine.exit_in_flight == {QQQ}
+    assert engine.positions[QQQ].contracts == 2          # the lot is still ours
+
+    intents = engine.on_signal(
+        Signal(kind=AlertKind.CLOSE, ticker="QQQ", side=Side.CALL, strike=720.0,
+               expiry="0DTE", price=1.50),
+        quote=Quote(bid=1.48, ask=1.52, ts=T0 + 60), now=T0 + 60)
+    assert intents == []
+    assert "close_while_exiting" in _engine_reasons(engine)
+
+
+def test_a_restart_does_not_treat_an_unresolved_buy_as_an_exit():
+    engine = Engine(fills=FillLog(), clock=lambda: T0)
+    book = ExecutionBook()
+    book.record_intent(
+        OrderIntent(action="buy", qty=2, limit=1.05, contract_key=QQQ,
+                    reason="entry:test", idempotency_key=f"{QQQ}:buy:1"), ts=T0)
+    report = book.sync_engine(engine, T0 + 60)
+    assert report.in_flight_sells == 0
+    assert engine.exit_in_flight == set()

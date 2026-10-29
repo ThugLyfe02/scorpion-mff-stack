@@ -579,15 +579,16 @@ and unique per *attempt* - so a retry is a new order and a redelivered answer is
 duplicate.
 
 ```bash
-python -m pytest tests/test_confirmed_exits.py -q     # 12 passed
+python -m pytest tests/test_confirmed_exits.py -q     # 14 passed
 ```
 
-Twelve tests pin: a rejected sell restores the lot and a retry is a new order; a partial
+Fourteen tests pin: a rejected sell restores the lot and a retry is a new order; a partial
 leaves the remainder visible and blocks a second exit; the cutoff pages instead of selling
 twice; an unknown sell restores the risk, pages, and never retries; a rejected buy frees
 its slot; an unknown or partial buy keeps the larger position; a fill away from the post
 moves realised P&L; a refused sell reverses the assumed profit; the correction is
-idempotent. The 93-alert backtest, the 9/8 replay, and the paper broker are byte-identical
+idempotent; and a **restart** restores the in-flight guard from the book, not just the
+position, so a second process cannot send a second sell. The 93-alert backtest, the 9/8 replay, and the paper broker are byte-identical
 (`$57,951.00`, `$211.00`) because none of them attaches a confirmed book.
 
 What this still does not do: there is no cancel/replace loop for a limit that rests

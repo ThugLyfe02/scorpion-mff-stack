@@ -344,6 +344,7 @@ class SyncReport:
     entries_today: int
     trades_today: int
     unresolved: int
+    in_flight_sells: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -355,6 +356,7 @@ class SyncReport:
             "entries_today": self.entries_today,
             "trades_today": self.trades_today,
             "unresolved": self.unresolved,
+            "in_flight_sells": self.in_flight_sells,
         }
 
 
@@ -794,6 +796,10 @@ class ExecutionBook:
         A lot carried past expiry is closed first (see `expire_carried`), because
         holding a dead contract's slot through a restart is the "carried position holds
         a concurrency slot forever" defect with a restart in front of it.
+
+        The **in-flight sells** are restored too: a restart with an unresolved sell must
+        not send a second one for the same lot. The guard belongs to the book because the
+        book is the only thing that knows the order outlived the process.
         """
         day = engine.trading_day(now)
         expired = self.expire_carried(day, now)
@@ -803,6 +809,12 @@ class ExecutionBook:
         positions = self.open_positions()
         engine.positions = {position.contract_key: position for position in positions}
         engine.closed = set(self.closed_keys(day))
+        # A restart must not forget that an exit is already at the venue. Without this
+        # the first close post after arming would send a second sell for a lot whose
+        # first sell is still unanswered (or unknown), which is a short.
+        engine.exit_in_flight = {
+            order.contract_key for order in self.unresolved_orders()
+            if order.action == "sell"}
         engine.day = day
 
         realized_ever = round(base.equity_usd + self.realized_total, 2)
@@ -838,6 +850,7 @@ class ExecutionBook:
             contracts=sum(position.contracts for position in positions),
             realized_usd=realized_ever, entries_today=entries_today,
             trades_today=trades_today, unresolved=len(self.unresolved_orders()),
+            in_flight_sells=len(engine.exit_in_flight),
         )
         engine.fills.record(
             event="sync", contract_key="", qty=report.contracts, price=0.0,
