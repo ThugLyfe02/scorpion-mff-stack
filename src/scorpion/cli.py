@@ -343,6 +343,63 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_closed_loop(args: argparse.Namespace) -> int:
+    """The one number: alerts the stack can take parse -> price -> execute -> replay.
+
+    Exit 0 when the report was produced, even when the answer is zero: an honest zero is
+    the artifact this command exists to publish. Exit 2 only when the evidence cannot be
+    read (the corpus, the bars, or a *provided* venue log), because a report built on
+    unreadable evidence is worse than no report.
+    """
+    from .bars import load_path
+    from .closed_loop import ClosedLoopError, assess, load_venue_records, unclosed_detail
+    from .ledger import load_csv
+
+    try:
+        rows_bars, rejected, digest = load_path(args.bars)
+        ledger = load_csv(args.corpus)
+    except (OSError, ValueError) as exc:
+        print(f"cannot build the closed loop: {exc}", file=sys.stderr)
+        return 2
+    venue = []
+    if args.venue:
+        try:
+            venue = load_venue_records(args.venue)
+        except ClosedLoopError as exc:
+            print(f"venue log refused: {exc}", file=sys.stderr)
+            return 2
+
+    # The corpus replay is segment 4, and it is expensive: only an alert that already has
+    # venue confirmations can reach it. Running it with no venue evidence would spend a
+    # minute proving that segment 3 stopped everything.
+    replay_result = None
+    if args.replay and venue:
+        from .corpus_replay import replay as corpus_replay
+
+        with tempfile.TemporaryDirectory(prefix="mff-closed-loop-") as tmp:
+            replay_result = corpus_replay(ledger, db_path=Path(tmp) / "replay.db")
+
+    report = assess(ledger, {barset.contract_key: barset for barset in rows_bars},
+                    venue=venue, replay_result=replay_result,
+                    venue_source=str(args.venue or ""))
+    payload = report.to_dict()
+    payload["bars"] = {"accepted": len(rows_bars), "rejected": rejected,
+                       "digest": digest[:16]}
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    print(report.to_text())
+    if rejected:
+        print(f"  bar rejections: {len(rejected)} (first: "
+              f"{rejected[0]['code']} {rejected[0]['detail'][:50]})")
+    if args.names:
+        print("unclosed:")
+        for line in unclosed_detail(report, limit=args.names):
+            print(f"  {line}")
+    return 0
+
+
 def cmd_calendar(args: argparse.Namespace) -> int:
     from .sessions import report as calendar_report
 
@@ -644,6 +701,23 @@ def main(argv: list[str] | None = None) -> int:
     cov.add_argument("--db", default="")
     cov.add_argument("--json", action="store_true")
     cov.set_defaults(func=cmd_coverage)
+
+    loop = sub.add_parser(
+        "closed-loop",
+        help="the one number: parse -> price -> execute -> replay, per alert, with the "
+             "missing input named")
+    loop.add_argument("--corpus", default="mff-backtest/trades.csv")
+    loop.add_argument("--bars", default="mff-backtest/week_bars.json")
+    loop.add_argument("--venue", default="",
+                      help="the live lane's fill log or execution log (JSONL); absent means "
+                           "segment 3 is unmeasured, not passed")
+    loop.add_argument("--replay", action="store_true",
+                      help="run the corpus pipeline as segment 4 (only reached when venue "
+                           "records exist)")
+    loop.add_argument("--names", type=int, default=0,
+                      help="also print this many unclosed alerts, by name and reason")
+    loop.add_argument("--json", action="store_true")
+    loop.set_defaults(func=cmd_closed_loop)
 
     cal = sub.add_parser("calendar", help="sessions, half-days and holiday coverage")
     cal.add_argument("--start", default="2026-01-01")

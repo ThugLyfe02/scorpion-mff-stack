@@ -108,7 +108,7 @@ class ReplayResult:
         }
 
 
-def _entry_text(trade: Any) -> str:
+def entry_text(trade: Any) -> str:
     contract = "C" if trade.side == "CALL" else "P"
     strike = (
         str(trade.strike).rstrip("0").rstrip(".")
@@ -191,7 +191,7 @@ def replay(
 
         try:
             event, effects = asyncio.run(pipeline.handle(
-                message(_entry_text(trade), message_id=trade.identity, at=entry_ts)
+                message(entry_text(trade), message_id=trade.identity, at=entry_ts)
             ))
         except Exception as exc:                     # noqa: BLE001 - a parse failure is data
             result.trades.append(ReplayedTrade(

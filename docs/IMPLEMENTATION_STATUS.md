@@ -124,3 +124,17 @@ Still requires environment/operator work:
       market day, reset `realized_today`/`consecutive_losses`, or re-arm a daily stop that
       already fired. The `faults` clock-skew case is now **contained** rather than an open
       `xfail`; the regression is pinned in `tests/test_risk_layer.py` and `tests/test_faults.py`.
+- [x] closed-loop coverage (`closed_loop.py` + `scorpion closed-loop`): the one number the fleet
+      organises around. Every corpus alert is assessed as a chain of four segments - parse ->
+      price -> execute -> replay - and stops at the FIRST one it cannot pass, with a stable
+      reason code (`no_bars`, `no_entry_ack`, `no_exit_ack`, `no_replay`, `replay_divergence`,
+      ...). Three of four is not closed. A missing venue log is `no_entry_ack` (unmeasured, not
+      passed) and an unrun replay is `no_replay` (not "assumed clean"). The live lane is consumed
+      as an artifact in both shapes it emits (fill log `event` rows and execution log `t` rows),
+      never imported; anything that is neither is refused with its line number. Contracts are
+      compared by value (a Decimal strike and the expiry day), because comparing the day-keyed
+      coverage contract with the expiry-keyed parser contract reported 54 of 107 alerts as parse
+      mismatches. Today the number is **0 / 107** (105 parse, 3 price, 0 execute, 0 replay) and
+      the blocking reason is stated: `price:no_bars` 96, `price:no_exit` 5,
+      `execute:no_entry_ack` 3, `parse:unparsed:ignore` 2 (excluded tickers),
+      `price:entry_outside_session` 1. See `docs/CLOSED_LOOP.md`.

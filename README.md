@@ -15,6 +15,28 @@ Trading stack for **Scorpion Capital**: MoneyForFun Discord options hone → Rob
 | Backtest / signal corpus | In `mff-backtest/` (tape BT + scrapes) |
 | Gapper scanner | Agent cron + Ross skill — **no scanner binary** |
 
+## Closed-loop coverage (the one number)
+
+Every layer here publishes a proof, and each proof has a different denominator. The number the
+fleet organises around is a single chain: **parse -> price -> execute -> replay**, all four, per
+alert. `python -m scorpion.cli closed-loop` publishes it and names the input behind every miss.
+
+```text
+closed-loop  0 / 107 (0.0%)   parse 105  price 3  execute 0  replay 0
+  venue       no confirmed records on record - segment 3 is unmeasured, not passed
+  blocking     96  price:no_bars
+  blocking      5  price:no_exit
+  blocking      3  execute:no_entry_ack
+```
+
+Read in order: parse is not the problem (105/107, the two exceptions are excluded tickers); price
+is the wall (3/107 alerts have bars covering the entry); execute is **unmeasured**, not passed,
+because no live fill exists yet; replay is only reached when 1-3 hold. A missing venue log is
+`no_entry_ack`, an unrun replay is `no_replay`, and three of four is never `closed`. It consumes
+the live lane's fill/execution JSONL as an artifact (never imports it) and refuses anything that
+is neither shape with its line number. Full rationale and the refusal taxonomy:
+**`docs/CLOSED_LOOP.md`**.
+
 ## Repo layout
 
 ```
