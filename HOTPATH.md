@@ -501,3 +501,13 @@ book *before* the decision, because a full close deletes the position; I2 had to
 the limit against the stated percentage *and* the live bid rather than merely detect a
 `%`). A fuzzer whose invariants are wrong is a noise generator, so the invariants are
 tested as carefully as the code they guard.
+
+## Harvested from the orphan (`feat/risk-budget-context`)
+
+The orphan branch carried a parser guard the live lane did not: a dollar amount followed
+by option language is a contract term, not a fill. The live regex refused `$240 STRIKE`
+but still read `NVDA STRIKE $180 CALLS CLOSED` as a **close at 180** — the same
+phantom-profit class as the `19%` bug, one wording further out. Harvested here as the
+wider lookahead (`STRIKE|CALLS|PUTS|EXP…|CONTRACT`), a skip when the dollar amount equals
+the parsed strike, and four tests (`tests/test_parser.py`). The orphan is otherwise an
+archive; the harvest map is `docs/fleet/ORPHAN.md`.

@@ -92,8 +92,13 @@ _NOT_PCT_OR_DIGIT = r"(?![0-9.%])"
 _AT_PRICE_RE = re.compile(rf"\bAT\b\s*\$?\s*{_NUM}{_NOT_PCT_OR_DIGIT}")
 _AVG_PRICE_RE = re.compile(
     rf"\b(?:NEW\s+)?AVG(?:ERAGE)?\s+(?:AT\s+)?\$?\s*{_NUM}{_NOT_PCT_OR_DIGIT}")
-# "$240 strike is now in the money" is commentary about a strike, not a price.
-_DOLLAR_RE = re.compile(rf"\$\s*{_NUM}{_NOT_PCT_OR_DIGIT}(?!\s*STRIKE\b)")
+# A dollar amount followed by option language is a contract term, not a fill:
+# "$240 strike is now in the money", "NVDA STRIKE $180 CALLS CLOSED". Without the
+# wider lookahead the second sold a $1 contract at $180 and booked a phantom profit.
+_DOLLAR_RE = re.compile(
+    rf"\$\s*{_NUM}{_NOT_PCT_OR_DIGIT}"
+    r"(?!\s*(?:STRIKE|CALLS?|PUTS?|EXP(?:IRY|IRATION)?|CONTRACT)\b)"
+)
 _TAG_RE = re.compile(r"@(PLATINUM|DIAMOND)\b")
 _EXP_STOPWORDS = (
     "CURRENT", "BID", "PRICE", "SL", "LIGHT", "YOU", "JUMP", "MONEYFORFUN",
@@ -354,11 +359,17 @@ def parse(message: RawMessage | str, channel: str = "") -> Signal:
     pct = _clean_number(pct_m.group(1)) if pct_m else None
     price = None
     for rx in (_AT_PRICE_RE, _AVG_PRICE_RE, _DOLLAR_RE):
-        m = rx.search(t)
-        if m:
-            price = _clean_number(m.group(1))
-            if price is not None:
-                break
+        for match in rx.finditer(t):
+            candidate = _clean_number(match.group(1))
+            if candidate is None:
+                continue
+            # A dollar amount equal to the strike is the contract, not the fill.
+            if rx is _DOLLAR_RE and strike is not None and abs(candidate - strike) < 1e-9:
+                continue
+            price = candidate
+            break
+        if price is not None:
+            break
 
     # The shorthand anchor carries the full contract in one line; when it fires
     # it is authoritative over the keyword form (there is no keyword form here).
