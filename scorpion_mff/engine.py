@@ -14,16 +14,36 @@ Rules implemented (live/RULES.lock.md):
   * never chase a closed contract
   * STOP/stand-down halts new buys (exits stay allowed - you must be able to
     leave a position you are in)
+  * a contract that reaches its close cutoff is flattened at a live bid, or paged
+    to a human - never left to become an assignment (scorpion_mff/expiry.py)
+
+The DAY is the ET trading date, not the UTC date (scorpion_mff/calendar.py). This is a
+live-risk boundary, not a cosmetic one: a UTC label rolls the daily book at 20:00 ET and
+closes a same-day contract on the previous evening's date at 01:30 UTC - the exact seam a
+0DTE becomes an overnight hold.
 """
 
 from __future__ import annotations
 
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from .broker import QuoteProvider
+from .calendar import CalendarError, et_date
+from .execution import spread_ok, spread_ratio
+from .expiry import (
+    DEFAULT_CUTOFF_MINUTES,
+    SAME_DAY_TOKENS,
+    ExpiryVerdict,
+    assignment_shares,
+    contract_terms,
+    is_live_bid,
+    page_text,
+    sweep,
+)
 from .exposure import ExposureLimits
 from .exposure import guard as exposure_guard
 from .fills import FillLog
@@ -41,12 +61,50 @@ from .stops import breakeven_exit
 from .types import AlertKind, OrderIntent, Position, Quote, Signal
 
 
+def _env_float(name: str) -> float | None:
+    """Read an optional float from the environment; None when unset/unparsable."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 def _iso_date(value: str) -> str | None:
     """'2026-09-11' -> the same ISO string (validated); anything else -> None."""
     try:
         return time.strftime("%Y-%m-%d", time.strptime(value.strip(), "%Y-%m-%d"))
     except (ValueError, TypeError):
         return None
+
+
+def _bid_value(value: float | Quote | None) -> float | None:
+    """A quote map may carry a bare bid or a whole Quote; both mean the same here."""
+    if value is None:
+        return None
+    if isinstance(value, Quote):
+        return value.bid
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _spread_pct(quote: Quote) -> float:
+    """The bid/ask spread as a percentage of the bid, for the audit reason."""
+    ratio = spread_ratio(quote)
+    return 0.0 if ratio is None else ratio * 100.0
+
+
+def _exposure(assignment: int | None) -> str:
+    """Signed shares when they are knowable, the word 'unknown' when they are not.
+
+    A missing underlying price is *not* an out-of-the-money contract. Printing 0 here
+    would understate overnight risk on exactly the line a human reads at 15:45.
+    """
+    return "unknown" if assignment is None else f"{assignment:+d}"
 
 
 @dataclass
@@ -58,6 +116,17 @@ class EngineConfig:
     pipe_test: bool = True              # 1 contract on the day's first trade
     enforce_breakeven: bool = False     # opt-in: flatten at the armed BE stop on a quote
     max_quote_age_s: float | None = None  # refuse a quote older than this (None = off)
+    # Opt-in, and OFF by default so the historical replay and the corpus backtest keep
+    # producing the same decisions they always did (the expiry guard would have
+    # force-closed positions the corpus never exited). `cli arm` turns it on.
+    enforce_expiry: bool = False
+    expiry_cutoff_minutes: int = DEFAULT_CUTOFF_MINUTES   # from THIS session's close
+    # Opt-in spread gate: refuse an entry whose bid/ask spread exceeds this ratio.
+    # None = OFF (default, replay unchanged); a float arms it. Read from the
+    # environment via MFF_MAX_SPREAD_RATIO so the live path can arm it without a
+    # code change.
+    max_spread_ratio: float | None = field(
+        default_factory=lambda: _env_float("MFF_MAX_SPREAD_RATIO"))
 
 
 @dataclass
@@ -67,7 +136,8 @@ class EngineStats:
     skipped: int = 0
     rejected: int = 0
     intents: int = 0
-    expired: int = 0
+    expired: int = 0                    # slots released on an unmarked expiry
+    expiry_pages: int = 0               # HALT_AND_PAGE alerts raised by the guard
 
 
 @dataclass
@@ -89,6 +159,10 @@ class Engine:
     closed: set[str] = field(default_factory=set)
     halted: bool = False
     day: str = ""
+    # One HALT_AND_PAGE per (contract, reason, ET day): a tick every fifteen seconds must
+    # not turn a real page into a stream a human learns to ignore. Cleared on the roll.
+    expiry_paged: set[str] = field(default_factory=set)
+    calendar_warning: str = ""          # last unusable-clock fallback (never silent)
 
     # ── the book ─────────────────────────────────────────────────────────────
     @property
@@ -200,15 +274,45 @@ class Engine:
                 return in_channel[0]
         return None
 
-    def _roll_day(self, ts: float) -> None:
-        """Reset the daily bookkeeping when the UTC day changes.
+    def _trading_day(self, ts: float) -> str:
+        """The ET trading date of an instant - the label the expiry book turns on.
+
+        The UTC date is not the trading date. At 01:30 UTC a 2026-09-11 contract is still
+        Thursday evening in New York, so a UTC label closes it a day early and rolls the
+        daily book at 20:00 ET instead of midnight - both invisible until the one session
+        where they decide whether a 0DTE becomes an assignment.
+
+        The conversion needs only the DST rule, never the holiday tables, so it labels any
+        instant it can represent (epoch 1000 included). Failing closed belongs to the
+        SESSION lookup, and `expiry.py` is where the guard asks for one. A clock the
+        calendar cannot read at all falls back to the UTC label rather than raising: the
+        day boundary is bookkeeping and must not crash the hot path. That fallback is NOT
+        silent - it is kept on `calendar_warning` and, when the expiry guard is armed (the
+        only consumer for which the label is load-bearing), logged once as an alert.
+        """
+        try:
+            return et_date(datetime.fromtimestamp(ts, tz=UTC)).isoformat()
+        except (CalendarError, OverflowError, OSError, ValueError) as exc:
+            warning = f"calendar_unusable:{exc}"
+            if self.config.enforce_expiry and warning != self.calendar_warning:
+                self.fills.record(event="alert", contract_key="", qty=0, price=0.0,
+                                  reason=warning, ts=ts, accepted=False,
+                                  note="ET day label fell back to UTC")
+            self.calendar_warning = warning
+            try:
+                return time.strftime("%Y-%m-%d", time.gmtime(ts))
+            except (OverflowError, OSError, ValueError):
+                return ""            # a clock this broken has no day to roll
+
+    def _roll_day(self, ts: float, underlying: Mapping[str, float] | None = None) -> None:
+        """Reset the daily bookkeeping when the ET trading date changes.
 
         Without this, "never chase a closed contract" would block a 0DTE key
         forever: the same `QQQ|CALL|719|0DTE` string recurs on any day the
         contract trades, and the day's first trade must be a pipe test again.
         The roll is logged so the trace shows where the boundary was.
         """
-        day = time.strftime("%Y-%m-%d", time.gmtime(ts))
+        day = self._trading_day(ts)
         if not self.day:
             self.day = day
             return
@@ -217,12 +321,14 @@ class Engine:
         self.day = day
         self.closed.clear()
         self.stats.trades_today = 0
-        self._expire_carried(day, ts)
+        self.expiry_paged.clear()
+        self._expire_carried(day, ts, underlying)
         self.fills.record(event="day_roll", contract_key="", qty=0, price=0.0,
                           reason=f"new_day:{day}", ts=ts)
 
-    def _expire_carried(self, day: str, ts: float) -> None:
-        """Release positions whose contract has provably stopped existing.
+    def _expire_carried(self, day: str, ts: float,
+                        underlying: Mapping[str, float] | None = None) -> None:
+        """Release positions whose contract has provably stopped existing - and say so.
 
         MAX_CONCURRENT is a LIVE-RISK limit, so a position that expired must not
         hold a slot. Without this sweep one missed exit silently disables the hone
@@ -230,29 +336,54 @@ class Engine:
         alert with no recorded exit kept the book at 2/2 and every later entry was
         skipped (see BACKTEST.md). The release is deliberately conservative:
 
-          * "0DTE" in the key  -> expired at that day's close
-          * an ISO expiry date earlier than today -> expired
+          * a same-day token in the key ("0DTE"/"ODTE"/"TODAY") -> expired at that
+            session's close
+          * an ISO expiry date earlier than the ET trading date -> expired
           * anything else ("Dec 5") -> NOT released; it raises an alert instead,
             because freeing a slot on an unparsed expiry is a guess.
 
         The position is marked at its own entry price with accepted=False: the
         contract's real settle is unknown, so it must not enter realised P&L.
+
+        The release is never SILENT. Every path writes an `expiry_unresolved` alert
+        (released) or `expiry_unparsed` alert (kept) that carries the projected
+        assignment shares - or the word `unknown` when there is no underlying close to
+        project from - plus the reason. A released slot is the one case where the book
+        stops counting a real overnight risk, so it is exactly the case a human has to
+        be able to reconstruct afterwards.
         """
+        prices = underlying or {}
         for pos in list(self.positions.values()):
             if not pos.is_open:
                 continue
-            expiry = pos.contract_key.rsplit("|", 1)[-1]
+            key = pos.contract_key
+            expiry = key.rsplit("|", 1)[-1]
             iso = _iso_date(expiry)
-            if expiry.upper() == "0DTE" or (iso is not None and iso < day):
-                self.fills.record(event="expire", contract_key=pos.contract_key,
+            terms = contract_terms(key)
+            ticker = terms.ticker if terms is not None else (pos.ticker or "")
+            shares = assignment_shares(key, pos.contracts, prices.get(ticker))
+            exposure = _exposure(shares)
+            same_day = expiry.strip().upper() in SAME_DAY_TOKENS
+            released = same_day or (iso is not None and iso < day)
+            if released:
+                why = "same_day" if same_day else "past_expiry"
+                self.fills.record(event="expire", contract_key=key,
                                   qty=pos.contracts, price=pos.avg_price,
                                   reason=f"expired:{expiry}", ts=ts, accepted=False)
                 self.stats.expired += 1
+                self.fills.record(
+                    event="alert", contract_key=key, qty=pos.contracts,
+                    price=pos.avg_price, ts=ts, accepted=False,
+                    reason=f"expiry_unresolved:{why}:{expiry}:assignment={exposure}",
+                    note=f"slot released on ET date {day}; settle unknown, so this is "
+                         f"not in realised P&L")
                 pos.contracts = 0
             elif iso is None:
-                self.fills.record(event="alert", contract_key=pos.contract_key,
-                                  qty=pos.contracts, price=pos.avg_price,
-                                  reason=f"expiry_unparsed:{expiry}", ts=ts)
+                self.fills.record(
+                    event="alert", contract_key=key, qty=pos.contracts,
+                    price=pos.avg_price, ts=ts, accepted=False,
+                    reason=f"expiry_unparsed:{expiry}:assignment={exposure}",
+                    note="slot NOT released: an unreadable expiry is not an expired one")
 
     def _ambiguous_exit(self, signal: Signal) -> bool:
         """An exit that names no contract while two positions sit in its channel."""
@@ -317,6 +448,9 @@ class Engine:
             return self._skip(signal, ts,
                               f"too_far_off_bid:{pct_off_bid(signal.his_bid, quote.ask):.1f}%",
                               latency_ms)
+        if not spread_ok(quote, self.config.max_spread_ratio):
+            return self._skip(signal, ts,
+                              f"spread_too_wide:{_spread_pct(quote):.1f}%", latency_ms)
 
         first_of_day = self.stats.trades_today == 0
         tier = tier_for_channel(signal.channel,
@@ -488,6 +622,115 @@ class Engine:
                           price=intent.limit, reason=intent.reason, ts=ts,
                           latency_ms=latency_ms, note="breakeven_stop")
         return [intent]
+
+    # ── the expiry guard, made live ──────────────────────────────────────────
+    def expiry_intents(self, now: float | None = None,
+                       quotes: Mapping[str, float | Quote] | None = None,
+                       underlying: Mapping[str, float] | None = None,
+                       cutoff_minutes: int | None = None) -> list[OrderIntent]:
+        """What the book owes the close, decided on a clock instead of a post.
+
+        `scorpion_mff.expiry` owns the decision (HOLD / FORCE_CLOSE / HALT_AND_PAGE) and
+        this only acts on it, which is the point: the guard is not a second opinion about
+        expiry, it is the same one, finally wired to the executor.
+
+          * FORCE_CLOSE  -> sell the whole remainder at the bid actually seen, book the
+                            realised result, and free the slot;
+          * HALT_AND_PAGE -> record a page (deduped per ET day) and place NOTHING. An
+                            unpriced exit is a guess wearing a price; leaving the
+                            position on the book keeps the risk counted.
+
+        Off unless `EngineConfig.enforce_expiry` is set, so a replay of a recorded tape
+        and the 93-alert corpus backtest keep their original decisions byte for byte.
+
+        `quotes` maps contract key -> bid (a bare float or a Quote). A missing key, a
+        zero, a negative or a NaN is SILENCE, never a price and never an OTM. `underlying`
+        maps ticker -> spot and only ever changes the page's evidence, never the action.
+        """
+        if not self.config.enforce_expiry:
+            return []
+        ts = self.clock() if now is None else now
+        self._roll_day(ts, underlying)
+        cutoff = (self.config.expiry_cutoff_minutes if cutoff_minutes is None
+                  else cutoff_minutes)
+        bids: dict[str, float] = {}
+        for key, raw in (quotes or {}).items():
+            bid = _bid_value(raw)
+            if bid is not None and is_live_bid(bid):
+                bids[key] = bid
+        try:
+            verdicts = sweep(ts, self.open_positions, bids, underlying or {}, cutoff)
+        except CalendarError as exc:
+            # Fail closed: with no calendar there is no cutoff to be right about, so
+            # nothing is flattened and a human is told why.
+            self._expiry_page("", f"expiry_calendar_unknown_year:{exc}", ts,
+                              note="no session known: nothing was flattened")
+            return []
+        intents: list[OrderIntent] = []
+        for verdict in verdicts:
+            if verdict.must_flatten:
+                intent = self._expiry_flatten(verdict, bids.get(verdict.contract_key), ts)
+                if intent is not None:
+                    intents.append(intent)
+            else:
+                self._expiry_page(verdict.contract_key, verdict.reason, ts,
+                                  note=page_text(verdict),
+                                  shares=verdict.assignment_shares)
+        return intents
+
+    def _expiry_flatten(self, verdict: ExpiryVerdict, bid: float | None,
+                        ts: float) -> OrderIntent | None:
+        """Sell the remainder at the bid the verdict was decided on.
+
+        If the bid vanished between the verdict and the order, nothing is placed: the
+        same silence that produced the FORCE_CLOSE cannot also produce its price.
+        """
+        limit = _bid_value(bid)
+        if limit is None or not is_live_bid(limit):
+            self._expiry_page(verdict.contract_key, "bid_vanished_before_exit", ts,
+                              note=page_text(verdict),
+                              shares=verdict.assignment_shares)
+            return None
+        position = self.positions.get(verdict.contract_key)
+        if position is None or not position.is_open:
+            return None
+        qty = position.contracts
+        self._book_result((limit - position.avg_price) * qty * 100, ts)
+        position.contracts = 0
+        self.closed.add(position.contract_key)
+        del self.positions[position.contract_key]
+        self.stats.intents += 1
+        minutes = verdict.minutes_to_close
+        reason = f"expiry:force_close:bid={limit:g}" + (
+            f":{minutes:+.1f}m" if minutes is not None else "")
+        intent = OrderIntent(action="sell", qty=qty, limit=limit,
+                             contract_key=verdict.contract_key, reason=reason,
+                             idempotency_key=f"{verdict.contract_key}:expiry")
+        self.fills.record(event="sell", contract_key=verdict.contract_key, qty=qty,
+                          price=limit, reason=reason, ts=ts,
+                          note=f"expiry_cutoff_force_close:{verdict.reason}")
+        return intent
+
+    def _expiry_page(self, key: str, reason: str, ts: float, note: str = "",
+                     shares: int | None = None) -> bool:
+        """Record a HALT_AND_PAGE once per (contract, reason, ET day).
+
+        Returns whether the page was written. Deduped because the guard runs on a tick:
+        an alert every fifteen seconds is not a page, it is noise that trains a human to
+        stop reading - and the one that matters is then the one nobody reads.
+        """
+        text = f"HALT_AND_PAGE:{reason}:assignment={_exposure(shares)}"
+        token = f"{key}|{text}"
+        if token in self.expiry_paged:
+            return False
+        self.expiry_paged.add(token)
+        self.stats.expiry_pages += 1
+        position = self.positions.get(key)
+        self.fills.record(event="alert", contract_key=key,
+                          qty=position.contracts if position is not None else 0,
+                          price=position.avg_price if position is not None else 0.0,
+                          reason=text, ts=ts, accepted=False, note=note[:240])
+        return True
 
     # ── logging helpers ──────────────────────────────────────────────────────
     def _skip(self, signal: Signal, ts: float, reason: str, latency_ms: int | None,

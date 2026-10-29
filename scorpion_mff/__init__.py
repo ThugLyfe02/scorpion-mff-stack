@@ -17,6 +17,10 @@ Layering, all stdlib:
     health    - per-event latency budget + deadman heartbeat
     listener  - Gateway transport -> parser -> engine -> broker, event driven
     replay    - the same pipeline over a recorded tape (offline proof)
+    calendar  - the ET clock, sessions, half-days, holidays; fails closed on an unknown year
+    expiry    - 0DTE cutoff verdicts and assignment exposure, read-only; the caller acts
+    execution - the one-probe transport breaker and the fail-closed spread gate
+    ledger    - intent -> terminal matching; a transport failure stays unresolved
 
 Everything except the live Gateway transport and the RH HTTP call is pure and
 unit-tested offline. `listener.WebsocketGateway` needs the optional `websockets`

@@ -141,3 +141,19 @@ class FillLog:
     def extend(self, fills: Iterable[Fill]) -> None:
         for f in fills:
             self.records.append(f)
+
+    def append_rows(self, fills: Iterable[Fill]) -> None:
+        """Append pre-numbered rows to the ring and the sink, preserving seq.
+
+        Recovery writes terminal rows whose sequence continues an existing log,
+        so `record()`'s renumbering would be wrong here; this is the
+        read-modify-append seam for `recover`.
+        """
+        for fill in fills:
+            self.records.append(fill)
+            if self._seq < fill.seq:
+                self._seq = fill.seq
+            if self.path:
+                self._append(fill)
+            if len(self.records) > self.max_memory:
+                del self.records[: len(self.records) - self.max_memory]

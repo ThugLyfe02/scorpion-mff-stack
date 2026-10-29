@@ -8,8 +8,14 @@ the fields recorded in live/misses/2026-09-08.json:
     CALL/ ODTE LOTTO TICKER TSLA STRIKE $265 Exp Today Current BID Price $1.90
     ... reply-quote noise:  Adding at 3.00 / Close at 2.65 / Runners at $3.00
 
-Live traffic arrives as CLEAN text from the Gateway; the OCR corpus is noisier
-than production (it turns "$240" into "5240"), so the parser is deliberately
+Live traffic can also be a one-line shorthand with no keywords at all:
+
+    QQQ 719C Sep 11 @ 1.01      SPY 600P 0DTE @ 1.05
+
+That shorthand is the strict anchor below: a glued C/P strike, an expiry (or
+0DTE) token, and an explicit @-price, and the M/D expiry is normalised to ISO
+using the message's year with a year-roll. The OCR corpus is noisier than
+production (it turns "$240" into "5240"), so the parser is deliberately
 tolerant of a missing "$" and glues, and records what it could not read rather
 than guessing a number.
 """
@@ -17,7 +23,9 @@ than guessing a number.
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Iterable
+from datetime import date
 from typing import Any
 
 from .types import AlertKind, IgnoreReason, RawMessage, Side, Signal
@@ -101,7 +109,39 @@ _TRIM_WORDS = ("TRIM", "RUNNER", "RUNNERS", "SCALE OUT", "SCALING OUT", "HALF", 
 _ADD_WORDS = ("ADDING", "ADDED", "ADD MORE", "NEW AVG", "AVG AT", "AVERAGE", "AVG ",
               "SCALING IN", "SCALE IN", "SCALE HERE", "SCALING UP")
 _STANDDOWN_WORDS = ("STAND DOWN", "STAND-DOWN", "STANDDOWN", "DO NOT BUY", "HALT", "KILL SWITCH")
-_EXPLICIT_CLOSE_RE = re.compile(r"\b(CLOSE|CLOSING|CLOSED|SOLD|EXIT|FLATTEN)\b")
+# "CLOSE" doubles as an adjective ("we are close to target"), so the bare word
+# is an exit verb only when it heads a close phrase ("close at 2.65", "close
+# remaining for 10%", "close out"). CLOSED/CLOSING/SOLD/EXIT/FLATTEN are
+# unambiguous and stay keyword-only.
+_EXPLICIT_CLOSE_RE = re.compile(r"\b(CLOSING|CLOSED|SOLD|EXIT|FLATTEN)\b")
+_CLOSE_PHRASE_RE = re.compile(
+    r"\bCLOSE\b\s*(?="
+    r"AT\b|REMAINING\b|OUT\b|ALL\b|THE\b|IT\b|THIS\b|THAT\b|THESE\b|THOSE\b|"
+    r"POSITION|CONTRACT|RUNNER|HALF\b|FULLY\b|\d|%"
+    r")"
+)
+
+# ── the strict shorthand anchor ────────────────────────────────────────────────
+# Live posts can be a single line with no keywords: "QQQ 719C Sep 11 @ 1.01" or
+# "SPY 600P 0DTE @ 1.05". It is deliberately anchored to the WHOLE normalised
+# post and demands a glued C/P strike, an expiry (or 0DTE) token, and an
+# explicit @-price - so commentary like "QQQ 719C looking strong" can never
+# become an entry. A 4-digit year (2026) is refused as a strike or a premium.
+_MONTH_NUM = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+_SHORTHAND_RE = re.compile(
+    r"^(?P<ticker>[A-Z]{1,5})\s+"
+    r"(?P<strike>\d{1,6}(?:\.\d{1,2})?)(?P<side>[CP])\s+"
+    r"(?P<expiry>"
+    r"\d{4}-\d{1,2}-\d{1,2}"
+    r"|\d{1,2}/\d{1,2}"
+    r"|(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\.?\s+\d{1,2}"
+    r"|0DTE|ODTE|TODAY|0-DTE"
+    r")\s+"
+    r"@\s*\$?(?P<bid>\d{1,4}(?:\.\d{1,2})?)\s*$"
+)
 # "don't add", "do not close", "not closing yet": a negated verb is not an
 # instruction to do the verb. A keyword-only classifier fires on these.
 _NEGATED_VERB_RE = re.compile(
@@ -158,6 +198,78 @@ def _expiry(t: str) -> str:
     return rest
 
 
+def _reference_date(ts: float) -> tuple[int, int, int]:
+    """UTC (year, month, day) of the message, for the shorthand year-roll."""
+    try:
+        g = time.gmtime(ts)
+    except (OverflowError, OSError, ValueError):
+        g = time.gmtime()
+    return g.tm_year, g.tm_mon, g.tm_mday
+
+
+def _is_year(value: float) -> bool:
+    """True for a 4-digit integer in a plausible year range: never a strike/price."""
+    return 1900.0 <= value <= 2100.0 and value.is_integer()
+
+
+def _md_to_iso(month: int, day: int, year: int, ref: tuple[int, int, int]) -> str | None:
+    """'Sep 11' -> ISO, rolling the year forward when the month/day already passed."""
+    if (month, day) < (ref[1], ref[2]):
+        year += 1
+    try:
+        date(year, month, day)
+    except ValueError:
+        return None
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def _shorthand_expiry(raw: str, ref: tuple[int, int, int]) -> str | None:
+    """Normalise the expiry token captured by the shorthand anchor."""
+    if raw in {"0DTE", "ODTE", "TODAY", "0-DTE"}:
+        return "0DTE"
+    iso = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", raw)
+    if iso:
+        try:
+            date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
+        except ValueError:
+            return None
+        return f"{int(iso.group(1)):04d}-{int(iso.group(2)):02d}-{int(iso.group(3)):02d}"
+    md = re.fullmatch(
+        r"(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\.?\s+(\d{1,2})", raw)
+    if md:
+        return _md_to_iso(_MONTH_NUM[md.group(1)], int(md.group(2)), ref[0], ref)
+    num = re.fullmatch(r"(\d{1,2})/(\d{1,2})", raw)
+    if num:
+        month, day = int(num.group(1)), int(num.group(2))
+        if not 1 <= month <= 12:
+            return None
+        return _md_to_iso(month, day, ref[0], ref)
+    return None
+
+
+def _parse_shorthand(t: str, ref: tuple[int, int, int]) -> dict[str, Any] | None:
+    """The strict one-line anchor, or None when the post is not exactly that."""
+    m = _SHORTHAND_RE.match(t)
+    if not m:
+        return None
+    strike = _clean_number(m.group("strike"))
+    if strike is None or _is_year(strike):
+        return None
+    bid = _clean_number(m.group("bid"))
+    if bid is None or _is_year(bid):
+        return None
+    expiry = _shorthand_expiry(m.group("expiry"), ref)
+    if expiry is None:
+        return None
+    return {
+        "ticker": m.group("ticker"),
+        "side": Side.CALL if m.group("side") == "C" else Side.PUT,
+        "strike": strike,
+        "expiry": expiry,
+        "his_bid": bid,
+    }
+
+
 def _kind(t: str, side: Side | None, strike: float | None) -> AlertKind:
     """Classify the post, mirroring live/RULES.lock.md's EXIT line:
 
@@ -171,7 +283,9 @@ def _kind(t: str, side: Side | None, strike: float | None) -> AlertKind:
       3. an unambiguous final  -> CLOSE ("closed fully", "flatten", "all out")
       4. any scale-out word    -> TRIM. "SOLD RUNNERS" belongs HERE, not in (3):
                                   the lock lists "sold runners" under trim-to-1+BE.
-      5. an explicit close verb-> CLOSE ("close at 2.65", "close remaining for 10%")
+      5. an explicit close verb-> CLOSE ("close at 2.65", "close remaining for
+        10%"). A bare "close" only fires here when it heads a close phrase -
+        "we are close to target" is commentary, not an exit.
       6. a bare "%"            -> TRIM (a level, so protect; see HOTPATH.md for
                                   the commentary trade-off this accepts)
       7. add/avg words         -> ADD ("scaling in" is an add, never a trim)
@@ -184,7 +298,7 @@ def _kind(t: str, side: Side | None, strike: float | None) -> AlertKind:
         return AlertKind.CLOSE         # "Runners at $3.00 closed fully"
     if any(w in t for w in _TRIM_WORDS):
         return AlertKind.TRIM          # "Sold runners at 3.90", "Runners @ 25%"
-    if _EXPLICIT_CLOSE_RE.search(t):
+    if _EXPLICIT_CLOSE_RE.search(t) or _CLOSE_PHRASE_RE.search(t):
         return AlertKind.CLOSE         # "Close at 2.65", "Close remaining for 10%"
     if _PCT_RE.search(t):
         return AlertKind.TRIM          # "75% if you're still holding"
@@ -205,12 +319,15 @@ def parse(message: RawMessage | str, channel: str = "") -> Signal:
         raw_text = message.text
         chan = message.channel or message.channel_id
         chan_id = message.channel_id
+        ref = _reference_date(message.ts)
     else:
         raw_text = message
         chan = channel
         chan_id = channel
+        ref = _reference_date(time.time())
 
     t = normalise(raw_text)
+    shorthand = _parse_shorthand(t, ref)
     name = channel_name(chan or chan_id)
     if not chan_id or chan_id == name:
         chan_id = CHANNEL_IDS.get(name, EXCLUDED_CHANNEL_IDS.get(name, ""))
@@ -243,6 +360,16 @@ def parse(message: RawMessage | str, channel: str = "") -> Signal:
             if price is not None:
                 break
 
+    # The shorthand anchor carries the full contract in one line; when it fires
+    # it is authoritative over the keyword form (there is no keyword form here).
+    expiry = _expiry(t)
+    if shorthand is not None:
+        ticker = shorthand["ticker"]
+        side = shorthand["side"]
+        strike = shorthand["strike"]
+        expiry = shorthand["expiry"]
+        his_bid = shorthand["his_bid"]
+
     tags = tuple(sorted(set(_TAG_RE.findall(t))))
     # A LOTTO flag only means "lottery play" in the HEAD of an ENTRY post, before
     # the ticker: "CALL/ ODTE LOTTO TICKER TSLA". In "keep as lotto" (an exit
@@ -272,7 +399,7 @@ def parse(message: RawMessage | str, channel: str = "") -> Signal:
 
     base: dict[str, Any] = dict(
         channel=name, channel_id=chan_id, ticker=ticker, side=side, strike=strike,
-        expiry=_expiry(t), his_bid=his_bid, pct=pct, price=price, tags=tags,
+        expiry=expiry, his_bid=his_bid, pct=pct, price=price, tags=tags,
         flags=flags, raw=raw_text,
     )
 

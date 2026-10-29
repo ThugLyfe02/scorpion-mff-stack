@@ -5,6 +5,8 @@
     python -m scorpion_mff.cli arm            # dry-armed (no orders leave the box)
     python -m scorpion_mff.cli arm --live     # needs MFF_RH_TOKEN, explicit opt-in
     python -m scorpion_mff.cli status
+    python -m scorpion_mff.cli verify           # fill-log integrity + unresolved intents
+    python -m scorpion_mff.cli recover          # resolve crash-left intents (never places)
 """
 
 from __future__ import annotations
@@ -13,17 +15,28 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 
-from .broker import HttpQuoteProvider, RobinhoodAgenticBroker, mask
+from .broker import (
+    HttpQuoteProvider,
+    OrderLookup,
+    PaperBroker,
+    RobinhoodAgenticBroker,
+    mask,
+)
 from .engine import Engine, EngineConfig
 from .fills import FillLog
 from .health import Heartbeat, LatencyBudget
 from .killswitch import KillSwitch
+from .ledger import Ledger
 from .listener import Listener, WebsocketGateway
 from .parser import CHANNEL_IDS, EXCLUDED_CHANNEL_IDS, EXCLUDED_TICKERS
 from .replay import load_quotes, load_tape, replay
+from .types import Fill, RawMessage
 
 ROOT = Path(__file__).resolve().parent.parent
 FILL_LOG = ROOT / "live" / "fills.jsonl"
@@ -31,6 +44,14 @@ HEARTBEAT = ROOT / "live" / "heartbeat.json"
 NO_TRADE = ROOT / "live" / "NO_TRADE"
 
 __version__ = "0.1.0"
+
+
+def _spread_gate_text() -> str:
+    """Human-readable spread-gate state, shared by doctor and arm."""
+    ratio = EngineConfig().max_spread_ratio
+    if ratio is None:
+        return "OFF (MFF_MAX_SPREAD_RATIO unset)"
+    return f"ON (max {ratio:.1%})"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -53,6 +74,12 @@ def _parser() -> argparse.ArgumentParser:
     arm.add_argument("--limit", type=int, default=None, help="stop after N events")
     arm.add_argument("--enforce-breakeven", action="store_true",
                      help="poll quotes and flatten any position at/through its BE stop")
+    arm.add_argument("--no-expiry-guard", action="store_true",
+                     help="DISARM the expiry guard (default: on, see 'expiry audit')")
+    arm.add_argument("--expiry-cutoff", type=int, default=15, metavar="MINUTES",
+                     help="flatten window before the close (default 15 -> 15:45 ET)")
+    arm.add_argument("--tick-s", type=float, default=15.0,
+                     help="clock cadence of the no-traffic tick (default 15s)")
     arm.add_argument("--max-quote-age", type=float, default=5.0,
                      help="refuse a quote older than this many seconds (default 5)")
 
@@ -61,6 +88,13 @@ def _parser() -> argparse.ArgumentParser:
     ver = sub.add_parser("verify", help="validate the fill log for gaps, duplicates, torn rows")
     ver.add_argument("--fills", type=Path, default=None,
                      help="fill log (default live/fills.jsonl)")
+
+    rec = sub.add_parser("recover",
+                         help="resolve crash-left intents from a broker lookup; never places")
+    rec.add_argument("--fills", type=Path, default=None,
+                     help="fill log (default live/fills.jsonl)")
+    rec.add_argument("--broker", choices=("robinhood", "paper"), default="robinhood",
+                     help="lookup backend (default robinhood; paper is deterministic)")
 
     marks = sub.add_parser("marks", help="mark the open book to market (unrealised P&L)")
     marks.add_argument("--fills", type=Path, default=None,
@@ -150,6 +184,16 @@ def _parser() -> argparse.ArgumentParser:
     e_show.add_argument("--fills", type=Path, default=None,
                         help="fill log (default live/fills.jsonl)")
     e_show.add_argument("--json", action="store_true")
+
+    xp = sub.add_parser("expiry", help="expiry guard: audit the corpus against the close cutoff")
+    xp_sub = xp.add_subparsers(dest="expiry_cmd", required=True)
+    xa = xp_sub.add_parser("audit", help="how many alerts are 0DTE, how many never closed, "
+                                          "and what the cutoff would have caught")
+    xa.add_argument("--corpus", type=Path, default=None,
+                    help="trades.json (default: mff-backtest/bt_full)")
+    xa.add_argument("--cutoff-minutes", type=int, default=15,
+                    help="flatten window before the close (default 15 -> 15:45 ET)")
+    xa.add_argument("--json", action="store_true", help="machine-readable audit")
     return p
 
 
@@ -178,6 +222,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         f"robinhood token             {mask(os.environ.get('MFF_RH_TOKEN', ''))}",
         f"robinhood base              {os.environ.get('MFF_RH_BASE', 'https://api.robinhood.com')}",
         f"broker mode                 {broker_mode}",
+        f"spread gate                 {_spread_gate_text()}",
         "",
         "locked rules:",
         "  entry limit = min(live_ask, his_bid * 1.15); skip if ask > +25% off his bid",
@@ -206,6 +251,60 @@ def cmd_replay(args: argparse.Namespace) -> int:
     print(f"replay {args.tape}  (pipe_test={cfg.pipe_test})")
     print(report.to_text())
     return 0
+
+
+async def pump_listener(listener: Listener, limit: int | None = None,
+                        out: Callable[[str], None] = print) -> int:
+    """Messages as they arrive, plus a tick whenever the channel goes quiet.
+
+    `asyncio.wait_for(anext(...), tick_s)` is what gives the expiry guard a clock: nothing
+    else fires at 15:45 ET if nobody posts. It is wrapped in `shield` deliberately, and
+    that is not decoration. A bare `wait_for` CANCELS `anext` on timeout, and cancelling an
+    async generator's `__anext__` closes the generator - the Gateway connection is torn
+    down, the pump exits, and the bot goes silent on the first quiet quarter hour of the
+    session. That is the 9/8 failure with extra steps. So the pending fetch is shielded
+    and merely re-awaited: the timeout fires the tick, the in-flight fetch survives, and no
+    message can be swallowed by a tick.
+
+    Returns the number of messages handled. `--limit` counts messages only, never ticks,
+    so a bounded run cannot be starved by an idle channel.
+    """
+    count = 0
+    ticks = 0
+    messages = listener.transport.messages()
+    pending: asyncio.Future[RawMessage] | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(anext(messages))
+            try:
+                message = await asyncio.wait_for(asyncio.shield(pending), listener.tick_s)
+                pending = None
+            except TimeoutError:
+                ticks += 1
+                clock = listener.clock()
+                if ticks == 1 or ticks % 20 == 0:
+                    out(f"  {clock:>10.3f} {'tick':<24} expiry-guard      "
+                        f"{len(listener.engine.open_positions)} open "
+                        f"{listener.engine.stats.expiry_pages} page(s)")
+                listener.tick(clock)
+                continue
+            except StopAsyncIteration:
+                pending = None
+                break
+            intents = listener.handle(message)
+            stops = listener.refresh_stops()
+            kind = "trade" if intents else "none"
+            out(f"  {message.ts:>10.3f} {message.channel:<24} {kind:<6} "
+                f"{len(intents)} intent(s) {len(stops)} stop(s) "
+                f"latency={listener.budget.worst_ms}ms")
+            count += 1
+            if limit is not None and count >= limit:
+                break
+    finally:
+        if pending is not None:
+            pending.cancel()
+    return count
 
 
 def cmd_arm(args: argparse.Namespace) -> int:
@@ -272,10 +371,13 @@ def cmd_arm(args: argparse.Namespace) -> int:
             return 1
 
     broker = RobinhoodAgenticBroker(dry_run=not live)
+    expiry_guard = not bool(args.no_expiry_guard)
     listener = Listener(
         transport=WebsocketGateway(token=token),
         engine=Engine(
             config=EngineConfig(enforce_breakeven=bool(args.enforce_breakeven),
+                                 enforce_expiry=expiry_guard,
+                                 expiry_cutoff_minutes=int(args.expiry_cutoff),
                                  max_quote_age_s=args.max_quote_age),
             fills=FillLog(path=FILL_LOG, fsync=False),
             governor=make_governor(risk_policy),
@@ -286,31 +388,22 @@ def cmd_arm(args: argparse.Namespace) -> int:
         budget=LatencyBudget(),
         heartbeat=Heartbeat(path=HEARTBEAT),
         kill=kill,
+        tick_s=float(args.tick_s),
     )
     quotes_status = "configured" if quotes.configured else "NOT configured (entries will reject)"
     print(f"armed | broker={'LIVE' if live else 'DRY'} | "
           f"quotes={quotes_status} | "
           f"channels={','.join(CHANNEL_IDS)}")
+    guard = (f"ON (flatten at {args.expiry_cutoff}m before the ET close, tick "
+             f"{args.tick_s:g}s)" if expiry_guard else "OFF (--no-expiry-guard)")
+    print(f"expiry | guard {guard} | backtest parity unaffected (this is the live path)")
     print(f"risk  | policy {risk_policy.name} (1R=${risk_policy.risk_unit_usd:,.0f}, "
           f"daily stop ${risk_policy.daily_loss_limit_usd_effective() or 0:,.0f}) | "
           f"equity ${risk_state.equity_usd:,.2f} | peak ${risk_state.peak_equity_usd:,.2f}")
-
-    async def pump() -> int:
-        count = 0
-        async for message in listener.transport.messages():
-            intents = listener.handle(message)
-            stops = listener.refresh_stops()
-            kind = "trade" if intents else "none"
-            print(f"  {message.ts:>10.3f} {message.channel:<24} {kind:<6} "
-                  f"{len(intents)} intent(s) {len(stops)} stop(s) "
-                  f"latency={listener.budget.worst_ms}ms")
-            count += 1
-            if args.limit is not None and count >= args.limit:
-                break
-        return count
+    print(f"spread | gate {_spread_gate_text()}")
 
     try:
-        asyncio.run(pump())
+        asyncio.run(pump_listener(listener, args.limit))
     except KeyboardInterrupt:
         print("interrupted")
     return 0
@@ -321,7 +414,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     A gap means a lost decision, a duplicate means a double-counted fill, and a
     torn last line means a crash mid-append. None may pass silently: a book
-    reconstructed from a corrupt log would trade on a lie.
+    reconstructed from a corrupt log would trade on a lie. Since the intent row
+    arrived, there is one more defect: an intent with no later terminal - an
+    order that may or may not have reached the venue. That is a divergence, not
+    a clean log. A `transport_unknown` row explains one cause of that divergence
+    (the socket died mid-order); it is named here so the operator can tell a
+    venue ambiguity from a plain crash, and either way the answer is the same:
+    resolve it with `recover` from a lookup, never with a retry.
     """
     fills_path = args.fills or FILL_LOG
     if not fills_path.exists():
@@ -333,9 +432,78 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if problems:
         for problem in problems:
             print(f"  PROBLEM {problem}")
-        print(f"{len(problems)} problem(s): the log cannot be trusted as-is")
+    unresolved = Ledger.unresolved(rows)
+    quarantined = Ledger.quarantine_reasons(rows)
+    if unresolved:
+        print(f"{len(unresolved)} unresolved intent(s) - a decision with no terminal:")
+        for intent in unresolved:
+            why = quarantined.get(intent.note)
+            cause = f" [transport unknown: {why}]" if why else ""
+            print(f"  UNRESOLVED {intent.seq} {intent.contract_key:<28} "
+                  f"{intent.qty:>3}x key={intent.note} ({intent.reason}){cause}")
+    if problems or unresolved:
+        if problems:
+            print(f"{len(problems)} problem(s): the log cannot be trusted as-is")
+        else:
+            print("run `recover` to resolve them from a broker lookup")
         return 1
-    print("intact: sequence contiguous, every row readable")
+    print("intact: sequence contiguous, every row readable, no unresolved intents")
+    return 0
+
+
+def make_recover_broker(kind: str) -> PaperBroker | RobinhoodAgenticBroker:
+    """The lookup-only broker for `recover`; paper is deterministic, Robinhood
+    reads MFF_RH_ORDER_LOOKUP_TEMPLATE (see RobinhoodAgenticBroker.lookup)."""
+    if kind == "paper":
+        return PaperBroker()
+    return RobinhoodAgenticBroker()
+
+
+def cmd_recover(args: argparse.Namespace) -> int:
+    """Close the mid-order silence: turn unresolved intents into terminals.
+
+    The ONLY thing recover may do is ask the broker what happened to each
+    unresolved idempotency key and append the answer: SEEN -> recovered,
+    NOT_SEEN -> not_sent, CANNOT_SAY -> the row stays unresolved and the exit
+    code is 1. It never places an order and never retries one - the whole point
+    is to stop guessing what a dead process may or may not have sent.
+    """
+    fills_path = args.fills or FILL_LOG
+    if not fills_path.exists():
+        print(f"no fill log yet at {fills_path}")
+        return 0
+    rows = FillLog().replay_file(fills_path)
+    unresolved = Ledger.unresolved(rows)
+    print(f"recover: {len(rows)} rows, {len(unresolved)} unresolved intent(s) at {fills_path}")
+    if not unresolved:
+        return 0
+
+    lookup = make_recover_broker(args.broker)
+    next_seq = max(f.seq for f in rows) + 1
+    appended: list[Fill] = []
+    still_unresolved: list[Fill] = []
+    for intent in unresolved:
+        result = lookup.lookup(intent.note)
+        if result is OrderLookup.CANNOT_SAY:
+            still_unresolved.append(intent)
+            print(f"  UNRESOLVED {intent.contract_key} key={intent.note} (lookup cannot_say)")
+            continue
+        event = "recovered" if result is OrderLookup.SEEN else "not_sent"
+        appended.append(Fill(
+            seq=next_seq, ts=time.time(), event=event, contract_key=intent.contract_key,
+            qty=intent.qty, price=intent.price, reason=f"{event}:{intent.reason}",
+            accepted=True, latency_ms=None, note=intent.note,
+        ))
+        next_seq += 1
+        print(f"  {event:<9} {intent.contract_key} key={intent.note}")
+
+    if appended:
+        FillLog(path=fills_path).append_rows(appended)
+        print(f"appended {len(appended)} terminal row(s) to {fills_path}")
+    if still_unresolved:
+        print(f"{len(still_unresolved)} intent(s) still unresolved (lookup cannot_say) - "
+              f"re-run `recover` once the lookup can decide")
+        return 1
     return 0
 
 
@@ -456,6 +624,225 @@ def cmd_backtest(args: argparse.Namespace) -> int:
             print(f"  {label:<44} taken {variant.taken:>3}  contracts {variant.contracts:>4}  "
                   f"pnl ${variant.pnl_usd:>11,.2f}  vs locked {variant.pnl_usd - base:+,.2f}")
     return 0
+
+
+# ── expiry audit ─────────────────────────────────────────────────────────────
+# Phrases that state a FINAL exit of the whole position. Deliberately narrow: "50%" or
+# "runners at 100%" is a scale-out, not a close, so counting those would overstate how
+# much of the record actually finished. The result is therefore a LOWER bound on
+# "never closed", which is the honest direction for a risk number - and it is checked
+# against the corpus's own outcome grading (win_partial + unknown) below.
+FINAL_CLOSE_PHRASES: tuple[str, ...] = (
+    r"\ball out\b", r"\bfully closed\b", r"\bclosed fully\b", r"\bfull close\b",
+    r"\bclosed full position\b", r"\bclosed out\b", r"\bclose fully\b",
+    r"\bsold remaining\b", r"\bsold majority\b", r"\bclosed remaining\b",
+    r"\bclose remaining\b", r"\blast runner\b", r"\bout at\b", r"\bsl close\b",
+    r"\bstop loss\b", r"\bclosed at breakeven\b", r"\bclosed no profit\b",
+    r"\bexplicit sl\b", r"\bclosed \d", r"\bclosed at \d", r"\bexit(?:ed)? all\b",
+)
+_FINAL_CLOSE_RE = re.compile("|".join(FINAL_CLOSE_PHRASES), re.IGNORECASE)
+_HHMM_RE = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
+UNCLOSED_OUTCOMES = ("win_partial", "unknown")
+
+
+def _notes_exit_mark(notes: str, entry_ts: float) -> tuple[int, int] | None:
+    """The last HH:MM in the notes that is not before the entry - or None.
+
+    None is the interesting answer: it means the record never said when (or whether) the
+    position was left, which is precisely the case the cutoff guard exists for.
+    """
+    from datetime import datetime
+
+    from . import historic
+
+    entry = datetime.fromtimestamp(entry_ts, historic.ET)
+    marks = [(int(h), int(m)) for h, m in _HHMM_RE.findall(notes or "")]
+    later = [mark for mark in marks if mark >= (entry.hour, entry.minute)]
+    return max(later) if later else None
+
+
+def expiry_audit(corpus: str | Path | None = None,
+                 cutoff_minutes: int = 15) -> dict[str, object]:
+    """Measure the expiry guard against the only record that exists. Read-only.
+
+    Three questions, and a refusal:
+
+      1. how much of the corpus is 0DTE (a contract that dies at the bell)?
+      2. how many alerts never recorded an explicit final close - i.e. how many
+         positions the live book would still be carrying?
+      3. of the same-day ones, what share would the cutoff force-close, and what share
+         has no recorded exit time at all (those PAGE - they cannot be force-closed on
+         a price nobody wrote down)?
+
+    And the refusal: **assignment is not projected.** The corpus records the option
+    premium (`entry_bid`, `exit_pct`) and nothing about the underlying, so the shares a
+    0DTE would deliver are unknowable from it. `100 x contracts` here would be an
+    invention, and a missing price is not an out-of-the-money contract.
+    """
+    from datetime import date
+
+    from . import historic
+    from .calendar import CalendarError, session_for
+    from .expiry import SAME_DAY_TOKENS
+
+    path = Path(corpus) if corpus is not None else historic.DEFAULT_CORPUS
+    trades = historic.load_trades(path)
+    if not trades:
+        raise ValueError(f"empty corpus at {path}")
+
+    def is_same_day(trade: historic.Trade) -> bool:
+        return (trade.expiry.strip() == trade.date.strip()
+                or trade.expiry.strip().upper() in SAME_DAY_TOKENS)
+
+    same_day = [t for t in trades if is_same_day(t)]
+    unclosed = [t for t in trades if not _FINAL_CLOSE_RE.search(t.notes or "")]
+    floor = [t for t in trades if t.outcome in UNCLOSED_OUTCOMES]
+    outcome_counts: dict[str, int] = {}
+    for trade in same_day:
+        outcome_counts[trade.outcome] = outcome_counts.get(trade.outcome, 0) + 1
+
+    forced = 0
+    known = 0
+    no_mark = 0
+    latest: tuple[int, int] | None = None
+    cutoff_et_marks: set[str] = set()
+    half_days = 0
+    no_session = 0
+    for trade in same_day:
+        try:
+            session = session_for(date.fromisoformat(trade.date))
+        except (CalendarError, ValueError):
+            session = None
+        if session is None:
+            no_session += 1
+            continue
+        half_days += int(session.half_day)
+        cutoff = session.cutoff_utc(cutoff_minutes).astimezone(historic.ET)
+        cutoff_et_marks.add(f"{cutoff.hour:02d}:{cutoff.minute:02d}")
+        mark = _notes_exit_mark(trade.notes, trade.entry_ts)
+        if mark is None:
+            no_mark += 1
+            continue
+        known += 1
+        if latest is None or mark > latest:
+            latest = mark
+        if mark >= (cutoff.hour, cutoff.minute):
+            forced += 1
+
+    def pct(part: int, whole: int) -> float:
+        return round(100.0 * part / whole, 2) if whole else 0.0
+
+    def hhmm(mark: tuple[int, int] | None) -> str | None:
+        return None if mark is None else f"{mark[0]:02d}:{mark[1]:02d}"
+
+    floor_detail = " + ".join(f"{sum(1 for t in trades if t.outcome == name)} {name}"
+                              for name in UNCLOSED_OUTCOMES)
+    return {
+        "corpus": str(path),
+        "alerts": len(trades),
+        "days": len({t.date for t in trades}),
+        "first_date": min(t.date for t in trades),
+        "last_date": max(t.date for t in trades),
+        "same_day": {
+            "count": len(same_day),
+            "of": len(trades),
+            "share_pct": pct(len(same_day), len(trades)),
+            "by_outcome": dict(sorted(outcome_counts.items(), key=lambda kv: -kv[1])),
+            "half_day_sessions": half_days,
+            "no_session": no_session,
+        },
+        "no_explicit_close": {
+            "count": len(unclosed),
+            "of": len(trades),
+            "share_pct": pct(len(unclosed), len(trades)),
+            "same_day": sum(1 for t in unclosed if is_same_day(t)),
+            "outcome_floor": len(floor),
+            "outcome_floor_detail": floor_detail,
+            "consistent_with_floor": len(unclosed) >= len(floor),
+        },
+        "cutoff": {
+            "minutes": cutoff_minutes,
+            "cutoff_et": sorted(cutoff_et_marks),
+            "force_close": forced,
+            "known_exit_time": known,
+            "no_exit_time": no_mark,
+            "share_of_same_day_pct": pct(forced, len(same_day)),
+            "share_of_known_pct": pct(forced, known),
+            "latest_exit_et": hhmm(latest),
+            "clock_caveat": (
+                "the corpus carries no timezone proof: its recorded entry times precede "
+                "the 09:30 ET open, so the cutoff share is computed on the declared ET "
+                "clock and the recorded marks are read as written"),
+        },
+        "assignment": {
+            "status": "refused",
+            "shares": None,
+            "reason": (
+                "the corpus records the option premium only: it has no underlying close "
+                "at expiry, so assignment shares cannot be projected. A missing price "
+                "is not an out-of-the-money contract"),
+            "unresolved_positions": no_mark,
+        },
+    }
+
+
+def _expiry_audit_text(audit: dict[str, object]) -> str:
+    same = audit["same_day"]
+    unclosed = audit["no_explicit_close"]
+    cutoff = audit["cutoff"]
+    assignment = audit["assignment"]
+    assert isinstance(same, dict) and isinstance(unclosed, dict)
+    assert isinstance(cutoff, dict) and isinstance(assignment, dict)
+    marks = ", ".join(cutoff["cutoff_et"]) or "?"
+    latest = cutoff["latest_exit_et"] or "none on record"
+    lines = [
+        f"expiry audit - {audit['corpus']}",
+        f"{audit['alerts']} alerts over {audit['days']} sessions "
+        f"({audit['first_date']} .. {audit['last_date']})",
+        "",
+        f"same-day expiry         {same['count']:>3} / {same['of']}  "
+        f"({same['share_pct']:.1f}%)   every one dies at the bell",
+        f"no explicit final close {unclosed['count']:>3} / {unclosed['of']}  "
+        f"({unclosed['share_pct']:.1f}%)   floor {unclosed['outcome_floor']} from the "
+        f"outcomes ({unclosed['outcome_floor_detail']})",
+        f"   same-day among them   {unclosed['same_day']:>3} / {same['count']} same-day",
+        f"cutoff force-close      {cutoff['force_close']:>3} / {same['count']} same-day "
+        f"({cutoff['share_of_same_day_pct']:.1f}% of same-day, "
+        f"{cutoff['share_of_known_pct']:.1f}% of the {cutoff['known_exit_time']} with a "
+        f"recorded exit time)",
+        f"   cutoff {marks} ET for a {cutoff['minutes']}m window, latest recorded "
+        f"same-day exit {latest} ET, half-day sessions {same['half_day_sessions']}",
+        f"   no recorded exit time {cutoff['no_exit_time']:>3} / {same['count']} - at the "
+        f"cutoff these PAGE (HALT_AND_PAGE) instead of flattening on an invented price",
+        f"assignment projection   REFUSED - {assignment['reason']}",
+        "",
+        f"clock caveat: {cutoff['clock_caveat']}",
+    ]
+    if not unclosed["consistent_with_floor"]:
+        lines.append(
+            f"WARNING: the notes show only {unclosed['count']} unclosed, below the "
+            f"{unclosed['outcome_floor']} the outcome grading implies - the phrase list "
+            f"or the corpus has drifted")
+    return "\n".join(lines)
+
+
+def cmd_expiry(args: argparse.Namespace) -> int:
+    """`expiry audit`: the guard, measured against the corpus. Places nothing."""
+    if args.expiry_cmd != "audit":                     # pragma: no cover - argparse
+        print(f"unknown expiry subcommand: {args.expiry_cmd}", file=sys.stderr)
+        return 2
+    try:
+        audit = expiry_audit(args.corpus, cutoff_minutes=int(args.cutoff_minutes))
+    except (OSError, ValueError) as exc:
+        print(f"cannot audit {args.corpus or 'the default corpus'}: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(audit, indent=2))
+    else:
+        print(_expiry_audit_text(audit))
+    unclosed = audit["no_explicit_close"]
+    assert isinstance(unclosed, dict)
+    return 0 if unclosed["consistent_with_floor"] else 1
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
@@ -748,6 +1135,7 @@ def main(argv: list[str] | None = None) -> int:
         "arm": cmd_arm,
         "status": cmd_status,
         "verify": cmd_verify,
+        "recover": cmd_recover,
         "marks": cmd_marks,
         "backtest": cmd_backtest,
         "watch": cmd_watch,
@@ -756,6 +1144,7 @@ def main(argv: list[str] | None = None) -> int:
         "tca": cmd_tca,
         "fuzz": cmd_fuzz,
         "exposure": cmd_exposure,
+        "expiry": cmd_expiry,
     }
     return handlers[args.cmd](args)
 

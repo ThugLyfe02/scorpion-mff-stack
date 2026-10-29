@@ -46,15 +46,86 @@ scheduler to be starved.
 | STOP/stand-down = halt (exits still allowed) | `engine._on_stop` / `halted` | `test_engine.py` |
 | event-driven, not cron | `listener.Listener.handle` | `test_listener.py` |
 
+## The lane boundary: PR#2 is live, PR#1 is paper
+
+Two PRs, two jobs, one gate. The boundary is not a preference; it is what keeps a
+research component from becoming a live dependency by accident.
+
+| | **PR#2 — this tree** | **PR#1 — `.worktrees/pr1`** |
+|---|---|---|
+| Branch | `hardening/correlated-book-guard` | `hardening/deterministic-control-plane` |
+| Job | live Discord -> Robinhood executor | event-sourced control plane / research frontier |
+| May place an order? | yes, `arm --live` only, after the policy/token/quote refusals | **no** — paper plane |
+| Imports the other lane? | never | never |
+| 3.a gate | ruff clean, mypy 27 files, **516 passed** (513 at 3.a; +3 integration tests) | ruff clean, mypy 63 files, **551 passed + 1 xfailed** |
+
+The merge boundary is explicit:
+
+* **PR#2 stays the live lane.** It is the only tree that can place an order, and it
+  places one only through `arm --live` after `arm` has refused on any missing precondition
+  (`doctor` shows that surface first).
+* **PR#1 remains the paper plane.** It is read-only source for this lane; it is never a
+  runtime dependency and it never places an order.
+* **No cross-imports.** Nothing under `scorpion_mff/` may `import scorpion`, add the pr1
+  tree to `sys.path`, or reach into `.worktrees/`. Nothing under `.worktrees/pr1/src/`
+  may import `scorpion_mff`. A port is copy-and-harden plus a test in this tree, never a
+  dependency.
+* **No worktree edits.** This lane does not edit `.worktrees/pr1`; 3.a left
+  `git -C .worktrees/pr1 status --short` empty, and this lane keeps it that way. A change
+  to the paper plane is a change in PR#1, reviewed and gated there.
+* **They merge independently.** PR#1 does not merge into PR#2, and PR#2 does not merge
+  into PR#1. Each carries its own gate.
+
+Check the boundary without running anything that trades:
+
+```bash
+grep -rnE "^[[:space:]]*(from scorpion[.]|import scorpion$)|worktrees" scorpion_mff
+grep -rnE "scorpion_mff|\.\./\.\./scorpion" .worktrees/pr1/src
+```
+
+Both should print nothing. (3.a item 10 records the same result.)
+
+## PR#1 -> PR#2 port matrix (read-only source)
+
+What crossed the lane, in which direction, and what did **not** cross. The PR#1 paths are
+read-only source modules; the PR#2 paths are the live port. Verdicts are 3.a's, quoted
+verbatim in `docs/GEMS.md`.
+
+| PR#1 read-only source | What it owns | PR#2 live port | Verdict |
+|---|---|---|---|
+| `.worktrees/pr1/src/scorpion/sessions.py:16-62` | ET session, holiday and half-day tables, DST offset | `scorpion_mff/calendar.py` (`OPEN_ET`/`CLOSE_ET`/`HALF_DAY_CLOSE_ET` 31-33, `et_offset_at` 93-120, `et_date` 129-138, `is_trading_day` 175-186) | **Ported + hardened.** Unknown year raises before the weekend check; the DST seam is dated by instant, not by a per-date approximation. |
+| `.worktrees/pr1/src/scorpion/expiry.py:96-135` | release a carried position only when its expiry is provable | `scorpion_mff/engine.py:329-393` (`_expire_carried`) | **Ported as a superset.** Same `< market_day` rule, plus same-day tokens and a mandatory `expiry_unresolved:...:assignment=` alert; an unreadable key keeps the slot. |
+| `.worktrees/pr1/src/scorpion/outbox.py:78-84` | circuit breaker: threshold, cooldown, one probe | `scorpion_mff/execution.py:44-111` (`CircuitBreaker`) + `listener.py:131-197` (`_place`) | **Ported + stricter.** PR#1 admitted unbounded half-open probes; PR#2 arms exactly one via `_probe_armed`. The breaker gates buys only. |
+| `.worktrees/pr1/src/scorpion/guard.py:44-45` | "UNEVALUABLE blocks" | `scorpion_mff/execution.py:114-131` (`spread_ratio`/`spread_ok`) | **Philosophy ported, check set NOT ported.** `guard.evaluate`/`DEFAULT_CHECKS` (drift/vol/tail/burst/cooldown) have no live equivalent; see the unported-surfaces table in `docs/GEMS.md`. |
+| `.worktrees/pr1/src/scorpion/reconciliation.py:150-166` | three-valued venue answer (`seen`/`not_seen`/`unknown`) | `scorpion_mff/broker.py:37-48`, `:214-249` (`OrderLookup`) + `ledger.py` | **Tri-state ported; drift-halt NOT ported.** `reconcile`/`reconcile_and_halt` (`phantom_local`/`missing_local`/`quantity_mismatch`) still have no live detector; that is O2. O1's log/ledger seam is closed, so an ambiguous order is now visible and resolvable, but there is no automatic venue snapshot to halt on. |
+| `.worktrees/pr1/src/scorpion/outbox.py:181-188` | quarantine a sender exception as UNKNOWN for later reconciliation | `scorpion_mff/listener.py` `_on_transport_failure` + `ledger.py` (`TRANSPORT_UNKNOWN`, `quarantine_reasons`) | **Ported in final integration.** A transport failure writes a non-terminal `transport_unknown` row; the intent stays unresolved for `verify`/`recover`. An unknown **exit** pages immediately (`exit_unknown:transport`), because the engine books flat at intent time. Nothing retries. |
+
+Live-lane additions with no PR#1 counterpart (they are not ports, and are not claimed as
+such):
+
+| PR#2 surface | What it adds |
+|---|---|
+| `scorpion_mff/expiry.py` + `engine.expiry_intents` + `listener.tick` | the 15-minute cutoff: `HOLD`/`FORCE_CLOSE`/`HALT_AND_PAGE`, at a live bid or a page, on a clock that fires with no Discord traffic |
+| `scorpion_mff/cli.py` `recover` | resolve a crash-left intent from a venue lookup; never places, never retries |
+| `scorpion_mff/cli.py` `expiry audit` | measure the corpus against the cutoff and refuse an assignment projection the corpus cannot support |
+
+Full acceptance ledger, one command per gem: **`docs/GEMS.md`**.
+
 ## Run it
 
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install pytest            # tests only
-.venv/Scripts/python -m pytest tests -q               # 99 tests, offline
+.venv/Scripts/python -m pytest tests -q               # 516 tests, offline
 
-.venv/Scripts/python -m scorpion_mff.cli doctor       # rules, switches, broker mode
+.venv/Scripts/python -m scorpion_mff.cli doctor       # rules, switches, broker mode,
+                                                      #   spread-gate setting (OFF unless armed)
 .venv/Scripts/python -m scorpion_mff.cli replay tapes/sep8.json
+.venv/Scripts/python -m scorpion_mff.cli expiry audit # 40/93 same-day, 65/93 no close,
+                                                      #   0/40 force-close, assignment REFUSED
+.venv/Scripts/python -m scorpion_mff.cli recover      # resolve crash-left intents from a
+                                                      #   lookup; never places
+.venv/Scripts/python -m scorpion_mff.cli verify       # fill-log integrity + unresolved intents
 .venv/Scripts/python -m scorpion_mff.cli arm          # DRY: decides, places nothing
 .venv/Scripts/python -m scorpion_mff.cli status       # kill switch + fill-log tail
 ```
@@ -85,7 +156,9 @@ is a fact about the rules, not a bug — worth deciding on deliberately.
 backtest corpus is full of), pricing boundaries, the full sizing table, every
 state-machine transition, the fill log, the kill switch, the latency budget,
 the HTTP order shape (against a real local server: idempotency key, retry ladder,
-429 honouring `retry_after`, token never in an error), and the 9/8 replay.
+429 honouring `retry_after`, token never in an error), and the 9/8 replay. Since the
+PR#1 ports, the ET calendar, the 0DTE cutoff matrix, the one-probe breaker, the tri-state
+ledger, and `recover` are also proven offline; `docs/GEMS.md` is the one-command index.
 
 **Not yet proven — needs your credentials or a decision:**
 
@@ -104,6 +177,14 @@ the HTTP order shape (against a real local server: idempotency key, retry ladder
    TICKER TSLA`) are IGNORED by default. The lock names lotto-* CHANNELS as
    excluded; whether a LOTTO-flagged post inside `options-king` is also out is a
    house call. Flip it in `parser.parse` when you decide.
+5. **Automatic venue-side reconciliation (3.a O2).** A transport-failed order is now
+   quarantined rather than closed with a fake `reject`: the intent stays unresolved, an
+   unknown **exit** pages immediately (`exit_unknown:transport`), `verify` names the
+   ambiguity, and `recover` settles it from a venue lookup. What does not exist is an
+   automatic book-vs-venue **drift halt** — there is no venue positions snapshot to compare
+   against on a schedule, so a human (or `verify`/`recover`) must act on the page. This is
+   unported, not hidden; do not "fix" it by making `recover` retry. See `docs/GEMS.md` for
+   the recorded risk and the gate that would have to open.
 
 ## Defects found and fixed (why the replay harness and a second opinion exist)
 
@@ -126,7 +207,7 @@ architect deepseek-v4-pro · main deepseek-v4-flash), all now regression-tested 
 | `SCALE` meant trim, so "scaling in" cut a position he was building | `SCALING IN`/`SCALE IN` are ADDs; only `SCALE OUT`/`SCALING OUT` trim |
 | A negated verb still fired: "don't add", "not closing yet", "no adds above 1.50" | a negated verb is IGNORE; `DO NOT BUY` stays a stand-down |
 | No dedup: a Gateway RESUME redelivery would trade the same post twice, and the second buy has a fresh idempotency key so the broker cannot catch it | the listener drops a repeated `message_id` (bounded 5,000) and logs `duplicate` |
-| `closed` never reset, so a 0DTE key could never be re-traded on a later day | daily roll on the UTC date: clears `closed`, resets the pipe counter, logs `day_roll` |
+| `closed` never reset, so a 0DTE key could never be re-traded on a later day | daily roll on the ET trading date (`calendar.py`): clears `closed`, resets the pipe counter, logs `day_roll` |
 | An ambiguous exit (two positions in one channel, no contract named) was a silent skip | logged as an `alert` event — a human decides; the automation still refuses to guess |
 
 **Raised by the review and deliberately NOT changed** (your call, not mine):
@@ -155,11 +236,17 @@ alerts do:
 * **Expiry releases a slot** (`Engine._expire_carried`). MAX_CONCURRENT is a live-risk
   limit, so a position whose contract has provably expired must stop counting. Without
   it, one alert with no recorded exit held both slots and every later entry was skipped —
-  the hone goes silent mid-month and the log says only `max_concurrent`. `0DTE` and past
-  ISO expiries are released at the day roll; an unparseable expiry (`Dec 5`) is **not**
-  released and raises `expiry_unparsed`, because freeing a live slot on a guess
-  under-counts risk. The release is `accepted=False`, so an unmarked expiry never enters
-  realised P&L.
+  the hone goes silent mid-month and the log says only `max_concurrent`. Same-day tokens
+  (`0DTE`/`ODTE`/`TODAY`) and past ISO expiries are released at the ET trading-date roll;
+  an unparseable expiry (`Dec 5`) is **not** released and raises `expiry_unparsed`,
+  because freeing a live slot on a guess under-counts risk. The release is
+  `accepted=False`, so an unmarked expiry never enters realised P&L — and it is never
+  silent: it also writes `expiry_unresolved:<why>:<expiry>:assignment=<shares|unknown>`.
+* **The close is a clock, not a post** (`Engine.expiry_intents`, `Listener.tick`). A 0DTE
+  is flattened at the bid actually seen inside the cutoff window (15 minutes before the
+  session's own close, so 12:45 on a half day), or paged `HALT_AND_PAGE` and left on the
+  book when there is no live bid. Off unless `EngineConfig.enforce_expiry` (replay parity);
+  `arm` turns it on. Measured against the corpus by `expiry audit`.
 * **A bare ticker attributes an exit** (`parser._BARE_SYMBOL_RE`). The parser used to
   recover a ticker only from the literal `TICKER X` form, so `QQQ puts closed at 2.85`
   arrived nameless and could only be resolved by channel — and with two positions open in
@@ -168,6 +255,42 @@ alerts do:
   Ambiguity is still an alert, never a guess: two symbols in one post resolves to nothing.
 
 Both are covered by `tests/test_exit_attribution.py`, including the two-position case.
+
+## Expiry audit, recover, and the doctor setting
+
+Three commands were added with the PR#1 ports. Each answers a question the fill log
+cannot answer by itself; each is safe to run while the hone is live.
+
+| Command | Invariant it enforces | Failure mode it exists for |
+|---|---|---|
+| `expiry audit` | the measurement refuses claims the corpus cannot support: no underlying close -> **assignment REFUSED**; no recorded exit time -> page, not an invented price | a fabricated assignment number, or a cutoff that force-closes on a price nobody saw |
+| `recover` | a crash-left or transport-quarantined `intent` is resolved **only** from a venue lookup: `SEEN` -> `recovered`, `NOT_SEEN` -> `not_sent`, `CANNOT_SAY` -> still unresolved and exit 1; it never places and never retries | a restart that double-sends, or a local book that looks flat while the venue still holds risk |
+| `doctor` | every switch is visible before arming, including the spread gate. `OFF (MFF_MAX_SPREAD_RATIO unset)` is printed, not omitted | arming while believing a gate is on when it is off (or the reverse), or a live run that was meant to be dry |
+
+The audit's output on the current corpus is the evidence, not a promise:
+
+```
+same-day expiry          40 / 93  (43.0%)
+no explicit final close  65 / 93  (69.9%)   floor 61 from the outcomes
+cutoff force-close        0 / 40 same-day
+   no recorded exit time  10 / 40 - at the cutoff these PAGE
+assignment projection   REFUSED - the corpus records the option premium only
+clock caveat: the corpus carries no timezone proof
+```
+
+`recover` is a lookup, not a retry. Given an unresolved intent it appends exactly one
+terminal row from `OrderLookup` and nothing else; a `CANNOT_SAY` answer leaves the row
+open and exits 1, because an unknown is not a terminal. A transport failure is kept in the
+same unresolved state by a `transport_unknown` quarantine row, and `verify` prints the
+cause (`[transport unknown: ...]`); the row is never closed on a guess. The tests pin `placed == 0` in
+every branch. `doctor` is read-only: it touches no file and places nothing.
+
+Full gem-by-gem acceptance commands: **`docs/GEMS.md`**.
+
+What is deliberately **not** built, and the gate that would have to open first: no third
+parser, no conformal sizing on 93 trades, no latency-to-edge threshold without measured
+alert-to-fill drift, and no LLM in the path. The reasons are in `docs/GEMS.md`; the two
+unported PR#1 surfaces (guard check set, venue-drift halt) are recorded there too.
 
 ## Ops: does anyone know when it stops?
 

@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, Protocol
 
 from .types import OrderIntent, Quote
@@ -27,6 +28,29 @@ from .types import OrderIntent, Quote
 
 class BrokerError(RuntimeError):
     """Placement failed. The message is always token-free."""
+
+
+class TransportError(BrokerError):
+    """The HTTP transport could not reach the broker. Token-free by construction."""
+
+
+class OrderLookup(StrEnum):
+    """Tri-state answer to 'did this idempotency key ever reach the venue?'."""
+
+    SEEN = "seen"              # the venue has the order
+    NOT_SEEN = "not_seen"      # the venue never saw the order
+    CANNOT_SAY = "cannot_say"  # the lookup could not decide; the row stays open
+
+
+class OrderLookupProvider(Protocol):
+    """Anything that can say whether an idempotency key reached the venue."""
+
+    def lookup(self, idempotency_key: str) -> OrderLookup: ...
+
+
+def intent_key(intent: OrderIntent) -> str:
+    """The effective idempotency key: the explicit one, else contract:action."""
+    return intent.idempotency_key or f"{intent.contract_key}:{intent.action}"
 
 
 @dataclass(frozen=True)
@@ -79,10 +103,15 @@ class StaticQuotes:
 
 @dataclass
 class PaperBroker:
-    """Fills at the limit price. Optional slippage for honest replays."""
+    """Fills at the limit price. Optional slippage for honest replays.
+
+    The lookup is deterministic: SEEN for a key this broker actually placed,
+    NOT_SEEN for anything else - there is no transport to be unsure about.
+    """
 
     slippage: float = 0.0
     acks: list[Ack] = field(default_factory=list)
+    placed_keys: set[str] = field(default_factory=set)
 
     def place(self, intent: OrderIntent) -> Ack:
         if intent.qty <= 0:
@@ -94,10 +123,15 @@ class PaperBroker:
         else:
             raise BrokerError(f"unknown action {intent.action!r}")
         price = round(max(0.01, price), 4)
+        self.placed_keys.add(intent_key(intent))
         ack = Ack(ok=True, contract_key=intent.contract_key, qty=intent.qty,
                   price=price, broker_order_id=f"paper-{len(self.acks) + 1}")
         self.acks.append(ack)
         return ack
+
+    def lookup(self, idempotency_key: str) -> OrderLookup:
+        return (OrderLookup.SEEN if idempotency_key in self.placed_keys
+                else OrderLookup.NOT_SEEN)
 
 
 def mask(secret: str) -> str:
@@ -119,6 +153,8 @@ class RobinhoodAgenticBroker:
         "MFF_RH_BASE", "https://api.robinhood.com"))
     token: str = field(default_factory=lambda: os.environ.get("MFF_RH_TOKEN", ""))
     account: str = field(default_factory=lambda: os.environ.get("MFF_RH_ACCOUNT", "agentic"))
+    lookup_template: str = field(default_factory=lambda: os.environ.get(
+        "MFF_RH_ORDER_LOOKUP_TEMPLATE", ""))
     dry_run: bool = True
     timeout_s: float = 5.0
     retries: int = 3
@@ -145,7 +181,23 @@ class RobinhoodAgenticBroker:
         request = self._build_request(intent)
         last_error = ""
         for attempt in range(1, self.retries + 1):
-            status, body = self._send(request)
+            try:
+                status, body = self._send(request)
+            except TransportError as exc:
+                # Preserve the classification: the listener's circuit breaker
+                # must see this as TRANSPORT (urllib/timeout/OSError), not as a
+                # business reject.
+                raise TransportError(
+                    f"{intent.action} {intent.qty} {intent.contract_key}: {exc}"
+                ) from exc
+            if status == 0:
+                # A transport-shaped response (an injected transport or a wrapped
+                # connection failure): no HTTP status means the venue was never
+                # reached, which is transport, not a business refusal.
+                raise TransportError(
+                    f"{intent.action} {intent.qty} {intent.contract_key}: "
+                    f"transport error: {body.get('error', 'unknown')}"
+                )
             if 200 <= status < 300:
                 ack = Ack(ok=True, contract_key=intent.contract_key, qty=intent.qty,
                           price=float(body.get("average_price") or intent.limit),
@@ -159,6 +211,43 @@ class RobinhoodAgenticBroker:
             break
         raise BrokerError(f"{intent.action} {intent.qty} {intent.contract_key}: {last_error}")
 
+    def lookup(self, idempotency_key: str) -> OrderLookup:
+        """SEEN/NOT_SEEN/CANNOT_SAY from MFF_RH_ORDER_LOOKUP_TEMPLATE only.
+
+        No template -> CANNOT_SAY without a network call. The template's `{key}`
+        placeholder is URL-quoted; the response decides the result (see
+        `_interpret_lookup`). A transport failure is CANNOT_SAY, never a guess.
+        """
+        if not self.lookup_template:
+            return OrderLookup.CANNOT_SAY
+        url = self.lookup_template.replace("{key}", urllib.parse.quote(idempotency_key))
+        req = urllib.request.Request(url, headers={
+            "Accept": "application/json",
+            **({"Authorization": f"Bearer {self.token}"} if self.token else {}),
+        })
+        try:
+            status, body = self._send(req)
+        except TransportError:
+            return OrderLookup.CANNOT_SAY
+        return self._interpret_lookup(status, body)
+
+    @staticmethod
+    def _interpret_lookup(status: int, body: dict[str, Any]) -> OrderLookup:
+        """A lookup response decides the tri-state; an ambiguous one cannot say."""
+        if status == 404:
+            return OrderLookup.NOT_SEEN
+        if not (200 <= status < 300):
+            return OrderLookup.CANNOT_SAY
+        found = body.get("found")
+        if isinstance(found, bool):
+            return OrderLookup.SEEN if found else OrderLookup.NOT_SEEN
+        results = body.get("results")
+        if isinstance(results, list):
+            return OrderLookup.SEEN if results else OrderLookup.NOT_SEEN
+        if body.get("id") or body.get("order_id") or body.get("order"):
+            return OrderLookup.SEEN
+        return OrderLookup.CANNOT_SAY
+
     # ── internals ────────────────────────────────────────────────────────────
     def _build_request(self, intent: OrderIntent) -> urllib.request.Request:
         payload = {
@@ -170,7 +259,7 @@ class RobinhoodAgenticBroker:
             "time_in_force": "gtc",
             "reason": intent.reason[:120],
         }
-        idempotency_key = intent.idempotency_key or f"{intent.contract_key}:{intent.action}"
+        idempotency_key = intent_key(intent)
         req = urllib.request.Request(
             url=f"{self.base_url.rstrip('/')}/orders",
             data=json.dumps(payload).encode("utf-8"),
@@ -199,7 +288,7 @@ class RobinhoodAgenticBroker:
                 body = {"raw": raw[:200]}
             return exc.code, body
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            return 0, {"error": str(exc)[:200]}
+            raise TransportError(f"transport error: {str(exc)[:200]}") from exc
 
     @staticmethod
     def _retry_after(body: dict[str, Any], attempt: int) -> float:
