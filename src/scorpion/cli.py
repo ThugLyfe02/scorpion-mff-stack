@@ -527,6 +527,40 @@ def cmd_signature(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tournament(args: argparse.Namespace) -> int:
+    """Run the walk-forward policy tournament and state whether the winner survives.
+
+    Exit 0 for SUPPORTED (a rule earned promotion) or INCUMBENT_HELD (no rule beat the
+    baseline). FRAGILE, REJECTED and REFUSED exit 1 because a cron that treats them as
+    success would promote a rule the corpus does not support.
+    """
+    import tempfile
+
+    from .attribution import default_variants as all_variants
+    from .ledger import load_csv
+    from .tournament import default_variants, render, tournament
+
+    ledger = load_csv(args.corpus)
+    directory = Path(tempfile.mkdtemp(prefix="scorpion-tournament-"))
+    result = tournament(
+        ledger,
+        all_variants() if args.all_variants else default_variants(),
+        db_path_for=lambda name: directory / f"{name}.db",
+        n_folds=args.folds,
+        purge_days=args.purge_days,
+        embargo_days=args.embargo_days,
+        bootstrap_draws=args.bootstrap_draws,
+        seed=args.seed,
+    )
+    payload = result.to_dict()
+    payload["db_dir"] = str(directory)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(render(payload))
+    return 0 if result.verdict in {"SUPPORTED", "INCUMBENT_HELD"} else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scorpion", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -663,6 +697,20 @@ def main(argv: list[str] | None = None) -> int:
     srs.add_argument("--tail", type=int, default=None)
     srs.add_argument("--json", action="store_true")
     srs.set_defaults(func=cmd_series)
+
+    tour = sub.add_parser(
+        "tournament", help="walk-forward selection of policy variants, with DSR and PBO"
+    )
+    tour.add_argument("--corpus", default="mff-backtest/trades.csv")
+    tour.add_argument("--folds", type=int, default=4)
+    tour.add_argument("--purge-days", type=int, default=1)
+    tour.add_argument("--embargo-days", type=int, default=0)
+    tour.add_argument("--bootstrap-draws", type=int, default=2000)
+    tour.add_argument("--seed", type=int, default=20260908)
+    tour.add_argument("--all-variants", action="store_true",
+                      help="use every attribution variant (one full replay each)")
+    tour.add_argument("--json", action="store_true")
+    tour.set_defaults(func=cmd_tournament)
 
     sig = sub.add_parser("signature", help="compute a truncated path signature")
     sig.add_argument("--path", default=None,

@@ -13,6 +13,7 @@ deterministic signal/replay infrastructure, and a Ross-style gapper research des
 | Execution | **Paper/shadow + review-only boundary implemented**; no autonomous live submission |
 | Backtest / signal corpus | Legacy evidence in `mff-backtest/`; correctness caveats documented |
 | Research frontier | **Path signatures built** — exact truncated signature, lead-lag transform, Levy area, and a fit gate that refuses a level-3 fit on 107 trades. See `docs/FRONTIER_7.md` |
+| Out-of-sample policy tournament | **Built** — walk-forward folds with purge/embargo, Deflated Sharpe, PBO, paired block bootstrap, and named refusals. The shipped corpus holds the incumbent: no challenger beat the baseline in any fold. See `docs/TOURNAMENT.md` |
 | Gapper scanner | Agent research only — no scanner binary |
 
 The former browser/LLM cron path is retained only as operational history. It must not be treated as a
@@ -39,8 +40,9 @@ Research/chat/scanner workloads are outside this path and cannot block Discord i
 2. `docs/IMPLEMENTATION_STATUS.md`
 3. `docs/BACKTEST_CORRECTNESS.md`
 4. `docs/SECURITY.md`
-5. `live/RULES.lock.md`
-6. `docs/HANDOFF.md`
+5. `docs/TOURNAMENT.md`
+6. `live/RULES.lock.md`
+7. `docs/HANDOFF.md`
 
 ## Development
 

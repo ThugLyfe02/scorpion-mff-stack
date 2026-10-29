@@ -107,6 +107,12 @@ Still requires environment/operator work:
       Levy area (= signed polygon area, = half realized quadratic variation under lead-lag),
       and a fit gate that refuses a level-3 fit on the 107-trade corpus with a named reason
       (14 non-constant features, floor of 140 samples). See `docs/FRONTIER_7.md`.
+- [x] out-of-sample policy tournament (`tournament.py`): chronological folds with purge and
+      embargo, per-fold selection on the training block, an unseen-block score, Deflated Sharpe
+      over the trial count, PBO by CSCV, and a paired block bootstrap. The shipped corpus selects
+      the incumbent baseline in every fold, so the honest verdict is `INCUMBENT_HELD`, not a
+      promotion. `scorpion tournament` returns 0 for `SUPPORTED`/`INCUMBENT_HELD` and 1 for
+      `FRAGILE`/`REJECTED`/`REFUSED`. See `docs/TOURNAMENT.md`.
 - [x] mark-to-market (`marks.py`): the operator view the book was missing - unrealised P&L per
       held position, at/through-cost flags, and a total that **withholds itself** (`None`) when
       any open position cannot be priced or can only be priced with a stale quote, so a partial
