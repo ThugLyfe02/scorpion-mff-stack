@@ -142,14 +142,26 @@ GATE_LOG="$RUNDIR/gate.log"
 AGENT_LOG="$RUNDIR/agent.log"
 
 # ── materialise the lane branch ─────────────────────────────────────────────
+# Shallow fetches are a CI optimisation and must be opt-in: run on a developer clone
+# they rewrite that clone into a shallow repository (`--depth=1` truncates the history
+# behind `origin/<branch>` and drops a `.git/shallow` marker), which breaks `git log`,
+# `git blame` and any history check after the first dry run. `FLEET_SHALLOW=1` (which
+# the workflow sets) restores the fast path; an already-shallow clone keeps it.
+FETCH_DEPTH=""
+if [ "${FLEET_SHALLOW:-0}" = "1" ] \
+  || [ "$(git -C "$REPO_NATIVE" rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
+  FETCH_DEPTH="--depth=1"
+fi
+
 log "fetching $BRANCH"
-git -C "$REPO_NATIVE" fetch --depth=1 origin "$BRANCH" "$BASE_REF" >/dev/null 2>&1 \
+# $FETCH_DEPTH is intentionally unquoted so an empty value expands to no argument.
+git -C "$REPO_NATIVE" fetch $FETCH_DEPTH origin "$BRANCH" "$BASE_REF" >/dev/null 2>&1 \
   || { echo "run-lane: cannot fetch origin/$BRANCH" >&2; exit 2; }
 
 # In a linked worktree `.git` is a file (a gitdir pointer), not a directory, so the
 # -d test never matched and every re-run tried to create the worktree a second time.
 if [ -e "$WORKDIR/.git" ]; then
-  git -C "$WORKDIR_NATIVE" fetch --depth=1 origin "$BRANCH" >/dev/null 2>&1 || true
+  git -C "$WORKDIR_NATIVE" fetch $FETCH_DEPTH origin "$BRANCH" >/dev/null 2>&1 || true
   git -C "$WORKDIR_NATIVE" checkout --detach "origin/$BRANCH" >/dev/null 2>&1 || true
   git -C "$WORKDIR_NATIVE" reset --hard "origin/$BRANCH" >/dev/null 2>&1 || true
 else
