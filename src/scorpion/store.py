@@ -9,7 +9,14 @@ import json
 import pathlib
 import sqlite3
 
-from .accuracy import AssociationEvidence, DecisionEvidence, LabeledDecision, percentile
+from .accuracy import (
+    ACTIONABLE_KINDS,
+    AssociationEvidence,
+    DecisionEvidence,
+    LabeledDecision,
+    percentile,
+)
+from .calibration import CalibrationObservation
 from .domain import Effect, EventKind, RawDiscordMessage, SignalEvent
 from .shadow import ShadowComparison, ShadowPrediction
 
@@ -118,6 +125,27 @@ CREATE TABLE IF NOT EXISTS shadow_predictions (
     created_ts_utc TEXT NOT NULL,
     UNIQUE(event_id, model_name, model_version)
 );
+
+CREATE TABLE IF NOT EXISTS review_items (
+    review_id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL UNIQUE,
+    message_id TEXT NOT NULL,
+    disposition TEXT NOT NULL,
+    priority_score REAL NOT NULL,
+    tier TEXT NOT NULL,
+    reason_codes_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'OPEN',
+    assignee TEXT NOT NULL DEFAULT '',
+    evidence_json TEXT NOT NULL,
+    created_ts_utc TEXT NOT NULL,
+    updated_ts_utc TEXT NOT NULL,
+    resolved_ts_utc TEXT,
+    resolution TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY(event_id) REFERENCES signal_events(event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_review_items_open
+    ON review_items(status, tier, priority_score DESC);
+CREATE INDEX IF NOT EXISTS idx_review_items_event ON review_items(event_id);
 
 CREATE TABLE IF NOT EXISTS heartbeats (
     component TEXT PRIMARY KEY,
@@ -481,6 +509,72 @@ class Store:
                     now,
                 ),
             )
+
+    def load_decision_audit(self, event_id: str) -> dict[str, object] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM decision_audit WHERE event_id=?", (event_id,)
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def load_decision_audits(self) -> list[dict[str, object]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM decision_audit ORDER BY created_ts_utc, event_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def calibration_observations(self) -> list[CalibrationObservation]:
+        """Every adjudicated event with the parser evidence that produced it.
+
+        A contract adjudication is a stricter label than a kind adjudication: when the
+        reviewer named a contract, the parse is correct only if it matches both the event kind
+        and the contract key.
+        """
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT a.expected_kind,a.expected_contract_key,s.kind AS predicted_kind,
+                       s.contract_key AS predicted_contract_key,d.parser_rule,
+                       d.parser_confidence
+                FROM adjudications a
+                JOIN signal_events s ON s.event_id=a.event_id
+                JOIN decision_audit d ON d.event_id=a.event_id
+                ORDER BY a.adjudicated_ts_utc, a.event_id
+                """
+            ).fetchall()
+        observations: list[CalibrationObservation] = []
+        for row in rows:
+            expected = EventKind(row["expected_kind"])
+            predicted = EventKind(row["predicted_kind"])
+            expected_contract = row["expected_contract_key"]
+            contract_ok = (
+                expected_contract is None
+                or expected_contract == row["predicted_contract_key"]
+            )
+            observations.append(
+                CalibrationObservation(
+                    rule_id=str(row["parser_rule"]),
+                    stated_confidence=float(row["parser_confidence"]),
+                    correct=expected is predicted and contract_ok,
+                    actionable=predicted in ACTIONABLE_KINDS,
+                )
+            )
+        return observations
+
+    def adjudicated_messages(self) -> list[dict[str, object]]:
+        """Adjudications keyed by Discord message, for candidate-parser comparison."""
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT s.message_id,a.event_id,a.expected_kind,a.expected_contract_key,
+                       a.reviewer,a.adjudicated_ts_utc,a.note
+                FROM adjudications a
+                JOIN signal_events s ON s.event_id=a.event_id
+                ORDER BY a.adjudicated_ts_utc, a.event_id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def heartbeat(self, component: str, **metadata: object) -> None:
         now = datetime.datetime.now(datetime.UTC).isoformat()

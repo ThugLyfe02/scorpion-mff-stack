@@ -30,6 +30,16 @@ Implemented in this change:
 - [x] lint/type/test CI
 - [x] security/history audit documentation
 - [x] unit tests for parser, reducer, store, replay, pricing
+- [x] calibration from adjudications: per-rule accuracy, Wilson lower bound, Brier score,
+      calibration gap, and an `UNCALIBRATED / PROVISIONAL / TRUSTED / DEGRADED` state
+- [x] durable semantic review queue (`review.py`, `review_items`): deterministic id per event,
+      active-learning priority, evidence payload, claim/resolve/dismiss, SLA and reason metrics,
+      and a `backfill` pass over stored unadjudicated signals
+- [x] parser certification (`certification.py`): corpus loading, paired baseline/candidate
+      comparison, accuracy/actionable precision/ambiguity gates, exact McNemar, ECE and Brier
+      decomposition, risk-coverage selection, action-escalation refusal, downstream semantic
+      state and effect-multiset diff, and a digested CERTIFIED/REFUSED certificate
+- [x] CLI surfaces: `scorpion-review` and `scorpion-certify`
 
 Still requires environment/operator work:
 

@@ -119,3 +119,24 @@ The in-memory book state is assigned only after this transaction commits. If the
 revision remains pending and in-memory state does not advance.
 
 This removes several independent FULL-sync transactions from the hot path while strengthening state/database consistency.
+
+
+## From advisory evidence to a closed loop
+
+The evidence envelope told an operator that a parse needed review. It did not make the review
+durable, prioritized or capable of changing the next calibration. The semantic control plane
+closes that gap:
+
+* `review.py` turns the envelope into a durable `review_items` worklist with deterministic ids,
+  active-learning priority, SLA metrics, claim/resolve/dismiss transitions, and a `backfill` pass
+  over the stored unadjudicated corpus;
+* `resolve` writes the adjudication and the queue transition in one SQLite writer transaction, so
+  the label is either both recorded and closed or neither;
+* `certification.py` compares a baseline and a candidate parser on a named corpus and a named set
+  of adjudications, then refuses promotion unless accuracy, actionable precision, ambiguity,
+  action escalations, calibration error, risk coverage and the downstream semantic state/effect
+  multiset all pass;
+* the certificate is canonically serialised and digested, with the refusal reasons named.
+
+See `docs/SEMANTIC_CONTROL_PLANE.md` for the gates and `scorpion-review` / `scorpion-certify`.
+Neither component has execution authority.

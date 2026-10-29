@@ -13,6 +13,8 @@ deterministic signal/replay infrastructure, and a Ross-style gapper research des
 | Execution | **Paper/shadow + review-only boundary implemented**; no autonomous live submission |
 | Backtest / signal corpus | Legacy evidence in `mff-backtest/`; correctness caveats documented |
 | Gapper scanner | Agent research only — no scanner binary |
+| Semantic review queue | **Built** — durable, prioritized, SLA-aware review items over the evidence envelope; claim/resolve/dismiss; `backfill` triages the stored unadjudicated corpus. See `docs/SEMANTIC_CONTROL_PLANE.md` |
+| Parser certification | **Built** — corpus + adjudications produce CERTIFIED or a named REFUSAL: accuracy, actionable precision, ambiguity, action escalations, ECE/Brier, risk coverage, McNemar and downstream semantic diff, sealed with a digest. See `docs/SEMANTIC_CONTROL_PLANE.md` |
 
 The former browser/LLM cron path is retained only as operational history. It must not be treated as a
 sub-second control plane.
@@ -38,8 +40,9 @@ Research/chat/scanner workloads are outside this path and cannot block Discord i
 2. `docs/IMPLEMENTATION_STATUS.md`
 3. `docs/BACKTEST_CORRECTNESS.md`
 4. `docs/SECURITY.md`
-5. `live/RULES.lock.md`
-6. `docs/HANDOFF.md`
+5. `docs/SEMANTIC_CONTROL_PLANE.md`
+6. `live/RULES.lock.md`
+7. `docs/HANDOFF.md`
 
 ## Development
 
@@ -50,6 +53,14 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 pytest
+```
+
+The semantic review queue and parser certification run offline, without Discord credentials:
+
+```bash
+scorpion-review --db scorpion.db backfill
+scorpion-review --db scorpion.db metrics
+scorpion-certify --corpus tests/fixtures/mff_golden.json --json
 ```
 
 Runtime Discord ingest requires an authorized bot token and a strict signal-author allowlist:
