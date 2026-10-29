@@ -720,7 +720,13 @@ def cmd_flatten(args: argparse.Namespace, quotes: QuoteProvider | None = None,
 
     if not book.open_positions():
         # A flat book needs no quote feed and no broker. Saying so is the useful answer.
-        print("flatten: nothing to flatten - the confirmed book is flat")
+        if args.json:
+            print(json.dumps({"mode": "execute" if args.live else "plan",
+                              "flat": True, "exit_code": 0, "lines": [],
+                              "remaining_positions": 0, "remaining_contracts": 0},
+                             indent=2))
+        else:
+            print("flatten: nothing to flatten - the confirmed book is flat")
         return 0
 
     if quotes is None:

@@ -632,7 +632,7 @@ python -m scorpion_mff.cli flatten --live     # needs MFF_RH_TOKEN + MFF_QUOTE_U
 python -m scorpion_mff.cli flatten --json     # the same report, machine-readable
 ```
 
-Thirteen tests (`tests/test_flatten.py`) cover the plan having no side effects, the
+Fourteen tests (`tests/test_flatten.py`) cover the plan having no side effects, the
 unpriced and in-flight refusals, a live flatten ending flat with the confirmed P&L, a
 second flatten being a no-op, a rejected sell restoring the lot and reversing the
 assumed profit, the priced/unpriced split, an expired lot being released not sold, the

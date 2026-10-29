@@ -260,3 +260,12 @@ def test_cli_refuses_a_corrupt_execution_log(tmp_path, capsys, monkeypatch):
                            quotes=FixedQuotes({QQQ: 1.20}))
     assert code == 2
     assert "cannot be trusted" in capsys.readouterr().err
+
+
+def test_cli_json_on_a_flat_book_is_still_machine_readable(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(cli, "EXECUTION_LOG", tmp_path / "nothing.jsonl")
+    code = cli.cmd_flatten(Namespace(live=False, json=True),
+                           quotes=FixedQuotes({}))
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["flat"] is True and payload["lines"] == []

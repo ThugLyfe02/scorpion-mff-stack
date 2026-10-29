@@ -15,7 +15,7 @@ python -m pytest --version         # if this fails, use .venv/Scripts/python.exe
 
 If the venv is not active, replace `python` with `.venv/Scripts/python.exe` (Windows)
 or `.venv/bin/python` (POSIX). `scripts/gate.sh` resolves the venv itself and is the
-single top-level check: `ruff -> mypy --strict -> pytest`, currently **735 passed**
+single top-level check: `ruff -> mypy --strict -> pytest`, currently **736 passed**
 (513 at the 3.a red-team, plus the three transport-quarantine tests added by final
 integration that close O1, plus the offline Gateway lifecycle suite, plus the
 confirmed-exit join and the operator flatten added by G19/G20).
@@ -643,7 +643,7 @@ event-shaped - a Discord post, a breakeven quote, the 15:45 cutoff. There was no
 human to say "flat now", which is precisely the moment (`killswitch` stops buys but must
 not trap a position) the command exists for.
 
-**Acceptance (one command):** `python -m pytest tests/test_flatten.py -q` -> 13 passed.
+**Acceptance (one command):** `python -m pytest tests/test_flatten.py -q` -> 14 passed.
 
 **Invariant:** the command sells the **confirmed** book only, each lot at the **live bid**
 (never the posted price, the entry, the last bar, or a market order), and **never sells a
@@ -780,7 +780,7 @@ place. The corpus backtest and the 9/8 replay are unchanged (they have no transp
 The short version, in the order that fails fastest:
 
 ```bash
-./scripts/gate.sh                                            # ruff -> mypy -> pytest, 735
+./scripts/gate.sh                                            # ruff -> mypy -> pytest, 736
 python -m scorpion_mff.cli backtest                          # 93/91/405/$57,951.00
 python -m scorpion_mff.cli replay tapes/sep8.json            # 4/2/6/$211.00, 0 breaches
 python -m scorpion_mff.cli expiry audit                      # 40/93, 65/93, 0/40, 10/40, REFUSED
@@ -803,7 +803,7 @@ python -m pytest tests/test_risk_budget.py -q                               # 24
 python -m pytest tests/test_execution_book.py -q                            # 66
 python -m pytest tests/test_venue_feed.py -q                               # 47
 python -m pytest tests/test_confirmed_exits.py -q                          # 14
-python -m pytest tests/test_flatten.py -q                                  # 13
+python -m pytest tests/test_flatten.py -q                                  # 14
 ```
 
 A failure in any of these is a gem failing, not a flaky test: every command is offline,
