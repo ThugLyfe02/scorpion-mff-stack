@@ -40,7 +40,41 @@ while [ $# -gt 0 ]; do
 done
 
 command -v git >/dev/null 2>&1 || { echo "run-lane: git is required" >&2; exit 2; }
-command -v python >/dev/null 2>&1 || { echo "run-lane: python is required" >&2; exit 2; }
+
+# ── host translation ────────────────────────────────────────────────────────
+# A native CPython on Windows cannot open the POSIX path Git-Bash hands it: `/c/...`
+# is not a drive, so the resolver died with a FileNotFoundError that the `eval`
+# swallowed and `set -u` reported as an unbound CONFIG_ROUNDS. Translate the path
+# explicitly, and pick the interpreter the lane's own gate would pick (`.venv`
+# first, exactly like scripts/gate.sh) so the resolver and the gate agree about
+# which environment is being described.
+native_path() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -w -- "$1"; else printf '%s' "$1"; fi
+}
+
+WORKDIR="$REPO_ROOT/.worktrees/fleet-$LANE_ID"
+# Git for Windows is a native binary and this environment runs with
+# MSYS2_ARG_CONV_EXCL=* - no POSIX path handed to it is translated, so `git -C
+# /c/...` fails with "cannot change to". Every path that crosses into a native
+# tool goes through native_path; bash keeps the POSIX form for its own file
+# tests and redirections.
+REPO_NATIVE="$(native_path "$REPO_ROOT")"
+WORKDIR_NATIVE="$(native_path "$WORKDIR")"
+PY="$WORKDIR/.venv/Scripts/python.exe"
+[ -x "$PY" ] || PY="$WORKDIR/.venv/bin/python"
+[ -x "$PY" ] || PY="$REPO_ROOT/.venv/Scripts/python.exe"
+[ -x "$PY" ] || PY="$REPO_ROOT/.venv/bin/python"
+[ -x "$PY" ] || PY="python"
+command -v "$PY" >/dev/null 2>&1 || { echo "run-lane: python is required" >&2; exit 2; }
+
+# The gate re-resolves its own interpreter from the worktree: `.venv/Scripts` there
+# if one exists, otherwise whatever `python` means on PATH. Put the interpreter this
+# script resolved - the one it installs into - at the front of PATH, so a worktree
+# without a venv cannot gate with a second, dependency-free python.
+if [ "$PY" != "python" ]; then
+  PATH="$(dirname "$PY"):$PATH"
+  export PATH
+fi
 
 # ── resolve the lane definition ─────────────────────────────────────────────
 if [ ! -f "$FLEET_JSON" ]; then
@@ -48,15 +82,19 @@ if [ ! -f "$FLEET_JSON" ]; then
   exit 2
 fi
 
-eval "$(python - "$LANE_ID" "$FLEET_JSON" <<'PY'
+lane_def="$("$PY" - "$LANE_ID" "$(native_path "$FLEET_JSON")" <<'PY'
 import json
+import shlex
 import sys
 
 lane_id, fleet_file = sys.argv[1], sys.argv[2]
-fleet = json.load(open(fleet_file, encoding="utf-8"))
+with open(fleet_file, encoding="utf-8") as handle:
+    fleet = json.load(handle)
 
 def q(value):
-    return json.dumps(value)
+    # Shell-quoted, not JSON-quoted: the output is eval'd by bash, and a title or
+    # model with a `$` or a backtick in it must not be re-interpreted.
+    return shlex.quote(str(value))
 
 try:
     lane = next(item for item in fleet["lanes"] if item["id"] == lane_id)
@@ -74,7 +112,11 @@ print(f"BODY_FILE={q(lane['body_file'])}")
 print(f"GATE={q(lane['gate'])}")
 print(f"CONFIG_ROUNDS={q(fleet.get('rounds', 3))}")
 PY
-)"
+)" || { echo "run-lane: cannot parse $FLEET_JSON" >&2; exit 2; }
+
+[ -n "$lane_def" ] || { echo "run-lane: $FLEET_JSON produced no lane definition" >&2; exit 2; }
+eval "$lane_def"
+: "${CONFIG_ROUNDS:?run-lane: $FLEET_JSON did not declare rounds}"
 
 ROUNDS="${ROUNDS:-$CONFIG_ROUNDS}"
 
@@ -95,22 +137,23 @@ else
 fi
 PROMPT="$(cat "$MASTER_PROMPT_FILE")"$'\n\n'"$LANE_MASTER"$'\n\n'"$(cat "$REPO_ROOT/$PROMPT_FILE")"
 BODY="$(cat "$REPO_ROOT/$BODY_FILE")"
-WORKDIR="$REPO_ROOT/.worktrees/fleet-$LANE_ID"
 RUNDIR="$(mktemp -d)"
 GATE_LOG="$RUNDIR/gate.log"
 AGENT_LOG="$RUNDIR/agent.log"
 
 # ── materialise the lane branch ─────────────────────────────────────────────
 log "fetching $BRANCH"
-git -C "$REPO_ROOT" fetch --depth=1 origin "$BRANCH" "$BASE_REF" >/dev/null 2>&1 \
+git -C "$REPO_NATIVE" fetch --depth=1 origin "$BRANCH" "$BASE_REF" >/dev/null 2>&1 \
   || { echo "run-lane: cannot fetch origin/$BRANCH" >&2; exit 2; }
 
-if [ -d "$WORKDIR/.git" ]; then
-  git -C "$WORKDIR" fetch --depth=1 origin "$BRANCH" >/dev/null 2>&1 || true
-  git -C "$WORKDIR" checkout --detach "origin/$BRANCH" >/dev/null 2>&1 || true
-  git -C "$WORKDIR" reset --hard "origin/$BRANCH" >/dev/null 2>&1 || true
+# In a linked worktree `.git` is a file (a gitdir pointer), not a directory, so the
+# -d test never matched and every re-run tried to create the worktree a second time.
+if [ -e "$WORKDIR/.git" ]; then
+  git -C "$WORKDIR_NATIVE" fetch --depth=1 origin "$BRANCH" >/dev/null 2>&1 || true
+  git -C "$WORKDIR_NATIVE" checkout --detach "origin/$BRANCH" >/dev/null 2>&1 || true
+  git -C "$WORKDIR_NATIVE" reset --hard "origin/$BRANCH" >/dev/null 2>&1 || true
 else
-  git -C "$REPO_ROOT" worktree add --detach "$WORKDIR" "origin/$BRANCH" >/dev/null
+  git -C "$REPO_NATIVE" worktree add --detach "$WORKDIR_NATIVE" "origin/$BRANCH" >/dev/null
 fi
 
 log "worktree ready at $WORKDIR"
@@ -118,6 +161,8 @@ log "worktree ready at $WORKDIR"
 # ── tooling ─────────────────────────────────────────────────────────────────
 # The lane's own gate picks `.venv` when present and falls back to `python`.
 # In CI there is no venv, so install the lane's dev extras into the active python.
+# `$PY` is resolved once, above, with the same preference - installing into one
+# interpreter and gating with another is how a "missing dependency" red appears.
 if [ "$NO_AGENT" -eq 0 ] && ! command -v pi >/dev/null 2>&1; then
   fail "pi is not installed (npm install -g @earendil-works/pi-coding-agent)"
 fi
@@ -127,8 +172,14 @@ fi
 
 if [ "${FLEET_SKIP_DEPS:-0}" = "1" ]; then
   log "dependency install skipped (FLEET_SKIP_DEPS=1)"
+elif "$PY" -c "import mypy, pytest, ruff" >/dev/null 2>&1; then
+  # The lane's own interpreter already carries the three gate tools (the usual case
+  # when the repository venv is reused). Editable-installing the worktree anyway would
+  # repoint the repository venv at a throwaway tree for no gain: pytest resolves the
+  # package from the worktree through `pythonpath = ["."]`.
+  log "gate tools already present in $PY; install skipped"
 else
-  ( cd "$WORKDIR" && python -m pip install -q -e ".[dev]" ) \
+  ( cd "$WORKDIR" && "$PY" -m pip install -q -e ".[dev]" ) \
     || fail "dependency install failed for $BRANCH"
 fi
 
@@ -193,6 +244,11 @@ while [ "$round" -le "$ROUNDS" ]; do
     gate_ok=1
     break
   fi
+  # With no agent in the loop there is nothing that can change the tree, so a red
+  # gate is final. Burning the remaining rounds would only re-run the same failure.
+  if [ "$NO_AGENT" -eq 1 ]; then
+    fail "gate red (agent skipped, so no fix round is possible) - see $GATE_LOG"
+  fi
   if [ "$round" -lt "$ROUNDS" ] && [ "$NO_AGENT" -eq 0 ]; then
     log "gate red; returning a compact fix brief to the agent"
     # The full brief was already given in round 1. Sending it again plus the
@@ -222,6 +278,23 @@ if git status --porcelain | grep -q .; then
   git add -A
   git commit -q -m "fleet($LANE_ID): build $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     || log "nothing to commit"
+fi
+
+# ── the PR body is a manifest, not a story ──────────────────────────────────
+# "Reviewers do not merge prose, they merge a diff they can re-run" (DIRECTION.md
+# §4). The gate has just run, so the manifest describes that run (--gate-log)
+# instead of paying for it twice. It is generated AFTER the commit, so its `dirty`
+# row describes the commit being shipped rather than the agent's leftovers. If the
+# recorder refuses, its refusals are still appended: a body that names an
+# unmeasurable row is worth more than a body that hides one.
+MANIFEST="$RUNDIR/manifest.md"
+"$REPO_ROOT/scripts/fleet/evidence.sh" --lane "$LANE_ID" \
+  --gate-log "$GATE_LOG" --gate-exit 0 --out "$MANIFEST" >/dev/null 2>&1 || true
+if [ -s "$MANIFEST" ]; then
+  BODY="$(printf '%s\n\n---\n\n%s' "$BODY" "$(cat "$MANIFEST")")"
+  log "manifest appended to the PR body: $(grep -c '' "$MANIFEST") lines"
+else
+  log "manifest: evidence produced nothing; the PR body stays prose"
 fi
 
 log "pushing $BRANCH"
