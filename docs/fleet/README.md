@@ -56,6 +56,36 @@ Flags:
 `FLEET_SKIP_DEPS=1` skips the `pip install -e ".[dev]"` step for re-runs where the
 tooling is already present.
 
+## The evidence manifest
+
+`scripts/fleet/evidence.sh` turns a lane's tree into the PR body: every row is a check,
+a verdict, and the command that produced it. `run-lane.sh` runs it after the commit it
+ships and appends the result under the lane's prose, so a reviewer can re-run the claim
+instead of believing it.
+
+```bash
+scripts/fleet/evidence.sh                       # describe the current tree
+scripts/fleet/evidence.sh --lane main --json     # machine-readable, lane-checked
+scripts/fleet/evidence.sh --no-gate              # facts only; the gate is REFUSED
+scripts/fleet/evidence.sh --gate-log /tmp/g.log  # describe a gate run that happened
+scripts/fleet/evidence.sh --claim tests="pytest -q"   # one command per claim
+```
+
+| row | what it refuses to claim |
+|---|---|
+| `identity`, `dirty` | a manifest generated over uncommitted work describes no commit |
+| `lane` | a detached tip or branch that is not the lane's declared branch |
+| `drift` | more than `--max-behind` commits behind `origin/<base>` (default 10); an unresolvable base is refused, not read as zero |
+| `purity.imports:*` | a cross-lane import in either direction (`scorpion_mff` ↔ `src/scorpion`) |
+| `purity.tree` | two packages in one tree (two truths for one invariant) |
+| `gate`, `gate.<stage>` | a gate that did not run (`--no-gate` is REFUSED, never green) |
+| `tests.collected` | a suite count the gate log did not print (collected, not re-run) |
+| `claim:<label>` | a claim whose command exits non-zero |
+
+Exit codes: `0` every row passed, `1` a row failed, `2` something could not be measured
+(or the arguments were wrong). A refusal is a fact about the evidence, not a crash — the
+same discipline `arm` applies to a stale quote.
+
 ## In CI
 
 `.github/workflows/agent-fleet.yml` runs all three lanes in parallel on
@@ -78,7 +108,7 @@ answering three different questions:
 - **Main** — *does the hot path that will place money hold its invariants?* The
   deterministic parser → engine → broker with the reduce-only governor, the
   correlated-book cap, the fill log, the confirmed-execution book, and the kill switch.
-  702 tests, strict types.
+  708 tests, strict types.
   Owns **execution truth**: the only lane that can place an order.
 - **Semantic** — *is the parse evidence or opinion?* Calibration, novelty, review
   queue, and a certificate a parser promotion must pass. Owns **interpretation truth**:

@@ -7,7 +7,7 @@ Measured baseline on 2026-10-29:
 
 ```text
 drift vs main     11 ahead, 0 behind
-gate               ruff clean · mypy --strict clean (32 files) · 702 passed
+gate               ruff clean · mypy --strict clean (32 files) · 708 passed
 live wiring        RH order endpoint unconfirmed · quote feed unconfigured · Gateway token absent
 ```
 

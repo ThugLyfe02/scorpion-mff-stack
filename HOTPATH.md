@@ -194,7 +194,7 @@ the HTTP order shape (against a real local server: idempotency key, retry ladder
 PR#1 ports, the ET calendar, the 0DTE cutoff matrix, the one-probe breaker, the tri-state
 ledger, and `recover` are also proven offline. Since the confirmed-execution book, the
 cumulative ack, the split fill, the oversell clamp, the restart replay and the
-`sync_engine` drawdown restore are proven offline too - 702 tests, `docs/GEMS.md` is the
+`sync_engine` drawdown restore are proven offline too - 708 tests, `docs/GEMS.md` is the
 one-command index.
 
 **Not yet proven — needs your credentials or a decision:**

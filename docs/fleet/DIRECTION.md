@@ -38,7 +38,7 @@ honest state of the stack, and it is the only target worth organising around.
 
 | PR | Branch | Ahead / behind `main` | Gate | Tests | Verdict |
 |---|---|---|---|---|---|
-| **#8** | `hardening/correlated-book-guard` | 11 / 0 | green | 702 | **merge first** — linear, current, fail-closed |
+| **#8** | `hardening/correlated-book-guard` | 11 / 0 | green | 708 | **merge first** — linear, current, fail-closed |
 | **#1** | `hardening/deterministic-control-plane` | 81 / 0 | green | 824 | **merge second** — current, but docs lie about a closed defect |
 | **#3** | `hardening/calibrated-semantic-acceleration` | 7 / **51** | green | 126 | **converge before anything else** |
 | #2 | `hardening/precision-intelligence-layer` | 21 / 7 | — | — | **retire** — #3 already contains every commit |
@@ -97,8 +97,16 @@ These are the adjectives, made mechanical. Each has an owner and an acceptance c
 
 The PR body becomes a **manifest**, not a story: gate output, test count, corpus
 numbers, refusal list, and the one command per claim. `docs/GEMS.md` is already the
-model; extend it to every lane. The fleet's next commit should be
-`scripts/fleet/evidence.sh`, which emits that manifest from the lane's own tree.
+model; extend it to every lane. `scripts/fleet/evidence.sh` emits that manifest from
+the lane's own tree.
+
+**Built** (`scripts/fleet/evidence.sh`, `scripts/fleet/evidence.py`): every row is a
+command and its verdict - identity, lane/branch, drift against `origin/<base>`, purity
+(no cross-lane import in either direction; exactly one package in the tree), the gate
+per stage, the collected test count, and any `--claim LABEL=COMMAND` the lane wants to
+prove. An unrun gate, an unresolvable base, a dirty tree and a two-package tree are
+**named refusals** (exit 2) or failures (exit 1), never green rows; `run-lane.sh`
+appends the result to the PR body after the commit it describes.
 
 Why it converts: reviewers do not merge prose. They merge a diff they can re-run.
 
@@ -147,7 +155,7 @@ destroy it; an LLM beside the path (review triage, digest, ops) strengthens it.
 **From:** an offline-proven hot path. **To:** the execution authority, with one
 credentialed round trip and a scheduled reconciliation.
 
-It merges first because it is linear (0 behind), green (702 tests), fail-closed
+It merges first because it is linear (0 behind), green (708 tests), fail-closed
 (`arm --live` refuses without quote feed and policy), and the only lane whose value
 decays with time. Merging it does not place an order; it makes `main` the live path and
 resets every other lane's drift.
