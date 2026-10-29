@@ -15,7 +15,7 @@ python -m pytest --version         # if this fails, use .venv/Scripts/python.exe
 
 If the venv is not active, replace `python` with `.venv/Scripts/python.exe` (Windows)
 or `.venv/bin/python` (POSIX). `scripts/gate.sh` resolves the venv itself and is the
-single top-level check: `ruff -> mypy --strict -> pytest`, currently **536 passed**
+single top-level check: `ruff -> mypy --strict -> pytest`, currently **560 passed**
 (513 at the 3.a red-team, plus the three transport-quarantine tests added by final
 integration that close O1, plus the offline Gateway lifecycle suite).
 
@@ -36,6 +36,7 @@ integration that close O1, plus the offline Gateway lifecycle suite).
 | G11 | an input the invariants do not cover | `python -m scorpion_mff.cli fuzz --iterations 5000 --seed 7` |
 | G12 | a switch you cannot see before arming | `python -m scorpion_mff.cli doctor` |
 | G13 | a reconnect that silently drops the session | `python -m pytest tests/test_gateway.py -q` |
+| G14 | a daily loss limit that only fires after the loss | `python -m pytest tests/test_risk_budget.py -q` |
 
 Each gem follows the same shape: **what it is**, **the acceptance command**, **the
 invariant**, **the failure mode it buys down**, and the **3.a red-team record** for it.
@@ -387,6 +388,37 @@ library as its only runtime dependency.
 
 ---
 
+## G14. The loss is priced before the order, not after it
+
+`scorpion_mff/risk.py` + `Engine.risk_budget`. The governor is a **realised** risk layer:
+it cannot stop a first loss that has not happened. Two full clips can therefore realise
+twice the daily loss limit. The pre-trade budget closes that hole by admitting a **contract
+count** whose premium keeps the worst-case day inside the limit:
+
+```
+worst_case = realised_today - open_premium - new_premium
+```
+
+**Acceptance (one command):** `python -m pytest tests/test_risk_budget.py -q` -> 24 passed.
+
+**Invariant:** every cap (total premium, per underlying, declared correlation cluster, daily
+worst case) can only **shrink** the locked clip; an unmapped symbol is its own cluster; a
+symbol in two clusters is a refused configuration; a budget refusal is a `skip` row naming
+the cap, never silence; the same pass runs on an **add** against the position already held;
+and an absent budget leaves every decision byte-identical.
+
+**Failure mode it buys down:** the daily stop is an accounting fact after the money is gone.
+A book that can hold two $3,000 clips has a $6,000 worst case against a $3,000 limit, and
+the governor only learns about it after both expire. The budget is the only component that
+can refuse the *second* clip before the first loss exists.
+
+**Operator surface:** `python -m scorpion_mff.cli risk validate` parses every cap;
+`risk show` rebuilds the book from the fill log and prints the worst-case day and headroom
+by underlying and cluster; `arm` loads `live/risk-budget.json` when present and refuses an
+unreadable file rather than trading uncapped.
+
+---
+
 ## What we deliberately do not build
 
 These are not backlog items with an ETA. They are gates that would have to open before the
@@ -497,7 +529,7 @@ place. The corpus backtest and the 9/8 replay are unchanged (they have no transp
 The short version, in the order that fails fastest:
 
 ```bash
-./scripts/gate.sh                                            # ruff -> mypy -> pytest, 536
+./scripts/gate.sh                                            # ruff -> mypy -> pytest, 560
 python -m scorpion_mff.cli backtest                          # 93/91/405/$57,951.00
 python -m scorpion_mff.cli replay tapes/sep8.json            # 4/2/6/$211.00, 0 breaches
 python -m scorpion_mff.cli expiry audit                      # 40/93, 65/93, 0/40, 10/40, REFUSED
@@ -516,6 +548,7 @@ python -m pytest tests/test_execution.py -q -k spread                       # 5
 python -m pytest tests/test_ledger.py -q                                    # 21
 python -m pytest tests/test_ledger.py -q -k recover                         # 3
 python -m pytest tests/test_gateway.py -q                                   # 20
+python -m pytest tests/test_risk_budget.py -q                               # 24
 ```
 
 A failure in any of these is a gem failing, not a flaky test: every command is offline,

@@ -22,6 +22,7 @@ Layering, all stdlib:
     expiry    - 0DTE cutoff verdicts and assignment exposure, read-only; the caller acts
     execution - the one-probe transport breaker and the fail-closed spread gate
     ledger    - intent -> terminal matching; a transport failure stays unresolved
+    risk      - pre-trade worst-case-loss budget; shrinks size, never grows it
 
 Everything except the live Gateway transport and the RH HTTP call is pure and
 unit-tested offline. `listener.WebsocketGateway` needs the optional `websockets`

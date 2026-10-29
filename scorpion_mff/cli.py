@@ -186,6 +186,22 @@ def _parser() -> argparse.ArgumentParser:
                         help="fill log (default live/fills.jsonl)")
     e_show.add_argument("--json", action="store_true")
 
+    rk = sub.add_parser("risk", help="pre-trade risk budget: worst-case loss before the order")
+    rk_sub = rk.add_subparsers(dest="risk_cmd", required=True)
+    rk_init = rk_sub.add_parser("init", help="write the reviewed starter budget (never overwrites)")
+    rk_init.add_argument("--path", type=Path, default=None)
+    rk_show = rk_sub.add_parser("show", help="usage against every cap, rebuilt from the fills")
+    rk_show.add_argument("--path", type=Path, default=None,
+                         help="budget file (default live/risk-budget.json)")
+    rk_show.add_argument("--fills", type=Path, default=None,
+                         help="fill log (default live/fills.jsonl)")
+    rk_show.add_argument("--realized-today", type=float, default=None,
+                         help="override the realised P&L read from live/governor.json")
+    rk_show.add_argument("--json", action="store_true")
+    rk_val = rk_sub.add_parser("validate", help="parse every cap and print what binds")
+    rk_val.add_argument("--path", type=Path, default=None)
+    rk_val.add_argument("--json", action="store_true")
+
     xp = sub.add_parser("expiry", help="expiry guard: audit the corpus against the close cutoff")
     xp_sub = xp.add_subparsers(dest="expiry_cmd", required=True)
     xa = xp_sub.add_parser("audit", help="how many alerts are 0DTE, how many never closed, "
@@ -361,6 +377,7 @@ def cmd_arm(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
     from . import exposure as exposure_mod
+    from . import risk as risk_mod
     exposure_path = ROOT / "live" / "exposure.json"
     exposure_limits = None
     if exposure_path.exists():
@@ -368,6 +385,19 @@ def cmd_arm(args: argparse.Namespace) -> int:
             exposure_limits = exposure_mod.load_limits(exposure_path)
         except (OSError, ValueError) as exc:
             print(f"refusing to arm: invalid exposure limits at {exposure_path}: {exc}",
+                  file=sys.stderr)
+            return 1
+
+    # The pre-trade budget is opt-in the same way exposure is: the file's presence
+    # activates it. An unreadable or contradictory budget refuses the arm rather than
+    # falling back to "no cap", because silence here would be an unlimited worst case.
+    risk_budget_path = ROOT / "live" / "risk-budget.json"
+    risk_budget = None
+    if risk_budget_path.exists():
+        try:
+            risk_budget = risk_mod.RiskBudget.load(risk_budget_path, missing_ok=False)
+        except (OSError, ValueError) as exc:
+            print(f"refusing to arm: invalid risk budget at {risk_budget_path}: {exc}",
                   file=sys.stderr)
             return 1
 
@@ -383,6 +413,7 @@ def cmd_arm(args: argparse.Namespace) -> int:
                                  max_quote_age_s=args.max_quote_age),
             fills=FillLog(path=FILL_LOG, fsync=False),
             governor=make_governor(risk_policy),
+            risk_budget=risk_budget,
             exposure_limits=exposure_limits,
             risk_state=risk_state, risk_state_path=state_path),
         broker=broker,
@@ -414,6 +445,13 @@ def cmd_arm(args: argparse.Namespace) -> int:
           f"daily stop ${risk_policy.daily_loss_limit_usd_effective() or 0:,.0f}) | "
           f"equity ${risk_state.equity_usd:,.2f} | peak ${risk_state.peak_equity_usd:,.2f}")
     print(f"spread | gate {_spread_gate_text()}")
+    if risk_budget is None:
+        print("budget | OFF (no live/risk-budget.json; worst-case day is unbounded)")
+    else:
+        print(f"budget | ON total ${risk_budget.max_total_premium_usd or 0:,.0f} | "
+              f"underlying ${risk_budget.max_underlying_premium_usd or 0:,.0f} | "
+              f"cluster ${risk_budget.max_cluster_premium_usd or 0:,.0f} | "
+              f"daily worst case ${risk_budget.daily_loss_limit_usd or 0:,.0f}")
 
     try:
         asyncio.run(pump_listener(listener, args.limit))
@@ -1143,6 +1181,82 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
     return 0 if campaign.clean else 1
 
 
+def cmd_risk(args: argparse.Namespace) -> int:
+    """The pre-trade budget: price the loss before the order, then show the headroom."""
+    from . import exposure as exposure_mod
+    from .risk import RiskBudget
+
+    path = args.path or (ROOT / "live" / "risk-budget.json")
+    if args.risk_cmd == "init":
+        if Path(path).exists():
+            print(f"refusing to overwrite {path} - a risk budget is a decision, "
+                  "not a generated file")
+            return 2
+        starter = RiskBudget.load(ROOT / "live" / "risk-budget.example.json",
+                                  missing_ok=False)
+        if starter is None:                     # pragma: no cover - missing_ok=False raises
+            return 2
+        starter.save(path)
+        print(f"wrote reviewed starter budget -> {path}")
+        print(json.dumps(starter.to_dict(), indent=2))
+        return 0
+
+    try:
+        budget = RiskBudget.load(path)
+    except (OSError, ValueError) as exc:
+        print(f"cannot read risk budget at {path}: {exc}", file=sys.stderr)
+        return 2
+
+    if args.risk_cmd == "validate":
+        if budget is None:
+            print(f"risk budget: OFF (no {path})")
+            return 0
+        if args.json:
+            print(json.dumps(budget.to_dict(), indent=2))
+        else:
+            print(f"risk budget: valid | total "
+                  f"${budget.max_total_premium_usd or 0:,.0f} | underlying "
+                  f"${budget.max_underlying_premium_usd or 0:,.0f} | cluster "
+                  f"${budget.max_cluster_premium_usd or 0:,.0f} | daily worst case "
+                  f"${budget.daily_loss_limit_usd or 0:,.0f}")
+        return 0
+
+    if budget is None:
+        print(f"risk budget: OFF (no {path})")
+        return 0
+    fills_path = args.fills or FILL_LOG
+    fills = FillLog().replay_file(fills_path) if fills_path.exists() else []
+    positions = exposure_mod.positions_from_fills(fills)
+    realized = args.realized_today
+    if realized is None:
+        from .governor import GovernorState
+        try:
+            realized = GovernorState.load(ROOT / "live" / "governor.json").realized_today_usd
+        except ValueError:
+            realized = 0.0
+    report = budget.report(positions, realized_today_usd=realized)
+    if args.json:
+        print(json.dumps({"budget": budget.to_dict(), "usage": report}, indent=2))
+        return 0
+    print(f"risk budget: {report['open_positions']} open | premium at risk "
+          f"${report['premium_at_risk_usd']:,.2f} | realised today "
+          f"${report['realized_today_usd']:,.2f} | worst-case day "
+          f"${report['worst_case_day_usd']:,.2f}")
+    print(f"  headroom : total {_money(report['total_headroom_usd'])} | "
+          f"daily {_money(report['daily_headroom_usd'])}")
+    for label, key in (("underlying", "by_underlying"), ("cluster", "by_cluster")):
+        rows = report[key]
+        if rows:
+            print(f"  by {label}:")
+            for name, premium in rows.items():
+                print(f"    {name:<44} ${premium:>10,.2f}")
+    return 0
+
+
+def _money(value: float | None) -> str:
+    return "n/a" if value is None else f"${value:,.2f}"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     handlers = {
@@ -1160,6 +1274,7 @@ def main(argv: list[str] | None = None) -> int:
         "tca": cmd_tca,
         "fuzz": cmd_fuzz,
         "exposure": cmd_exposure,
+        "risk": cmd_risk,
         "expiry": cmd_expiry,
     }
     return handlers[args.cmd](args)

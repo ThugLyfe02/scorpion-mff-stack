@@ -76,7 +76,7 @@ What this does not prove: a real Discord handshake. The state machine and the so
 frame handling are exercised with a scripted socket; the token, intents and guild membership
 still have to be real. The lifecycle is no longer the unproven part.
 
-## The lane boundary: PR#2 is live, PR#1 is paper
+## The lane boundary: PR #8 is live, PR #1 is paper
 
 Two PRs, two jobs, one gate. The boundary is not a preference; it is what keeps a
 research component from becoming a live dependency by accident.
@@ -146,7 +146,7 @@ Full acceptance ledger, one command per gem: **`docs/GEMS.md`**.
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install pytest            # tests only
-.venv/Scripts/python -m pytest tests -q               # 536 tests, offline
+.venv/Scripts/python -m pytest tests -q               # 560 tests, offline
 
 .venv/Scripts/python -m scorpion_mff.cli doctor       # rules, switches, broker mode,
                                                       #   spread-gate setting (OFF unless armed)
@@ -387,6 +387,35 @@ fact. `stops.py` closes that seam in three directions, each a pure function of
   crash mid-append. `book_from_fills` rebuilds the book (stops included) so `marks` never
   reads a second source of truth.
 
+
+## Pre-trade risk budget (`risk.py`)
+
+The governor is a **realised** risk layer: it reacts to money already lost, so it cannot
+stop the first loss. With two concurrent clips, the worst case before this module was
+twice the daily limit — two $3,000 clips against a $3,000 daily stop, both expiring
+worthless, and only then does the governor learn. `risk.py` prices the loss *before* the
+order.
+
+For a long option the maximum loss is the premium paid, so the book's worst-case day is
+`realised_today - open_premium - new_premium`. `RiskBudget.admit` returns the largest
+**contract count** that keeps that number inside the daily limit and every other cap
+(total premium, per underlying, declared correlation cluster), and the engine consults it
+after the locked clip and the governor, before the exposure guard:
+
+* it **shrinks** the clip and never grows it; a refusal is a `skip` row naming the cap;
+* the same pass runs on an **add**, against the position already held, so a second buy
+  cannot undo the first cap;
+* an unmapped symbol is its own cluster, and a symbol declared in two clusters is a
+  refused configuration — a guessed correlation is how a diversified book becomes one bet;
+* an absent budget leaves every decision byte-identical (the replay/backtest parity rule).
+
+The activation is the file, not a flag: `arm` loads `live/risk-budget.json` when present and
+refuses an unreadable budget rather than trading uncapped. `risk init` copies the reviewed
+starter, `risk validate` parses every cap, and `risk show` rebuilds the book from the fill
+log and prints the worst-case day plus headroom by underlying and cluster.
+
+`docs/GEMS.md` G14 is the acceptance command; `POLICY.md` explains why the cap is
+reduce-only and why the cluster map is declared.
 
 ## Adversarial hardening (`fuzz`)
 

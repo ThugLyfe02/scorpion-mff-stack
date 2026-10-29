@@ -116,6 +116,56 @@ then the max-drawdown rule stands the desk down on 2026-08-25 at 6.57R. From tha
 desk does not trade — which is why the governed number is only +$653 and not a hero number.
 **A risk layer that never stops you is not a risk layer.**
 
+## The pre-trade budget: price the loss before it happens
+
+The governor reacts to realised P&L. That leaves a hole a two-position book makes wide:
+
+```
+daily loss limit  = $3,000
+two full clips at $3,000 premium each
+both expire worthless  ->  -$6,000 realised, twice the limit
+```
+
+The stop cannot fire before the loss exists. `scorpion_mff/risk.py` closes that hole by
+pricing the **worst case before the order**. For a long option the maximum loss is the
+premium paid, so the book's worst-case day is:
+
+```
+worst_case = realised_today - open_premium - new_premium
+```
+
+A candidate is admitted only if that number stays inside the same daily limit the governor
+enforces after the fact. Three more caps sit beside it, all **reduce-only**:
+
+| cap | what it stops |
+|---|---|
+| total premium | the whole book cannot risk more than this |
+| per-underlying | two strikes in QQQ are one bet, not two |
+| correlation cluster | QQQ + SPY + NVDA calls are one directional bet with three tickets |
+
+The cluster map is **declared**, not inferred. An unknown symbol is its own cluster; guessing
+a correlation is how a "diversified" book becomes a single position. A symbol may appear in
+only one cluster, and the loader refuses a duplicate rather than picking one.
+
+The budget **shrinks** the clip; it never refuses silently and never grows size. Every cap
+that binds is written into the intent: `budget=total_premium+daily_worst_case`. The engine
+also consults it on an add, against the position already held, so the second buy cannot
+undo the first cap.
+
+It is off until activated, like the exposure cap: `arm` loads `live/risk-budget.json` when
+that file exists and **refuses to arm** on an unreadable or contradictory budget rather
+than falling back to "no cap". The reviewed starter is `live/risk-budget.example.json`.
+
+```bash
+python -m scorpion_mff.cli risk init       # copy the reviewed starter to live/risk-budget.json
+python -m scorpion_mff.cli risk validate   # parse every cap; refusals are named
+python -m scorpion_mff.cli risk show       # worst-case day + headroom by underlying/cluster
+```
+
+`risk show` rebuilds the book from the append-only fill log and reads realised P&L from
+`live/governor.json`, so the number an operator reads before the open is the same number the
+engine will use at the next entry.
+
 ## What this does not claim
 
 * The corpus is the desk's own winners-heavy call record. Expectancy is calibration, not

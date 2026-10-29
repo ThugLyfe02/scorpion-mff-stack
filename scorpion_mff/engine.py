@@ -49,6 +49,7 @@ from .exposure import guard as exposure_guard
 from .fills import FillLog
 from .governor import Governor, GovernorState, apply_contracts
 from .pricing import far_off_bid, marketable_limit, pct_off_bid
+from .risk import RiskBudget
 from .sizing import (
     MAX_CONCURRENT,
     PIPE_TEST_CONTRACTS,
@@ -150,6 +151,7 @@ class Engine:
     blocked: Callable[[], bool] = lambda: False      # kill switch hook
     quotes: QuoteProvider | None = None              # fail closed: see _quote_for
     governor: Governor | None = None                 # reduce-only, consulted after sizing
+    risk_budget: RiskBudget | None = None            # pre-trade worst-case loss; off until set
     exposure_limits: ExposureLimits | None = None    # correlated-book cap; off until set
     risk_state: GovernorState = field(default_factory=GovernorState)
     risk_state_path: str | os.PathLike[str] | None = None  # persist after each settle
@@ -469,6 +471,21 @@ class Engine:
                 # A stand-down is a decision worth recording, never a silent drop.
                 return self._skip(signal, ts, f"governor:{decision.reason_text}", latency_ms)
 
+        # The risk budget prices the loss BEFORE it happens. The governor above reacts
+        # to realised P&L, which cannot fire before the loss exists; this pass shrinks
+        # (never grows) the locked clip so the day's worst case stays inside the limit.
+        budget_note = ""
+        if self.risk_budget is not None:
+            admission = self.risk_budget.admit(
+                self.open_positions, ticker=signal.ticker, qty=qty, limit=limit,
+                realized_today_usd=self.governor_state.realized_today_usd)
+            if not admission.accepted:
+                return self._skip(signal, ts, f"risk_budget:{admission.reason_text}",
+                                  latency_ms)
+            if admission.capped:
+                qty = admission.qty
+                budget_note = f":budget={admission.reason_text}"
+
         # Concentration is the cap a position count cannot express. It is checked after
         # sizing because the premium cap needs the sized quantity and limit; a refusal is
         # a skip with a named reason, never a silent drop, and the book is unchanged.
@@ -486,7 +503,8 @@ class Engine:
         self.stats.intents += 1
         intent = OrderIntent(
             action="buy", qty=qty, limit=limit, contract_key=key,
-            reason=f"entry:{tier.value}:his_bid={signal.his_bid:g}:ask={quote.ask:g}",
+            reason=(f"entry:{tier.value}:his_bid={signal.his_bid:g}:ask={quote.ask:g}"
+                    f"{budget_note}"),
             idempotency_key=f"{key}:buy:{self.stats.trades_today}",
         )
         self.fills.record(event="buy", contract_key=key, qty=qty, price=limit,
@@ -513,13 +531,26 @@ class Engine:
         limit = marketable_limit(price, quote.ask)
         tier = tier_for_channel(signal.channel or position.ticker, is_first_of_day=False)
         qty = contracts_for(clip_budget(tier, is_add=True), limit)
+        budget_note = ""
+        if self.risk_budget is not None:
+            admission = self.risk_budget.admit(
+                self.open_positions, ticker=position.ticker, qty=qty, limit=limit,
+                realized_today_usd=self.governor_state.realized_today_usd)
+            if not admission.accepted:
+                return self._skip(signal, ts, f"risk_budget:{admission.reason_text}",
+                                  latency_ms, key)
+            if admission.capped:
+                qty = admission.qty
+                budget_note = f":budget={admission.reason_text}"
         total = position.contracts + qty
         position.avg_price = (position.avg_price * position.contracts + limit * qty) / total
         position.contracts = total
         position.adds += 1
         self.stats.intents += 1
         intent = OrderIntent(action="buy", qty=qty, limit=limit, contract_key=key,
-                             reason=f"add:{tier.value}:{position.adds}/{self.config.add_allowed_per_position}",
+                             reason=(f"add:{tier.value}:"
+                                     f"{position.adds}/{self.config.add_allowed_per_position}"
+                                     f"{budget_note}"),
                              idempotency_key=f"{key}:add:{position.adds}")
         self.fills.record(event="buy", contract_key=key, qty=qty, price=limit,
                           reason=intent.reason, ts=ts, latency_ms=latency_ms, note="add")
