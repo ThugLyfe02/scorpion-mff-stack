@@ -78,6 +78,10 @@ still have to be real. The lifecycle is no longer the unproven part.
 
 ## The lane boundary: PR #8 is live, PR #1 is paper
 
+> Numbering note: this document was written when the live lane was opened as the
+> second pull request, so the text below says "PR#2". Its GitHub number is **#8**;
+> "PR#1" is still #1. The branch names are the stable identifiers.
+
 Two PRs, two jobs, one gate. The boundary is not a preference; it is what keeps a
 research component from becoming a live dependency by accident.
 

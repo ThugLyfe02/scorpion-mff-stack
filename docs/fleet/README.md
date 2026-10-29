@@ -14,7 +14,7 @@ Two lanes, one gate, in tandem. The fleet is the machine that turns this repo fr
                  │ claude-opus-5-5   │        │ deepseek-v4-pro    │
                  │ deterministic     │        │ coded hot path     │
                  │ control plane     │        │ hardening          │
-                 │   -> PR #1        │        │   -> PR #2         │
+                 │   -> PR #1        │        │   -> PR #8         │
                  └───────┬───────────┘        └─────────┬─────────┘
                          │                              │
                     scripts/gate.sh               scripts/gate.sh
@@ -29,7 +29,7 @@ model, prompt, and gate:
 | lane | branch | model | deliverable |
 |---|---|---|---|
 | `architect` | `hardening/deterministic-control-plane` | `claude-opus-5-5` | event-sourced control plane + research frontier |
-| `main` | `hardening/correlated-book-guard` | `deepseek-v4-pro` | Discord → Robinhood hot path hardening |
+| `main` | `hardening/correlated-book-guard` | `deepseek-v4-pro` | Discord → Robinhood hot path hardening (GitHub PR **#8**; the older prose called it "PR#2") |
 
 Both lanes hold the **same gate** (`scripts/gate.sh`: ruff → `mypy --strict` →
 pytest). A lane that cannot pass the gate cannot open a pull request; the driver
