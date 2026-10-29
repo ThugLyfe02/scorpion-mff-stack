@@ -75,6 +75,21 @@ class GovernorState:
         self.peak_equity_usd = max(self.peak_equity_usd, self.equity_usd)
         self.consecutive_losses = self.consecutive_losses + 1 if pnl_usd < 0 else 0
 
+    def correct_result(self, delta_usd: float) -> None:
+        """Correct the money a venue answer changed, without counting a second trade.
+
+        The engine books an exit at the price in the post, at intent time. The venue's
+        fill can be better, worse, partial or absent, so `delta_usd` moves realised P&L
+        and the equity path onto what was actually confirmed. It deliberately does not
+        touch `trades_today` or `consecutive_losses`: this is the same trade being made
+        accurate, not another one. A sign flip on a correction is rare (it needs a fill
+        on the other side of the entry), and the next `arm` rebuilds the streak from the
+        confirmed book with `sync_engine`, which is the authority.
+        """
+        self.realized_today_usd += delta_usd
+        self.equity_usd += delta_usd
+        self.peak_equity_usd = max(self.peak_equity_usd, self.equity_usd)
+
     @property
     def drawdown_usd(self) -> float:
         return max(0.0, self.peak_equity_usd - self.equity_usd)

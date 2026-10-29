@@ -15,9 +15,10 @@ python -m pytest --version         # if this fails, use .venv/Scripts/python.exe
 
 If the venv is not active, replace `python` with `.venv/Scripts/python.exe` (Windows)
 or `.venv/bin/python` (POSIX). `scripts/gate.sh` resolves the venv itself and is the
-single top-level check: `ruff -> mypy --strict -> pytest`, currently **708 passed**
+single top-level check: `ruff -> mypy --strict -> pytest`, currently **733 passed**
 (513 at the 3.a red-team, plus the three transport-quarantine tests added by final
-integration that close O1, plus the offline Gateway lifecycle suite).
+integration that close O1, plus the offline Gateway lifecycle suite, plus the
+confirmed-exit join and the operator flatten added by G19/G20).
 
 ## The one-line index
 
@@ -41,6 +42,8 @@ integration that close O1, plus the offline Gateway lifecycle suite).
 | G16 | a book that disagrees with the venue and does not say so | `python -m pytest tests/test_reconcile.py -q` |
 | G17 | a confirmed fill that a restart, a duplicate or a partial can corrupt | `python -m pytest tests/test_execution_book.py -q` |
 | G18 | a venue book that is stale, undatable, or not a book at all | `python -m pytest tests/test_venue_feed.py -q` |
+| G19 | a running bot that thinks it exited because the venue has not answered | `python -m pytest tests/test_confirmed_exits.py -q` |
+| G20 | an operator with no way to get flat that does not invent a price or sell twice | `python -m pytest tests/test_flatten.py -q` |
 
 Each gem follows the same shape: **what it is**, **the acceptance command**, **the
 invariant**, **the failure mode it buys down**, and the **3.a red-team record** for it.
@@ -580,6 +583,87 @@ the file feed plus the fixture path are what is proven offline.
 
 ---
 
+## G19. A running bot must not believe it exited before the venue did
+
+`scorpion_mff/listener.py` (the four `_book_*` joins) + `Engine.exit_in_flight` +
+`Engine.align_realized` + `GovernorState.correct_result`. `execution_book.py` made a
+**restart** honest (`sync_engine`). The process that keeps running still had the older
+hole: the engine deletes a position and books P&L at **sell-intent** time, so a sell that
+was rejected, partially filled or never answered left the bot flat, with the contract in
+`closed` and "never chase" refusing to exit again - while the venue still held the risk.
+
+**Acceptance (one command):** `python -m pytest tests/test_confirmed_exits.py -q` ->
+12 passed.
+
+**Invariant:** after every venue answer, the engine's position for that contract is the
+confirmed book's position, and `exit_in_flight` is exactly the set of contracts with a
+non-terminal sell at the venue. The two directions are deliberately asymmetric:
+
+* a sell that is FILLED/PARTIAL/REJECTED/UNKNOWN is applied - a refusal restores the lot,
+  and an unknown restores it **and** keeps it in flight (the risk may be real);
+* a buy is applied only when FILLED or REJECTED - a partial or unanswered buy keeps the
+  engine's larger position, because the remainder can still fill and over-counting risk
+  is the safe direction.
+
+While a contract is in flight, a second close/trim (`*_while_exiting` skip), an add
+(`add_while_exiting`) and the breakeven stop (silent no-op) are refused, and the expiry
+cutoff writes `HALT_AND_PAGE:exit_in_flight` instead of sending a second sell. Realised
+P&L is moved onto the confirmed fill (`confirmed - already_applied`, idempotent under a
+redelivered ack); a partial reverses the P&L for the unfilled remainder, and a refused or
+unknown exit reverses the whole assumption. The correction goes through
+`correct_result`, so the trade counter and loss streak do not advance twice.
+
+**Failure mode it buys down:** the quiet asymmetry that costs the most money - the
+engine is flat (and locked out of exiting) while the venue holds a lot, or the engine
+books a profit on a sell the venue refused and the daily stop never sees the loss. Also
+its mirror: a refused buy holding a concurrency slot forever, and a partial buy reported
+as a full clip.
+
+**The idempotency key is the decision instant** (`contract:action:<ms>`), not a counter.
+`trades_today` can be rewound by a confirmed-book sync and `trimmed` never advances on a
+refused trim, so a retry of a refused exit would reuse the refused order's key. A retry
+is a new order; a redelivered answer is still a duplicate.
+
+**What is not built:** no cancel/replace loop, so a partial whose remainder never trades
+stays visibly in flight (paged, settled by `recover`/`reconcile`) rather than being
+repriced automatically. The venue's ack shape is still the credentialed unknown.
+
+---
+
+## G20. The operator's exit: confirmed lots, seen bids, one sell each
+
+`scorpion_mff/flatten.py` + `python -m scorpion_mff.cli flatten`. Every exit was
+event-shaped - a Discord post, a breakeven quote, the 15:45 cutoff. There was no way for a
+human to say "flat now", which is precisely the moment (`killswitch` stops buys but must
+not trap a position) the command exists for.
+
+**Acceptance (one command):** `python -m pytest tests/test_flatten.py -q` -> 13 passed.
+
+**Invariant:** the command sells the **confirmed** book only, each lot at the **live bid**
+(never the posted price, the entry, the last bar, or a market order), and **never sells a
+lot twice**: a contract with an unanswered sell is `IN_FLIGHT` and skipped. An unpriceable
+lot is `UNPRICED` and stays on the book; the report names it and the command exits 1. A
+carried lot whose contract already expired is **released by `sync_engine`, not sold**. The
+default is a dry run that touches nothing; `--live` rebuilds the close signal for each lot
+from its contract key and places it through `Listener.place`, so the intent row, venue
+answer, confirmed book, in-flight guard and realised-P&L correction are the same code an
+exit post uses. The kill switch is deliberately **not** consulted: it stops entries, and a
+desk that cannot flatten because it stopped buying has the safety inverted.
+
+**Failure mode it buys down:** the only remaining way to lose control of a live position -
+no human command can leave it, or the command leaves it twice / at an invented price. It
+also makes a *failed* panic honest: a rejected sell restores the lot, pages, and reverses
+the profit the engine assumed (G19), so a failed exit never looks like a profitable one.
+
+**Exit codes:** 0 the confirmed book is flat (or a plan covers every lot), 1 a lot remains
+or could not be priced/sold, 2 the execution log or quote feed cannot be trusted.
+
+**What is not built:** a repricing ladder for a bid that moves after the plan is printed
+(the plan is a snapshot), and any market-order fallback. Both are desk policies, not code
+decisions.
+
+---
+
 ## What we deliberately do not build
 
 These are not backlog items with an ETA. They are gates that would have to open before the
@@ -690,7 +774,7 @@ place. The corpus backtest and the 9/8 replay are unchanged (they have no transp
 The short version, in the order that fails fastest:
 
 ```bash
-./scripts/gate.sh                                            # ruff -> mypy -> pytest, 708
+./scripts/gate.sh                                            # ruff -> mypy -> pytest, 733
 python -m scorpion_mff.cli backtest                          # 93/91/405/$57,951.00
 python -m scorpion_mff.cli replay tapes/sep8.json            # 4/2/6/$211.00, 0 breaches
 python -m scorpion_mff.cli expiry audit                      # 40/93, 65/93, 0/40, 10/40, REFUSED
@@ -712,6 +796,8 @@ python -m pytest tests/test_gateway.py -q                                   # 20
 python -m pytest tests/test_risk_budget.py -q                               # 24
 python -m pytest tests/test_execution_book.py -q                            # 66
 python -m pytest tests/test_venue_feed.py -q                               # 47
+python -m pytest tests/test_confirmed_exits.py -q                          # 12
+python -m pytest tests/test_flatten.py -q                                  # 13
 ```
 
 A failure in any of these is a gem failing, not a flaky test: every command is offline,

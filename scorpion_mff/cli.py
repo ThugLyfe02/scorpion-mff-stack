@@ -8,6 +8,8 @@
     python -m scorpion_mff.cli verify           # fill-log integrity + unresolved intents
     python -m scorpion_mff.cli recover          # resolve crash-left intents (never places)
     python -m scorpion_mff.cli book show        # the confirmed book (acks, partials, digest)
+    python -m scorpion_mff.cli flatten          # plan: sell every confirmed lot at the bid
+    python -m scorpion_mff.cli flatten --live   # the operator's exit (needs a quote feed)
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from .broker import (
     HttpQuoteProvider,
     OrderLookup,
     PaperBroker,
+    QuoteProvider,
     RobinhoodAgenticBroker,
     mask,
 )
@@ -35,7 +38,7 @@ from .gateway import GatewayFatalError
 from .health import Heartbeat, LatencyBudget
 from .killswitch import KillSwitch
 from .ledger import Ledger
-from .listener import Listener, WebsocketGateway
+from .listener import Listener, TapeTransport, WebsocketGateway
 from .parser import CHANNEL_IDS, EXCLUDED_CHANNEL_IDS, EXCLUDED_TICKERS
 from .replay import load_quotes, load_tape, replay
 from .types import Fill, RawMessage
@@ -112,6 +115,12 @@ def _parser() -> argparse.ArgumentParser:
                      help="fill log (default live/fills.jsonl)")
     rec.add_argument("--broker", choices=("robinhood", "paper"), default="robinhood",
                      help="lookup backend (default robinhood; paper is deterministic)")
+
+    fl = sub.add_parser("flatten",
+                        help="sell every confirmed lot at the live bid; dry run unless --live")
+    fl.add_argument("--live", action="store_true",
+                    help="place the sells (default: print the plan and send nothing)")
+    fl.add_argument("--json", action="store_true", help="machine-readable report")
 
     marks = sub.add_parser("marks", help="mark the open book to market (unrealised P&L)")
     marks.add_argument("--fills", type=Path, default=None,
@@ -681,6 +690,69 @@ def cmd_recover(args: argparse.Namespace) -> int:
               f"re-run `recover` once the lookup can decide")
         return 1
     return 0
+
+
+def cmd_flatten(args: argparse.Namespace, quotes: QuoteProvider | None = None,
+                now: float | None = None) -> int:
+    """Get flat on purpose: every confirmed lot, at a bid that actually exists.
+
+    The kill switch stops ENTRIES; it must never trap a position, so this command does
+    not consult it. The default is a dry run that touches nothing. `--live` places each
+    sell through the live listener - the same intent/ack/book/reconcile path an exit
+    post uses - and every sell is at the observed bid, never at the posted price, the
+    entry, or a market order. An unpriceable lot is reported and left on the book; a lot
+    whose exit is already at the venue is reported and never sold twice.
+
+    Exit 0 when the confirmed book is flat at the end (or a plan covers every lot);
+    1 when a lot remains or could not be priced/sold; 2 when the book or quote feed
+    cannot be trusted.
+    """
+    from . import flatten as flatten_mod
+    from .execution_book import ExecutionBook, ExecutionBookError
+
+    engine = Engine(fills=FillLog(path=FILL_LOG) if args.live else FillLog())
+    try:
+        book = ExecutionBook.load(EXECUTION_LOG, day_of=engine.trading_day)
+    except ExecutionBookError as exc:
+        print(f"refusing to flatten: the confirmed execution log at {EXECUTION_LOG} "
+              f"cannot be trusted: {exc}", file=sys.stderr)
+        return 2
+
+    if not book.open_positions():
+        # A flat book needs no quote feed and no broker. Saying so is the useful answer.
+        print("flatten: nothing to flatten - the confirmed book is flat")
+        return 0
+
+    if quotes is None:
+        quotes = HttpQuoteProvider()
+        if not quotes.configured:
+            print("refusing to flatten: no quote feed configured "
+                  "(set MFF_QUOTE_URL_TEMPLATE). A sale at an invented bid is not a "
+                  "flatten.", file=sys.stderr)
+            return 2
+
+    if not args.live:
+        report = flatten_mod.plan(book, quotes)
+        print(json.dumps(report.to_dict(), indent=2) if args.json else report.to_text())
+        return report.exit_code
+
+    if not os.environ.get("MFF_RH_TOKEN"):
+        print("--live needs MFF_RH_TOKEN", file=sys.stderr)
+        return 1
+    listener = Listener(
+        transport=TapeTransport([]),
+        engine=engine,
+        broker=RobinhoodAgenticBroker(dry_run=False),
+        quotes=quotes,
+        budget=LatencyBudget(),
+        heartbeat=Heartbeat(path=HEARTBEAT),
+        kill=KillSwitch(path=NO_TRADE),
+        execution=book,
+    )
+    report = flatten_mod.execute(book, engine, listener, quotes,
+                                 time.time() if now is None else now)
+    print(json.dumps(report.to_dict(), indent=2) if args.json else report.to_text())
+    return report.exit_code
 
 
 def cmd_marks(args: argparse.Namespace) -> int:
@@ -1634,6 +1706,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "verify": cmd_verify,
         "recover": cmd_recover,
+        "flatten": cmd_flatten,
         "marks": cmd_marks,
         "backtest": cmd_backtest,
         "watch": cmd_watch,

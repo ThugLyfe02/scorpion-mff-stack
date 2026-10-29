@@ -94,6 +94,10 @@ class Listener:
     venue_every_s: float = 300.0
     venue_checks: int = 0
     last_venue_check: float = 0.0
+    # Per order, the confirmed P&L already folded into the engine. Without it a
+    # redelivered ack would apply the same correction twice; with it the second ack of
+    # a partial applies only the new contracts. Keyed by the book's client id.
+    aligned_orders: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.fills is None:
@@ -195,7 +199,7 @@ class Listener:
                     event="reject", contract_key=intent.contract_key, qty=intent.qty,
                     price=intent.limit, reason=f"broker:{exc}", accepted=False,
                     ts=now, note=key)
-            self._book_reject(booked, f"broker:{exc}", now)
+            self._book_reject(intent, booked, f"broker:{exc}", now)
             return
         self.breaker.record_success()
         if self.fills is not None:
@@ -203,7 +207,7 @@ class Listener:
                 event="ack", contract_key=ack.contract_key, qty=ack.qty,
                 price=ack.price, reason=intent.reason, ts=now,
                 note=key)
-        self._book_ack(booked, ack, now)
+        self._book_ack(intent, booked, ack, now)
 
     def _on_transport_failure(self, intent: OrderIntent, key: str, now: float,
                               exc: TransportError, booked: str = "") -> None:
@@ -248,7 +252,7 @@ class Listener:
                     qty=intent.qty, price=intent.limit,
                     reason="exit_unknown:transport", accepted=False, ts=now,
                     note=f"{key}: {reason}; local book is flat, venue state is unknown")
-        self._book_unknown(booked, f"transport:{exc}", now)
+        self._book_unknown(intent, booked, f"transport:{exc}", now)
 
     # ── confirmed execution: the book behind the fill log ─────────────────────
     #
@@ -281,17 +285,36 @@ class Listener:
             self._book_alert("intent", exc)
             return ""
 
-    def _book_ack(self, booked: str, ack: Ack, now: float) -> None:
-        """Fold the venue's cumulative answer into the book (no-op without a book)."""
+    def _book_ack(self, intent: OrderIntent, booked: str, ack: Ack, now: float) -> None:
+        """Fold the venue's cumulative answer into the book (no-op without a book).
+
+        Then make the RUNNING engine agree with it. `sync_engine` already did this at
+        arm time, but the process that booked an exit kept its optimistic view until
+        the next restart - so a sell the venue had not filled left the bot believing it
+        was flat, with `closed` set, and no way to leave. That is the defect this call
+        closes; it is deliberately conservative about the two unknowns (see
+        `_apply_confirmed_contract`).
+        """
         execution = self.execution
         if execution is None or not booked:
             return
         try:
-            execution.apply_ack(booked, ack, ts=now)
+            order = execution.apply_ack(booked, ack, ts=now)
         except Exception as exc:            # noqa: BLE001 - surfaced as an alert row
             self._book_alert("ack", exc)
+            return
+        # A sell must always be reflected: FILLED removes the lot, PARTIAL/PENDING
+        # leaves a remainder. A buy is only applied once the venue says FILLED; a
+        # partial or unanswered buy keeps the engine's larger position, because the
+        # remainder can still fill and over-counting risk is the safe direction.
+        if order.action == "sell":
+            self._align_sell_pnl(intent, booked, now)
+        self._apply_confirmed_contract(intent.contract_key, now,
+                                       apply_position=order.action == "sell"
+                                       or order.terminal)
 
-    def _book_reject(self, booked: str, reason: str, now: float) -> None:
+    def _book_reject(self, intent: OrderIntent, booked: str, reason: str,
+                     now: float) -> None:
         """A business reject is terminal: the venue answered, and it said no."""
         execution = self.execution
         if execution is None or not booked:
@@ -300,8 +323,12 @@ class Listener:
             execution.reject(booked, reason=reason, ts=now)
         except Exception as exc:            # noqa: BLE001 - surfaced as an alert row
             self._book_alert("reject", exc)
+            return
+        self._align_sell_pnl(intent, booked, now)
+        self._apply_confirmed_contract(intent.contract_key, now, apply_position=True)
 
-    def _book_unknown(self, booked: str, reason: str, now: float) -> None:
+    def _book_unknown(self, intent: OrderIntent, booked: str, reason: str,
+                      now: float) -> None:
         """A transport failure: the order stays OPEN so `recover` can settle it."""
         execution = self.execution
         if execution is None or not booked:
@@ -310,6 +337,111 @@ class Listener:
             execution.mark_unknown(booked, reason=reason, ts=now)
         except Exception as exc:            # noqa: BLE001 - surfaced as an alert row
             self._book_alert("unknown", exc)
+            return
+        # Both directions stay conservative about a send the venue may have received:
+        # an unknown SELL restores the position (the risk may still be there) and an
+        # unknown BUY leaves the engine's position alone (the exposure may be there).
+        self._align_sell_pnl(intent, booked, now)
+        self._apply_confirmed_contract(intent.contract_key, now,
+                                       apply_position=intent.action != "buy")
+
+    def _align_sell_pnl(self, intent: OrderIntent, booked: str, now: float) -> None:
+        """Put the engine's realised P&L on the contracts the venue confirmed.
+
+        The engine booked the WHOLE intent at the posted price when it decided. The
+        correction is `confirmed - already_applied`, where the first `already_applied`
+        is the engine's own assumption and later ones are the previous answers. That
+        makes it idempotent under a redelivered ack and correct across partial fills:
+        a 2-lot filling 1-then-1 moves the engine by (fill1 + fill2) - assumed, never
+        twice.
+
+        A refused or unanswered exit has no confirmed trades, so the whole assumption
+        is reversed - while the position is restored to the book. Money never stays
+        booked against contracts the engine still holds.
+        """
+        execution = self.execution
+        if execution is None or not booked or intent.action != "sell":
+            return
+        trades = [trade for trade in execution.realized if trade.client_id == booked]
+        entry: float | None = None
+        if trades:
+            entry = trades[0].entry_price
+        else:
+            lot = execution.lots.get(intent.contract_key)
+            if lot is not None:
+                entry = lot.avg_price
+        if entry is None:
+            return
+        confirmed = round(sum(trade.pnl_usd for trade in trades), 2)
+        assumed = round((intent.limit - entry) * intent.qty * 100.0, 2)
+        applied = self.aligned_orders.get(booked, assumed)
+        delta = round(confirmed - applied, 2)
+        if not delta:
+            self.aligned_orders[booked] = confirmed
+            return
+        self.engine.align_realized(
+            delta, now,
+            note=(f"order={booked}:limit={intent.limit:g}:qty={intent.qty}"
+                  f":confirmed={confirmed:.2f}:assumed={assumed:.2f}"))
+        self.aligned_orders[booked] = confirmed
+
+    def _apply_confirmed_contract(self, contract_key: str, now: float, *,
+                                  apply_position: bool) -> None:
+        """Make one contract's engine position match the confirmed book.
+
+        Called after every venue answer, so the live process is never more optimistic
+        than what the venue confirmed. The asymmetry is the whole design:
+
+          * **sell answered** - apply. A rejected, unfilled or partial sell restores
+            the remainder, so the exit path can see it and try again (with a fresh
+            idempotency key) instead of believing it is flat.
+          * **buy filled or rejected** - apply. A rejected buy must free its slot.
+          * **buy partial or unknown** - do NOT shrink. The remainder may still fill,
+            and holding a phantom contract costs a slot; holding too few costs real
+            money.
+
+        `exit_in_flight` is always refreshed from the book, because that is the only
+        authority on whether a sell is still at the venue. A restated position with an
+        unanswered sell is visible to marks, the budget and the expiry guard, but no
+        guard may send a second exit for it.
+        """
+        execution = self.execution
+        if execution is None or not contract_key:
+            return
+        before = self.engine.positions.get(contract_key)
+        if apply_position:
+            after = next((position for position in execution.open_positions()
+                          if position.contract_key == contract_key), None)
+            if after is None:
+                self.engine.positions.pop(contract_key, None)
+            else:
+                self.engine.positions[contract_key] = after
+        self.engine.exit_in_flight = {
+            order.contract_key for order in execution.unresolved_orders()
+            if order.action == "sell"}
+        if not apply_position:
+            return
+        was = 0 if before is None else before.contracts
+        now_contracts = 0
+        if contract_key in self.engine.positions:
+            now_contracts = self.engine.positions[contract_key].contracts
+        if was != now_contracts:
+            self.engine.fills.record(
+                event="reconcile", contract_key=contract_key, qty=now_contracts,
+                price=(self.engine.positions[contract_key].avg_price
+                       if contract_key in self.engine.positions else 0.0),
+                reason="engine_follows_venue", ts=now, accepted=False,
+                note=f"engine_contracts={was}:confirmed={now_contracts}")
+
+    def place(self, intent: OrderIntent) -> None:
+        """Place one intent through the live ladder.
+
+        `flatten` uses this so a panic exit is booked, acked, reconciled and P&L-corrected
+        by exactly the code an exit post uses. It is a thin public name for `_place`,
+        which already owns the intent row, the breaker (buys only), the transport
+        quarantine and the confirmed book.
+        """
+        self._place(intent)
 
     def refresh_stops(self) -> list[OrderIntent]:
         """Poll quotes for open positions and fire any armed breakeven stop.

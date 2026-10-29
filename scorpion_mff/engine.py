@@ -63,6 +63,20 @@ from .stops import breakeven_exit
 from .types import AlertKind, OrderIntent, Position, Quote, Signal
 
 
+def _order_suffix(ts: float) -> str:
+    """A restart-safe order suffix: the decision instant in milliseconds.
+
+    The idempotency key is the venue's dedupe identity, so it must be unique per
+    *order attempt*. A counter can be rewound (a confirmed-book sync restores
+    `trades_today` from fills, so a refused entry would reuse the refused order's key)
+    or never advance (a refused sell never increments `trimmed`), and reusing a
+    refused key invites the venue to replay the refusal. The decision instant is
+    unique in the process and across restarts, and stays deterministic because the
+    engine's clock is injected.
+    """
+    return str(int(round(ts * 1000)))
+
+
 def _env_float(name: str) -> float | None:
     """Read an optional float from the environment; None when unset/unparsable."""
     raw = os.environ.get(name)
@@ -160,6 +174,11 @@ class Engine:
 
     positions: dict[str, Position] = field(default_factory=dict)
     closed: set[str] = field(default_factory=set)
+    # Contracts with a sell the venue has not answered. The book owns this set
+    # (`ExecutionBook.unresolved_orders`), and the listener refreshes it after every
+    # confirmed answer. One exit at a time: a second close while the first is still
+    # at the venue is how one lot gets sold twice.
+    exit_in_flight: set[str] = field(default_factory=set)
     halted: bool = False
     halt_reason: str = ""              # why buys are halted; exits stay legal
     day: str = ""
@@ -196,6 +215,39 @@ class Engine:
                 # settling, but it must be visible in the log.
                 self.fills.record(event="alert", contract_key="", qty=0, price=0.0,
                                   reason=f"risk_state_unwritable:{exc}", ts=ts)
+
+    def align_realized(self, delta_usd: float, ts: float, *, note: str = "") -> None:
+        """Move realised P&L onto what the venue confirmed, not what the post said.
+
+        Called by the listener after a sell answer. The engine booked the whole intent
+        at the post price at intent time; `delta_usd` is (confirmed P&L for this order)
+        minus (the engine's assumption for the whole intent). Three consequences, all
+        deliberate:
+
+          * a better or worse fill moves the money to the fill;
+          * a PARTIAL exit reverses the P&L the engine booked for contracts it still
+            holds (the remainder is restored separately by the listener);
+          * a REJECTED or UNKNOWN exit reverses the whole assumption, because no fill
+            was confirmed. Booking a profit on an unconfirmed sell is the optimistic
+            direction the daily stop exists to catch.
+
+        `correct_result` is used instead of `record_result`: this is the same trade
+        being made accurate, not a second settlement, so the trade counter and the
+        loss streak must not advance.
+        """
+        if not delta_usd:
+            return
+        self.stats.realized_usd += delta_usd
+        self.governor_state.correct_result(delta_usd)
+        if self.risk_state_path is not None:
+            try:
+                self.governor_state.save(self.risk_state_path)
+            except OSError as exc:
+                self.fills.record(event="alert", contract_key="", qty=0, price=0.0,
+                                  reason=f"risk_state_unwritable:{exc}", ts=ts)
+        self.fills.record(event="settle", contract_key="", qty=0, price=0.0,
+                          reason=f"confirmed_fill:{delta_usd:+.2f}", ts=ts,
+                          note=note[:200])
 
     def reconcile_positions(self, venue: Iterable[VenuePosition],
                             now: float | None = None,
@@ -577,7 +629,7 @@ class Engine:
             action="buy", qty=qty, limit=limit, contract_key=key,
             reason=(f"entry:{tier.value}:his_bid={signal.his_bid:g}:ask={quote.ask:g}"
                     f"{budget_note}"),
-            idempotency_key=f"{key}:buy:{self.stats.trades_today}",
+            idempotency_key=f"{key}:buy:{_order_suffix(ts)}",
         )
         self.fills.record(event="buy", contract_key=key, qty=qty, price=limit,
                           reason=intent.reason, ts=ts, latency_ms=latency_ms,
@@ -590,6 +642,10 @@ class Engine:
         key = signal.contract_key or (position.contract_key if position else "")
         if position is None:
             return self._skip(signal, ts, "add_without_position", latency_ms, key)
+        if position.contract_key in self.exit_in_flight:
+            # Adding to a lot whose exit is already at the venue increases exposure
+            # on exactly the position the desk asked to leave.
+            return self._skip(signal, ts, "add_while_exiting", latency_ms, key)
         # A STOP halts ENTRIES and ADDS. The original add path checked only the kill
         # switch, so "stand down" followed by "adding at 1.30" increased exposure on a
         # desk that had been told to stop. Exits remain legal: you must always be able
@@ -644,7 +700,7 @@ class Engine:
                              reason=(f"add:{tier.value}:"
                                      f"{position.adds}/{self.config.add_allowed_per_position}"
                                      f"{governor_note}{budget_note}"),
-                             idempotency_key=f"{key}:add:{position.adds}")
+                             idempotency_key=f"{key}:add:{_order_suffix(ts)}")
         self.fills.record(event="buy", contract_key=key, qty=qty, price=limit,
                           reason=intent.reason, ts=ts, latency_ms=latency_ms, note="add")
         return [intent]
@@ -657,6 +713,8 @@ class Engine:
             if self._ambiguous_exit(signal):
                 return self._alert(signal, ts, "ambiguous_exit:named_no_contract", latency_ms)
             return self._skip(signal, ts, "trim_without_position", latency_ms, key)
+        if position.contract_key in self.exit_in_flight:
+            return self._skip(signal, ts, "trim_while_exiting", latency_ms, key)
         qty = position.contracts - self.config.trim_target
         if qty <= 0:
             # Nothing to scale out, but the instruction is still "protect it":
@@ -676,7 +734,7 @@ class Engine:
         pct = f"{signal.pct:g}%" if signal.pct is not None else "n/a"
         intent = OrderIntent(action="sell", qty=qty, limit=price, contract_key=key,
                              reason=f"trim_to_{self.config.trim_target}+BE:pct={pct}",
-                             idempotency_key=f"{key}:trim:{position.trimmed}")
+                             idempotency_key=f"{key}:trim:{_order_suffix(ts)}")
         self.fills.record(event="sell", contract_key=key, qty=qty, price=price,
                           reason=intent.reason, ts=ts, latency_ms=latency_ms,
                           note=f"stop->be@{position.avg_price:g}")
@@ -694,6 +752,10 @@ class Engine:
             else:
                 closed_note = "close_without_position"
             return self._skip(signal, ts, closed_note, latency_ms, key)
+        if position.contract_key in self.exit_in_flight:
+            # The first exit has no venue answer yet. A second sell is not a retry; it
+            # is a second order, and two sells for one lot is a short.
+            return self._skip(signal, ts, "close_while_exiting", latency_ms, key)
         qty = position.contracts
         quote = self._quote_for(position.contract_key, quote, ts)
         price = signal.price if signal.price is not None else (
@@ -707,7 +769,8 @@ class Engine:
         self.stats.intents += 1
         pct = f"{signal.pct:g}%" if signal.pct is not None else "n/a"
         intent = OrderIntent(action="sell", qty=qty, limit=price, contract_key=key,
-                             reason=f"close:pct={pct}", idempotency_key=f"{key}:close")
+                             reason=f"close:pct={pct}",
+                             idempotency_key=f"{key}:close:{_order_suffix(ts)}")
         self.fills.record(event="sell", contract_key=key, qty=qty, price=price,
                           reason=intent.reason, ts=ts, latency_ms=latency_ms, note="flat")
         return [intent]
@@ -733,6 +796,10 @@ class Engine:
             return []
         position = self.positions.get(contract_key)
         if position is None or not position.is_open:
+            return []
+        if contract_key in self.exit_in_flight:
+            # The BE stop is checked on every tick; a sell already at the venue is a
+            # reason to stay quiet, not to send a second one.
             return []
         intent = breakeven_exit(position, quote.bid)
         if intent is None:
@@ -793,6 +860,15 @@ class Engine:
         intents: list[OrderIntent] = []
         for verdict in verdicts:
             if verdict.must_flatten:
+                if verdict.contract_key in self.exit_in_flight:
+                    # Flattening on top of an unanswered sell is the one way the
+                    # cutoff can create a short. Page the human who can settle the
+                    # in-flight order; place nothing.
+                    self._expiry_page(verdict.contract_key, "exit_in_flight", ts,
+                                      note="a sell is already at the venue; "
+                                           "nothing was placed",
+                                      shares=verdict.assignment_shares)
+                    continue
                 intent = self._expiry_flatten(verdict, bids.get(verdict.contract_key), ts)
                 if intent is not None:
                     intents.append(intent)
@@ -829,7 +905,8 @@ class Engine:
             f":{minutes:+.1f}m" if minutes is not None else "")
         intent = OrderIntent(action="sell", qty=qty, limit=limit,
                              contract_key=verdict.contract_key, reason=reason,
-                             idempotency_key=f"{verdict.contract_key}:expiry")
+                             idempotency_key=(f"{verdict.contract_key}:expiry:"
+                                               f"{_order_suffix(ts)}"))
         self.fills.record(event="sell", contract_key=verdict.contract_key, qty=qty,
                           price=limit, reason=reason, ts=ts,
                           note=f"expiry_cutoff_force_close:{verdict.reason}")

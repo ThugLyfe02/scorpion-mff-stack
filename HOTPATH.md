@@ -528,6 +528,119 @@ proven offline (66 tests) and unproven against Robinhood's ack shape. The `tca.E
 export exists so that the first real ack prices itself through `tca fills` instead of
 being entered by hand.
 
+## Confirmed exits: the running process follows the venue
+
+`sync_engine` made a **restart** honest. The process that never restarted still had the
+old hole: the engine deletes a position and books P&L at *sell-intent* time, so a sell
+the venue rejected, partially filled, or never answered left the bot believing it was
+flat - with the contract in `closed`, and "never chase" refusing to exit again. The lot
+was still at the venue and invisible to every guard. `listener.py` now makes the
+**running** engine follow the confirmed book after every venue answer.
+
+The invariant is one sentence: **the engine is never more optimistic than the venue's
+last answer, and one exit is in flight per contract.** Two deliberately asymmetric
+rules make it safe in both directions:
+
+| Answer | Position | Why |
+|---|---|---|
+| sell FILLED | apply (gone) | exactly what the venue confirmed |
+| sell PARTIAL / PENDING | apply (remainder restored) | the rest of the lot still exists and can be exited |
+| sell REJECTED | apply (restored) | the venue said no; the desk may try again, with a **new** key |
+| sell UNKNOWN | apply (restored) + in flight | the socket died; the risk may be real, so count it and page |
+| buy FILLED | apply | the confirmed lot, at the confirmed average price |
+| buy REJECTED | apply (removed) | a phantom position must not hold a slot |
+| buy PARTIAL / UNKNOWN | **keep the engine's larger position** | the remainder may still fill; over-counting risk is the safe direction |
+
+`exit_in_flight` is refreshed from `ExecutionBook.unresolved_orders()` (sells only) on
+every answer. While a contract is in that set:
+
+| Path | Behaviour |
+|---|---|
+| a second close / trim | `close_while_exiting` / `trim_while_exiting` skip, nothing sent |
+| an add | `add_while_exiting` skip - never increase exposure while leaving |
+| the breakeven stop | silent no-op (it is polled every tick; a page per tick is noise) |
+| the expiry cutoff | `HALT_AND_PAGE:exit_in_flight:assignment=...` - never a second sell |
+
+**Realised P&L now follows the fill, not the post.** The engine books the whole intent at
+the price in the Discord message. `Engine.align_realized` moves the engine onto the
+confirmed fill (better or worse), reverses the P&L for a partial's unfilled remainder,
+and reverses the whole assumption on a refused or unanswered exit - because no fill was
+confirmed. That correction goes through `GovernorState.correct_result` (money and equity
+path), not `record_result` (which would count a second trade), and it is idempotent under
+a redelivered cumulative ack. Without it the daily stop would react to a number the venue
+never printed: optimistic after a rejected sell, wrong after price improvement.
+
+**The idempotency key is now the decision instant**, `contract:action:<ms>`. A counter
+is not an identity: `trades_today` can be rewound by a confirmed-book sync, and
+`trimmed` never advances on a refused trim, so a retry of a refused exit would reuse the
+refused order's key and invite the venue to replay the refusal. Milliseconds of the
+injected clock are unique in the process and across restarts, deterministic in replay,
+and unique per *attempt* - so a retry is a new order and a redelivered answer is still a
+duplicate.
+
+```bash
+python -m pytest tests/test_confirmed_exits.py -q     # 12 passed
+```
+
+Twelve tests pin: a rejected sell restores the lot and a retry is a new order; a partial
+leaves the remainder visible and blocks a second exit; the cutoff pages instead of selling
+twice; an unknown sell restores the risk, pages, and never retries; a rejected buy frees
+its slot; an unknown or partial buy keeps the larger position; a fill away from the post
+moves realised P&L; a refused sell reverses the assumed profit; the correction is
+idempotent. The 93-alert backtest, the 9/8 replay, and the paper broker are byte-identical
+(`$57,951.00`, `$211.00`) because none of them attaches a confirmed book.
+
+What this still does not do: there is no cancel/replace loop for a limit that rests
+unfilled, so a partial whose remainder never trades stays in flight (visible, paged, and
+settled by `recover`/`reconcile`) rather than being repriced automatically. The venue's
+ack shape remains the credentialed unknown.
+
+## Flatten: the exit no post was going to give you (`flatten.py`)
+
+Every exit was event-shaped: a Discord post, a breakeven quote, or the 15:45 cutoff. The
+moments a human wants to be flat **now** (the channel is compromised, a clip is
+mis-sized, the world changed) are exactly the moments no post is coming. `killswitch`
+stops entries and deliberately does not trap a position; there was still no command that
+could leave one.
+
+`python -m scorpion_mff.cli flatten` is that command, with three refusals that make it
+safe enough to be the panic button:
+
+| Rule | What it does |
+|---|---|
+| **the confirmed book is the list** | sells only lots the venue confirmed; it cannot create a position |
+| **a price we can see, or nothing** | the limit is the live bid - never the posted price, the entry, the last bar, or a market order. An unpriceable lot is `UNPRICED` and stays on the book |
+| **one exit per lot** | a contract with an unanswered sell is `IN_FLIGHT` and is never sold again |
+
+Default is a **plan**: what it would sell, at what bid, with the estimated P&L, and
+nothing is sent. `--live` rebuilds the close signal the live path expects for each lot
+(from the contract key, so two calls on one ticker stay two lots) and places it through
+`Listener.place` - the same intent row, venue answer, confirmed book, in-flight guard and
+realised-P&L correction an exit post uses. `book.sync_engine` runs first, so a carried lot
+whose contract already expired is **released, not sold**, and a lot from a previous
+session is restored before it is priced.
+
+The kill switch is **not** consulted. It stops buys; a desk that cannot flatten because it
+stopped buying has the safety inverted. A rejected or unknown sell is named in the
+report and paged; the lot stays confirmed and the engine's assumed profit is reversed by
+the G19 join, so a failed panic does not look like a profitable one.
+
+```bash
+python -m scorpion_mff.cli flatten            # exit 0 flat / 1 a lot remains / 2 untrusted
+python -m scorpion_mff.cli flatten --live     # needs MFF_RH_TOKEN + MFF_QUOTE_URL_TEMPLATE
+python -m scorpion_mff.cli flatten --json     # the same report, machine-readable
+```
+
+Thirteen tests (`tests/test_flatten.py`) cover the plan having no side effects, the
+unpriced and in-flight refusals, a live flatten ending flat with the confirmed P&L, a
+second flatten being a no-op, a rejected sell restoring the lot and reversing the
+assumed profit, the priced/unpriced split, an expired lot being released not sold, the
+CLI's dry run/JSON, the token refusal, and a corrupt execution log.
+
+Not built: a repricing ladder for a bid that moves away after the plan is printed (the
+plan is a snapshot by definition), and any market-order fallback - both are desk
+policies, not code decisions.
+
 ## Scheduled venue reconciliation: the feed (`venue.py`)
 
 `reconcile.py` compares two books and `execution_book.py` owns one of them. Neither
