@@ -172,6 +172,26 @@ def test_a_new_day_resets_today_but_not_the_equity_path():
     assert state.realized_today == 0 and state.equity == D("-2000")
 
 
+def test_a_backdated_day_cannot_reset_today_or_rearm_the_daily_stop():
+    state = RiskState(market_day=DAY).settled(D("-3000"), DAY)
+    earlier = state.rolled(date(2026, 8, 9))
+    assert earlier == state, "a roll must never move the market day backwards"
+    decision, after = decide(
+        RiskLimits(), state, market_day=date(2026, 8, 9), channel_id="x"
+    )
+    assert decision.stand_down, "the daily stop that fired must stay fired"
+    assert after == state and after.realized_today == D("-3000")
+
+
+def test_a_backdated_day_cannot_reset_a_losing_streak():
+    state = RiskState(market_day=DAY).settled(D("-100"), DAY).settled(D("-100"), DAY)
+    decision, after = decide(
+        RiskLimits(), state, market_day=date(2026, 8, 9), channel_id="x"
+    )
+    assert after.consecutive_losses == 2
+    assert decision.factor == D("0.5"), "the streak must still de-size the next entry"
+
+
 def test_max_drawdown_halts_and_the_halt_survives_the_day_roll():
     state = RiskState(market_day=DAY)
     state = state.settled(D("-10000"), DAY)

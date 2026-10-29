@@ -61,6 +61,15 @@ class Pipeline:
         # Day roll first: a contract that expired must not hold a slot against this
         # morning's entries. The sweep is a no-op until the market day actually moves.
         market_day = event.source_ts_utc.astimezone(MARKET_TZ).date()
+        # The pipeline's clock only moves forward. A backdated event still gets its own
+        # source timestamp in the log, but it cannot rewind the roll: the expiry sweep and
+        # the risk ledger both key off this value, and moving it backwards would re-run a
+        # roll (and re-arm a daily risk counter) that already happened.
+        effective_day = (
+            market_day
+            if self.last_market_day is None
+            else max(self.last_market_day, market_day)
+        )
         pre_sweep = self.state.positions
         self.state, expiry_effects = expire_on_roll(
             self.state, self.last_market_day, market_day
@@ -89,7 +98,7 @@ class Pipeline:
                     ts=event.source_ts_utc,
                     contract_key=key,
                 )
-        self.last_market_day = market_day
+        self.last_market_day = effective_day
 
         inserted = self.store.append_signal(event)
         if not inserted:

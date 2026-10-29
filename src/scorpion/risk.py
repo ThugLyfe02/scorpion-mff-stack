@@ -132,8 +132,18 @@ class RiskState:
         return max(ZERO, self.peak_equity - self.equity)
 
     def rolled(self, market_day: date) -> RiskState:
-        """New market day: counters reset, the equity path does not."""
-        if self.market_day == market_day:
+        """New market day: counters reset, the equity path does not.
+
+        The roll is monotone. A backdated event - a redelivered Discord message, a clock
+        step, a replayed row - must never rewind the market day, because rewinding it
+        resets `realized_today` and `consecutive_losses` and therefore *re-arms a daily
+        stop that already fired*. A backdated event is evaluated against the current
+        day's risk state; the alternative under-counts risk at exactly the moment the
+        desk has already lost money.
+        """
+        if self.market_day is None:
+            return replace(self, market_day=market_day)
+        if market_day <= self.market_day:
             return self
         return replace(
             self, market_day=market_day, realized_today=ZERO, consecutive_losses=0

@@ -394,15 +394,22 @@ def case_snapshot_tamper(store: Store, now: datetime) -> tuple[Outcome, str]:
 
 
 def case_clock_skew(store: Store, now: datetime) -> tuple[Outcome, str]:
-    """An event dated before the book's market day must not roll the day backwards."""
+    """An event dated before the book's market day must not rewind the day or risk state."""
     pipeline = Pipeline(store=store)
     _handle(pipeline, _entry_message(now))
     first_day = pipeline.state.risk.market_day
+    before = pipeline.state.risk
     _handle(pipeline, message("SPY 600P TODAY @ 0.90", message_id="late",
                               at=now - timedelta(days=30)))
+    after = pipeline.state.risk
     violations: list[str] = []
-    if pipeline.state.risk.market_day and first_day and pipeline.state.risk.market_day < first_day:
+    if after.market_day and first_day and after.market_day < first_day:
         violations.append("the market day moved backwards")
+    if after != before:
+        violations.append(
+            "a backdated event changed the risk state "
+            f"({before} -> {after}); it can re-arm a daily stop"
+        )
     return (
         Outcome("clock_skew", not violations, "backdated event did not rewind the day",
                 tuple(violations), verified=verify(store, pipeline.state).ok),

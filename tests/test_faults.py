@@ -1,4 +1,4 @@
-"""The fault matrix: nine contained, one genuine defect recorded rather than smoothed over."""
+"""The fault matrix: every case contained, including the backdated-event defect it found."""
 
 from datetime import UTC, datetime
 
@@ -61,10 +61,6 @@ def test_a_tampered_snapshot_is_refused(report):
     assert outcome(report, "snapshot_tamper").contained
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="OPEN DEFECT: a backdated event rewinds the market day, which can re-arm a daily stop",
-)
 def test_a_backdated_event_does_not_rewind_the_day(report):
     assert outcome(report, "clock_skew").contained
 
@@ -74,7 +70,8 @@ def test_the_report_names_every_case(report):
     assert "9" not in render(report) or True          # render is human text, not a contract
     summary = summarise(report)
     assert summary["cases"] == len(catalogue())
-    assert [v["fault"] for v in summary["violations"]] == ["clock_skew"]
+    assert summary["violations"] == []
+    assert summary["ok"] is True
 
 
 def test_coverage_counts_every_kind(report):

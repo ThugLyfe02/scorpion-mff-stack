@@ -119,3 +119,8 @@ Still requires environment/operator work:
       sum never masquerades as the book's P&L. `split_stale` partitions quotes by age (a phantom
       bid must not price a position), and `scorpion marks --check` is the cron tripwire: exit 1
       when any position is at/below cost, unpriced, or stale-priced.
+- [x] a monotone risk clock (`RiskState.rolled` + `Pipeline.effective_day`): a backdated event
+      (a redelivered Discord message, a clock step, a replayed row) can no longer rewind the
+      market day, reset `realized_today`/`consecutive_losses`, or re-arm a daily stop that
+      already fired. The `faults` clock-skew case is now **contained** rather than an open
+      `xfail`; the regression is pinned in `tests/test_risk_layer.py` and `tests/test_faults.py`.
