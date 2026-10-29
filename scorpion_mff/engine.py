@@ -160,6 +160,7 @@ class Engine:
     positions: dict[str, Position] = field(default_factory=dict)
     closed: set[str] = field(default_factory=set)
     halted: bool = False
+    halt_reason: str = ""              # why buys are halted; exits stay legal
     day: str = ""
     # One HALT_AND_PAGE per (contract, reason, ET day): a tick every fifteen seconds must
     # not turn a real page into a stream a human learns to ignore. Cleared on the roll.
@@ -416,6 +417,7 @@ class Engine:
     def _on_stop(self, signal: Signal, quote: Quote | None, ts: float,
                  latency_ms: int | None) -> list[OrderIntent]:
         self.halted = True
+        self.halt_reason = "stand-down"
         self.fills.record(event="halt", contract_key="", qty=0, price=0.0,
                           reason="stand-down", ts=ts, latency_ms=latency_ms,
                           note=signal.raw[:120])
@@ -424,7 +426,8 @@ class Engine:
     def _on_entry(self, signal: Signal, quote: Quote | None, ts: float,
                   latency_ms: int | None) -> list[OrderIntent]:
         if self.halted:
-            return self._reject(signal, ts, "halted:stand-down", latency_ms)
+            return self._reject(signal, ts, f"halted:{self.halt_reason or 'stand-down'}",
+                                latency_ms)
         if self.blocked():
             return self._reject(signal, ts, "halted:kill-switch", latency_ms)
         key = signal.contract_key
@@ -518,6 +521,13 @@ class Engine:
         key = signal.contract_key or (position.contract_key if position else "")
         if position is None:
             return self._skip(signal, ts, "add_without_position", latency_ms, key)
+        # A STOP halts ENTRIES and ADDS. The original add path checked only the kill
+        # switch, so "stand down" followed by "adding at 1.30" increased exposure on a
+        # desk that had been told to stop. Exits remain legal: you must always be able
+        # to leave a position you are in.
+        if self.halted:
+            return self._reject(signal, ts, f"halted:{self.halt_reason or 'stand-down'}",
+                                latency_ms, key)
         if self.blocked():
             return self._reject(signal, ts, "halted:kill-switch", latency_ms, key)
         if position.adds >= self.config.add_allowed_per_position:
@@ -531,6 +541,20 @@ class Engine:
         limit = marketable_limit(price, quote.ask)
         tier = tier_for_channel(signal.channel or position.ticker, is_first_of_day=False)
         qty = contracts_for(clip_budget(tier, is_add=True), limit)
+
+        # An add is a new buy, not a footnote to the first one. It runs the SAME
+        # governor the entry ran; the old path skipped it, so a daily stop, a loss
+        # ladder or a channel tilt could be undone by the next "adding" post.
+        governor_note = ""
+        if self.governor is not None:
+            decision = self.governor(self.governor_state, signal, ts)
+            qty = apply_contracts(qty, decision.factor)
+            if decision.stand_down or qty <= 0:
+                return self._skip(signal, ts, f"governor:{decision.reason_text}",
+                                  latency_ms, key)
+            if decision.factor < 1.0:
+                governor_note = f":governor={decision.reason_text}"
+
         budget_note = ""
         if self.risk_budget is not None:
             admission = self.risk_budget.admit(
@@ -550,7 +574,7 @@ class Engine:
         intent = OrderIntent(action="buy", qty=qty, limit=limit, contract_key=key,
                              reason=(f"add:{tier.value}:"
                                      f"{position.adds}/{self.config.add_allowed_per_position}"
-                                     f"{budget_note}"),
+                                     f"{governor_note}{budget_note}"),
                              idempotency_key=f"{key}:add:{position.adds}")
         self.fills.record(event="buy", contract_key=key, qty=qty, price=limit,
                           reason=intent.reason, ts=ts, latency_ms=latency_ms, note="add")

@@ -146,7 +146,7 @@ Full acceptance ledger, one command per gem: **`docs/GEMS.md`**.
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install pytest            # tests only
-.venv/Scripts/python -m pytest tests -q               # 560 tests, offline
+.venv/Scripts/python -m pytest tests -q               # 565 tests, offline
 
 .venv/Scripts/python -m scorpion_mff.cli doctor       # rules, switches, broker mode,
                                                       #   spread-gate setting (OFF unless armed)
@@ -416,6 +416,25 @@ log and prints the worst-case day plus headroom by underlying and cluster.
 
 `docs/GEMS.md` G14 is the acceptance command; `POLICY.md` explains why the cap is
 reduce-only and why the cluster map is declared.
+
+## The add seam: one ladder, or the risk layer has a hole
+
+The entry path ran halt -> kill switch -> governor -> pre-trade budget -> exposure.
+The add path ran kill switch only, then mutated the position. That asymmetry is a
+money defect, not a style one:
+
+* `STAND DOWN` halted `_on_entry` and left `_on_add` free, so "adding at 1.30" grew a
+  position on a desk that had been told to stop;
+* a daily stop, loss ladder or channel tilt was enforced on the first clip and ignored
+  on the second, so the next add could undo the stop that existed to prevent it.
+
+`_on_add` now runs the same ladder: `halted` -> kill switch -> add-once -> governor ->
+`apply_contracts` -> pre-trade budget -> mutate. A refusal names its reason
+(`halted:stand-down`, `governor:daily_stop`, `risk_budget:...`) and records a `skip` or
+`reject` row before the book changes. Exits are untouched by all of it: the halt gates
+buys, never sells, because a switch that traps a position is worse than no switch.
+
+The regression suite is `tests/test_add_safety.py` (G15 in `docs/GEMS.md`).
 
 ## Adversarial hardening (`fuzz`)
 

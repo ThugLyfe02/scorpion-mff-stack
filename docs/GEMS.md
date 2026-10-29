@@ -15,7 +15,7 @@ python -m pytest --version         # if this fails, use .venv/Scripts/python.exe
 
 If the venv is not active, replace `python` with `.venv/Scripts/python.exe` (Windows)
 or `.venv/bin/python` (POSIX). `scripts/gate.sh` resolves the venv itself and is the
-single top-level check: `ruff -> mypy --strict -> pytest`, currently **560 passed**
+single top-level check: `ruff -> mypy --strict -> pytest`, currently **565 passed**
 (513 at the 3.a red-team, plus the three transport-quarantine tests added by final
 integration that close O1, plus the offline Gateway lifecycle suite).
 
@@ -37,6 +37,7 @@ integration that close O1, plus the offline Gateway lifecycle suite).
 | G12 | a switch you cannot see before arming | `python -m scorpion_mff.cli doctor` |
 | G13 | a reconnect that silently drops the session | `python -m pytest tests/test_gateway.py -q` |
 | G14 | a daily loss limit that only fires after the loss | `python -m pytest tests/test_risk_budget.py -q` |
+| G15 | an add that bypasses the stand-down or the governor | `python -m pytest tests/test_add_safety.py -q` |
 
 Each gem follows the same shape: **what it is**, **the acceptance command**, **the
 invariant**, **the failure mode it buys down**, and the **3.a red-team record** for it.
@@ -417,6 +418,37 @@ can refuse the *second* clip before the first loss exists.
 by underlying and cluster; `arm` loads `live/risk-budget.json` when present and refuses an
 unreadable file rather than trading uncapped.
 
+## G15. An add is a new buy, not a footnote to the first one
+
+`Engine._on_add`. The add path checked the kill switch but not the engine's
+`halted` flag, and it never consulted the governor. Two failures followed:
+
+```
+STAND DOWN                     -> entry rejected
+adding at 1.30                 -> position.contracts += qty   (exposure grew)
+
+daily loss limit reached       -> entry shrunk
+the next "adding" post         -> full add clip             (stop undone)
+```
+
+**Acceptance (one command):** `python -m pytest tests/test_add_safety.py -q` -> 5 passed.
+
+**Invariant:** an add runs the same `halted` check and the same
+`governor -> apply_contracts` ladder as the entry, before the position is mutated;
+a stand-down rejects the add with `halted:stand-down`; a governor stand-down skips
+with `governor:daily_stop`; a half-size policy halves the add clip (22 -> 11) and the
+intent names the governor; and **exits remain legal** in every one of those states,
+because a switch that traps a position is worse than no switch.
+
+**Failure mode it buys down:** a risk layer with a hole in it. The daily stop was
+enforced on the way in but not on the way up, so the one post that increases the
+position could undo the stop that was supposed to prevent it. The same shape as the
+9/8 miss: not a wrong decision, a decision that never ran.
+
+**Regression note:** the add path is now a single ladder - halt, kill switch, add
+budget, governor, pre-trade budget, mutation - so a future check added to the entry
+has one obvious counterpart to add here.
+
 ---
 
 ## What we deliberately do not build
@@ -529,7 +561,7 @@ place. The corpus backtest and the 9/8 replay are unchanged (they have no transp
 The short version, in the order that fails fastest:
 
 ```bash
-./scripts/gate.sh                                            # ruff -> mypy -> pytest, 560
+./scripts/gate.sh                                            # ruff -> mypy -> pytest, 565
 python -m scorpion_mff.cli backtest                          # 93/91/405/$57,951.00
 python -m scorpion_mff.cli replay tapes/sep8.json            # 4/2/6/$211.00, 0 breaches
 python -m scorpion_mff.cli expiry audit                      # 40/93, 65/93, 0/40, 10/40, REFUSED
