@@ -87,6 +87,7 @@ cannot be evaluated refuses.
 | expected calibration error | ≤ 0.05 | high confidence is not the same as calibrated confidence |
 | risk coverage at precision | ≥ 0.80 | the candidate must still cover most of the corpus at the precision the desk requires |
 | accuracy regression vs baseline | ≥ −0.01 | a small regression is still a regression |
+| segment parity | no drop on any channel or rule with ≥ 10 labels | an aggregate gain cannot be bought by sacrificing the channel or rule a reviewer was protecting |
 | semantic state change | none | a candidate cannot look good on labels while changing the book |
 | effect multiset change | none | a second identical trim remains visible rather than disappearing through set deduplication |
 | distinct parser | required | certifying the baseline against itself is not evidence |
@@ -143,16 +144,17 @@ claim being certified.
 
 `tests/test_review.py` (9 tests) covers idempotent enqueue, refusal of an unstored event, claim ->
 resolve -> calibration, dismissal that stays dismissed, backfill with real decision audits,
-metrics and renders, and the CLI. `tests/test_certification.py` (12 tests) covers a faithful
+metrics and renders, and the CLI. `tests/test_certification.py` (16 tests) covers a faithful
 candidate, an action escalation, poor calibration, too few adjudications, identical baseline and
-candidate, exact McNemar, risk-coverage selection, calibration bins, corpus loading, and the CLI.
+candidate, exact McNemar, risk-coverage selection, calibration bins, a channel-level segment
+regression, an underpowered segment that is reported rather than refused, corpus loading, and the CLIs.
 
 The full PR#3 gate:
 
 ```text
 ruff check src tests            -> All checks passed
-mypy src/scorpion (strict)      -> Success: no issues found in 33 source files
-pytest                          -> 112 passed
+mypy src/scorpion (strict)      -> Success: no issues found in 60 source files
+pytest                          -> 346 collected, all passing
 ```
 
 ## What this does not prove
@@ -160,8 +162,10 @@ pytest                          -> 112 passed
 A certificate describes this corpus and these adjudications, not all future messages. Accuracy is
 an event-kind comparison; contract correctness is stricter and is reported separately. Action
 escalations are refused by default because that is the costly direction, not because every
-escalation is wrong. The queue prioritizes review; it does not decide what the review should say.
-The digest proves the certificate is the same evidence, not who produced it.
+escalation is wrong. Segment parity is a one-sided floor with no multiplicity correction: it
+refuses a visible drop, and an underpowered segment is reported instead of being passed. The
+queue prioritizes review; it does not decide what the review should say. The digest proves the
+certificate is the same evidence, not who produced it.
 
 ## Next
 

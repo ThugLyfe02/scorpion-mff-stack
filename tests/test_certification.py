@@ -24,7 +24,9 @@ from scorpion.certification import (
     mcnemar_exact,
     render,
     risk_coverage,
+    segment_report,
 )
+from scorpion.config import CHANNELS
 from scorpion.domain import EventKind, SignalEvent
 from scorpion.parser import ParseDecision, parse_message_with_evidence
 
@@ -138,9 +140,11 @@ def test_certification_of_a_faithful_candidate_passes(raw_factory):
     assert payload["decision"] == "CERTIFIED"
     assert payload["metrics"]["candidate"]["accuracy"] == 1.0
     assert payload["metrics"]["action_escalations"] == 0
+    assert payload["segments"]["regressions"] == []
     assert payload["semantic"]["state_changed"] is False
     assert payload["digest"]
     assert "CERTIFIED" in render(certificate)
+    assert "segments" in render(certificate)
 
 
 def test_candidate_is_refused_when_it_escalates_an_ignore(raw_factory):
@@ -310,3 +314,129 @@ def test_golden_corpus_kind_key_is_an_expected_label():
     assert len(cases) == 15
     assert cases[0].expected_kind is EventKind.ENTRY
     assert any(case.expected_kind is EventKind.AMBIGUOUS for case in cases)
+
+
+def _permissive(**overrides):
+    values = {
+        "min_adjudicated_samples": 10,
+        "min_accuracy": 0.0,
+        "min_actionable_precision": 0.0,
+        "max_ambiguity_rate": 1.0,
+        "max_expected_calibration_error": 1.0,
+        "min_risk_coverage": 0.0,
+        "min_delta_accuracy": -1.0,
+        "require_no_semantic_state_change": False,
+        "require_no_effect_multiset_change": False,
+    }
+    values.update(overrides)
+    return CertificationCriteria(**values)
+
+
+def _channel_corpus(raw_factory, *, primary: int = 20, secondary: int = 20):
+    cases: list[CorpusCase] = []
+    for channel, count in (
+        (CHANNELS["etf-options"], primary),
+        (CHANNELS["options-king"], secondary),
+    ):
+        for index in range(count):
+            raw = raw_factory(
+                "QQQ 700C TODAY @ 1.01",
+                message_id=f"{channel}-{index}",
+                channel_id=channel,
+            )
+            parsed = parse_message_with_evidence(raw)
+            cases.append(
+                CorpusCase(
+                    raw=raw,
+                    expected_kind=parsed.event.kind,
+                    expected_contract_key=parsed.event.contract_key,
+                )
+            )
+    return tuple(cases)
+
+
+def _breaks_one_channel(raw):
+    decision = parse_message_with_evidence(raw)
+    if raw.channel_id == CHANNELS["options-king"]:
+        return ParseDecision(
+            replace(decision.event, kind=EventKind.IGNORE),
+            replace(decision.evidence, confidence=0.99, rule_id="candidate.channel_loss"),
+        )
+    return _candidate(raw)
+
+
+def test_segment_report_names_the_channel_that_regressed(raw_factory):
+    cases = _channel_corpus(raw_factory)
+    pairs: list[PairRecord] = []
+    for case in cases:
+        baseline = parse_message_with_evidence(case.raw)
+        if case.raw.channel_id == CHANNELS["options-king"]:
+            candidate = ParseDecision(
+                replace(baseline.event, kind=EventKind.IGNORE),
+                baseline.evidence,
+            )
+        else:
+            candidate = baseline
+        pairs.append(
+            PairRecord(
+                case=case,
+                baseline=baseline,
+                candidate=candidate,
+                expected_kind=case.expected_kind,
+                expected_contract_key=case.expected_contract_key,
+            )
+        )
+    report = segment_report(pairs, min_samples=10)
+    channel = next(
+        item
+        for item in report.results
+        if item.dimension == "channel"
+        and item.segment == CHANNELS["options-king"]
+    )
+    assert channel.status == "regression"
+    assert channel.delta_accuracy == -1.0
+    assert channel.n == 20
+    assert report.failures
+
+
+def test_certification_refuses_a_segment_regression(raw_factory):
+    cases = _channel_corpus(raw_factory)
+    certificate = certify(
+        cases,
+        baseline=ParserSpec("baseline", parse_message_with_evidence),
+        candidate=ParserSpec("channel-blind", _breaks_one_channel),
+        criteria=_permissive(),
+    )
+    assert any(
+        reason.startswith(f"segment_regression:channel:{CHANNELS['options-king']}:")
+        for reason in certificate.reasons
+    ), certificate.reasons
+    assert certificate.payload["segments"]["regressions"]
+
+
+def test_a_segment_below_the_floor_is_reported_not_used_to_refuse(raw_factory):
+    cases = _channel_corpus(raw_factory, primary=20, secondary=5)
+    certificate = certify(
+        cases,
+        baseline=ParserSpec("baseline", parse_message_with_evidence),
+        candidate=ParserSpec("candidate", _candidate),
+        criteria=_permissive(min_adjudicated_samples=20),
+    )
+    channel = next(
+        item
+        for item in certificate.payload["segments"]["results"]
+        if item["dimension"] == "channel"
+        and item["segment"] == CHANNELS["options-king"]
+    )
+    assert channel["status"] == "underpowered"
+    assert certificate.certified is True
+    assert not any(
+        reason.startswith("segment_regression") for reason in certificate.reasons
+    )
+
+
+def test_segment_report_refuses_an_impossible_floor():
+    with pytest.raises(CertificationError, match="bad_min_segment_samples"):
+        segment_report((), min_samples=0)
+    with pytest.raises(CertificationError, match="bad_max_segment_accuracy_drop"):
+        segment_report((), max_accuracy_drop=1.5)

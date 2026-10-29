@@ -86,6 +86,9 @@ class CertificationCriteria:
     require_distinct_parser: bool = True
     require_no_semantic_state_change: bool = True
     require_no_effect_multiset_change: bool = True
+    require_segment_parity: bool = True
+    min_segment_samples: int = 10
+    max_segment_accuracy_drop: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -187,6 +190,121 @@ class PairRecord:
             self.expected_kind,
             self.expected_contract_key,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class SegmentResult:
+    """Accuracy for one slice of the labelled corpus (a channel or a parser rule)."""
+
+    dimension: str
+    segment: str
+    n: int
+    baseline_accuracy: float
+    candidate_accuracy: float
+    delta_accuracy: float
+    status: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "dimension": self.dimension,
+            "segment": self.segment,
+            "n": self.n,
+            "baseline_accuracy": round(self.baseline_accuracy, 6),
+            "candidate_accuracy": round(self.candidate_accuracy, 6),
+            "delta_accuracy": round(self.delta_accuracy, 6),
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SegmentReport:
+    """Per-segment parity: an aggregate gain may not buy a segment regression.
+
+    A candidate can improve overall accuracy while getting *worse* on the one channel or rule
+    an operator was trying to protect. The aggregate gate cannot see that trade, so this one
+    refuses it explicitly. Segments below `min_samples` are reported as underpowered and are
+    not used to refuse: a two-label channel is not evidence of anything, and pretending it is
+    would make every promotion impossible.
+    """
+
+    min_samples: int
+    max_accuracy_drop: float
+    results: tuple[SegmentResult, ...]
+
+    @property
+    def failures(self) -> tuple[SegmentResult, ...]:
+        return tuple(item for item in self.results if item.status == "regression")
+
+    @property
+    def underpowered(self) -> tuple[SegmentResult, ...]:
+        return tuple(item for item in self.results if item.status == "underpowered")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "min_samples": self.min_samples,
+            "max_accuracy_drop": self.max_accuracy_drop,
+            "results": [item.to_dict() for item in self.results],
+            "regressions": [item.to_dict() for item in self.failures],
+            "underpowered": [item.to_dict() for item in self.underpowered],
+        }
+
+
+def segment_report(
+    pairs: Sequence[PairRecord],
+    *,
+    min_samples: int = 10,
+    max_accuracy_drop: float = 0.0,
+) -> SegmentReport:
+    """Slice labelled pairs by channel and by candidate rule; compare baseline to candidate.
+
+    The gate is one-sided: only a *drop* refuses. A candidate that improves a segment is not
+    asked to justify it. No multiplicity correction is claimed - a refusal is a conservative
+    floor, not a significance test.
+    """
+    if min_samples < 1:
+        raise CertificationError("bad_min_segment_samples", str(min_samples))
+    if not 0.0 <= max_accuracy_drop <= 1.0:
+        raise CertificationError("bad_max_segment_accuracy_drop", str(max_accuracy_drop))
+    groups: dict[tuple[str, str], list[PairRecord]] = {}
+    for pair in pairs:
+        if not pair.labelled:
+            continue
+        channel = pair.case.raw.channel_id or "(missing)"
+        rule = pair.candidate.evidence.rule_id or "(unruled)"
+        groups.setdefault(("channel", channel), []).append(pair)
+        groups.setdefault(("rule", rule), []).append(pair)
+    results: list[SegmentResult] = []
+    for (dimension, segment), members in sorted(groups.items()):
+        n = len(members)
+        baseline = _mean(
+            [1.0 if pair.baseline_correct() else 0.0 for pair in members]
+        )
+        candidate = _mean(
+            [1.0 if pair.candidate_correct() else 0.0 for pair in members]
+        )
+        delta = candidate - baseline
+        if n < min_samples:
+            status = "underpowered"
+        elif delta < -max_accuracy_drop - 1e-12:
+            status = "regression"
+        else:
+            status = "pass"
+        results.append(
+            SegmentResult(
+                dimension=dimension,
+                segment=segment,
+                n=n,
+                baseline_accuracy=baseline,
+                candidate_accuracy=candidate,
+                delta_accuracy=delta,
+                status=status,
+            )
+        )
+    return SegmentReport(
+        min_samples=min_samples,
+        max_accuracy_drop=max_accuracy_drop,
+        results=tuple(results),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -577,6 +695,11 @@ def certify(
     escalations = comparison.action_escalations
     contract_changes = comparison.contract_changes
     semantic = _semantic_payload(pairs)
+    segments = segment_report(
+        labelled,
+        min_samples=criteria.min_segment_samples,
+        max_accuracy_drop=criteria.max_segment_accuracy_drop,
+    )
     reasons: list[str] = []
     if errors:
         reasons.append(f"parser_errors:{len(errors)}")
@@ -626,6 +749,12 @@ def certify(
         reasons.append(
             f"accuracy_regression:{delta_accuracy:.6f}<{criteria.min_delta_accuracy:.6f}"
         )
+    if criteria.require_segment_parity:
+        for failure in segments.failures:
+            reasons.append(
+                f"segment_regression:{failure.dimension}:{failure.segment}:"
+                f"{failure.delta_accuracy:+.6f}"
+            )
     if criteria.require_no_semantic_state_change and semantic["state_changed"]:
         reasons.append("semantic_state_changed")
     if criteria.require_no_effect_multiset_change and (
@@ -670,12 +799,15 @@ def certify(
             },
         },
         "semantic": semantic,
+        "segments": segments.to_dict(),
         "caveats": [
             "a certificate describes this corpus and these adjudications, not all future messages",
             "accuracy is an event-kind comparison; contract correctness is stricter and is "
             "reported separately",
             "action escalations are refused by default because turning IGNORE/AMBIGUOUS into "
             "an action is the failure that costs money",
+            "segment parity is a one-sided regression floor, not a multiplicity-corrected test; "
+            "a segment below the sample floor is reported as underpowered, not passed",
             "the digest is content identity, not a signature: this system has no key management",
         ],
     }
@@ -713,6 +845,24 @@ def render(certificate: Certificate) -> str:
         f"action escalations {metrics['action_escalations']}  "
         f"contract changes {metrics['contract_changes']}",
     ]
+    segments = payload["segments"]
+    regressions = [
+        item for item in segments["results"] if item["status"] == "regression"
+    ]
+    underpowered = [
+        item for item in segments["results"] if item["status"] == "underpowered"
+    ]
+    if regressions:
+        named = ", ".join(
+            f"{item['dimension']}:{item['segment']}({item['delta_accuracy']:+.3f})"
+            for item in regressions[:4]
+        )
+        lines.append(f"segment regressions {named}")
+    else:
+        lines.append(
+            f"segments {len(segments['results'])} checked  "
+            f"{len(underpowered)} underpowered (<{segments['min_samples']} labels)"
+        )
     if payload["reasons"]:
         lines.append("reasons " + ", ".join(payload["reasons"]))
     return "\n".join(lines)

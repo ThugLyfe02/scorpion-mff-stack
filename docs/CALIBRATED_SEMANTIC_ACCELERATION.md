@@ -134,8 +134,9 @@ closes that gap:
   the label is either both recorded and closed or neither;
 * `certification.py` compares a baseline and a candidate parser on a named corpus and a named set
   of adjudications, then refuses promotion unless accuracy, actionable precision, ambiguity,
-  action escalations, calibration error, risk coverage and the downstream semantic state/effect
-  multiset all pass;
+  action escalations, calibration error, risk coverage, per-channel/per-rule parity and the
+  downstream semantic state/effect multiset all pass; an aggregate gain cannot buy a segment
+  regression, and an underpowered segment is reported rather than counted as a pass;
 * the certificate is canonically serialised and digested, with the refusal reasons named.
 
 See `docs/SEMANTIC_CONTROL_PLANE.md` for the gates and `scorpion-review` / `scorpion-certify`.
