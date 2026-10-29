@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class Side(str, Enum):
+class Side(StrEnum):
     CALL = "CALL"
     PUT = "PUT"
 
@@ -16,7 +16,7 @@ class Side(str, Enum):
         return self is Side.CALL
 
 
-class AlertKind(str, Enum):
+class AlertKind(StrEnum):
     """What a Discord post IS. The engine only ever acts on these."""
 
     ENTRY = "entry"          # a new position: side + ticker + strike
@@ -27,7 +27,7 @@ class AlertKind(str, Enum):
     IGNORE = "ignore"        # not actionable (chatter, lotto, excluded channel)
 
 
-class IgnoreReason(str, Enum):
+class IgnoreReason(StrEnum):
     EXCLUDED_CHANNEL = "excluded_channel"
     TICKER_EXCLUDED = "ticker_excluded"
     LOTTO_FLAG = "lotto_flag"

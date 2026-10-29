@@ -15,8 +15,19 @@ Layering, all stdlib:
     fills     - append-only structured fill log
     killswitch- NO_TRADE file, STOP/stand-down, fail-closed
     health    - per-event latency budget + deadman heartbeat
+    gateway   - Discord session resume, heartbeat ACK, sequence-gap alarm, fatal closes
     listener  - Gateway transport -> parser -> engine -> broker, event driven
     replay    - the same pipeline over a recorded tape (offline proof)
+    calendar  - the ET clock, sessions, half-days, holidays; fails closed on an unknown year
+    expiry    - 0DTE cutoff verdicts and assignment exposure, read-only; the caller acts
+    execution - the one-probe transport breaker and the fail-closed spread gate
+    ledger    - intent -> terminal matching; a transport failure stays unresolved
+    risk      - pre-trade worst-case-loss budget; shrinks size, never grows it
+    reconcile - engine book vs venue book; drift halts buys, never exits
+    execution_book - confirmed execution state: cumulative acks, partials, restart replay
+    venue     - the venue positions feed: a stamped snapshot, refused when it is not evidence
+    parity    - shadow-live parity: one tape, two wirings, the same decisions or a named divergence
+    drift     - alert-to-fill drift: decision -> send -> venue answer -> price, per order
 
 Everything except the live Gateway transport and the RH HTTP call is pure and
 unit-tested offline. `listener.WebsocketGateway` needs the optional `websockets`

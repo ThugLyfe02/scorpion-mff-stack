@@ -2,14 +2,48 @@
 
 Trading stack for **Scorpion Capital**: MoneyForFun Discord options hone → Robinhood Agentic, plus Ross-style gapper research desk.
 
-## Status (2026-10-21)
+## Where the work lives (the PR map)
+
+A reviewer should never have to guess which branch owns which answer. The live lane is
+**PR #8**; the control plane is **PR #1**; the semantic/calibration lane is **PR #3**.
+Older prose in `HOTPATH.md` and `docs/GEMS.md` calls the live lane "PR#2" from before
+the fleet opened its own pull request; the table below is the current mapping.
+
+| PR | Branch | Owns | Never does |
+|---|---|---|---|
+| **#8** | `hardening/correlated-book-guard` | `scorpion_mff/` — the live Discord → RH hot path, risk governor, pre-trade budget, exposure cap, stops, ledger, Gateway session | place an LLM in the exit path; import PR #1 |
+| **#1** | `hardening/deterministic-control-plane` | `src/scorpion/` — event-sourced paper/review control plane, research frontier | submit a live order |
+| **#3** | `hardening/calibrated-semantic-acceleration` | `src/scorpion/` semantic lane — parser calibration, certification, review queue | promote a parser on aggregate accuracy alone |
+| #2 | `hardening/precision-intelligence-layer` | **retire** — #3 already contains every commit; one semantic PR, not a stale stack | — |
+| #4/#5 | adversarial + tournament lanes | **frozen archive** — harvest a finding into an owning lane; do not rebase | — |
+| #6 | `integration/scanner-context-v1` | scanner context as *verified research only* (frozen archive; owns the orphan's `context.py` harvest) | grant execution authority |
+| #7 | `apex/program-a-baseline-attestation` | **frozen archive** — baseline attestation is a document, not a lane | claim a blocked gate passed |
+
+Where each lane goes next: **`docs/fleet/DIRECTION.md`**. Continuation briefs:
+**`docs/fleet/master.prompt.md`** plus `docs/fleet/pr{1,3,8}.master.md`. The orphan
+branch `feat/risk-budget-context` is an archive, not a lane — `docs/fleet/ORPHAN.md`.
+
+## Status (2026-10-29)
 
 | Layer | State |
 |---|---|
-| Live Discord → RH executor | **Coded hot path built** — `scorpion_mff/` (Gateway → parser → state machine → RH adapter → fill log, kill switch, latency budget). **257 offline tests green.** See **`HOTPATH.md`**. Live wiring pending: RH endpoint confirmation, quote feed, Gateway token + MESSAGE_CONTENT intent. |
+| Live Discord → RH executor | **Coded hot path built** — `scorpion_mff/` (Gateway → parser → state machine → RH adapter → fill log, kill switch, latency budget). **787 offline tests green.** See **`HOTPATH.md`**. Live wiring pending: RH endpoint confirmation, quote feed, Gateway token + MESSAGE_CONTENT intent. |
+| Control-plane ports (PR #1 → live PR #8) | **Ported without importing PR#1** — the fail-closed ET calendar, never-silent expiry slot release, one-probe circuit breaker, fail-closed spread gate, and tri-state order ledger are live in `scorpion_mff/`. Port matrix and the lane/merge boundary: **`HOTPATH.md`**. One acceptance command per gem: **`docs/GEMS.md`**. |
+| Expiry guard + audit | **Built** — three-valued `HOLD` / `FORCE_CLOSE` / `HALT_AND_PAGE`: flatten at a live bid, or page and leave the position on the book; the close is a clock (`Listener.tick`), not a post. `python -m scorpion_mff.cli expiry audit` reports 40/93 same-day, 65/93 no close, 0/40 cutoff force-close, 10/40 no exit time, and **REFUSES** assignment projection. |
+| Crash recovery | **Built** — `intent` is written before the broker call; `verify` flags an intent with no terminal; `recover` resolves it from a venue lookup (`SEEN` / `NOT_SEEN` / `CANNOT_SAY`) and **never places**. A transport failure is a non-terminal `transport_unknown` quarantine (never a fake `reject`), so an unconfirmed **exit** stays visible, pages immediately, and remains recoverable. |
 | Executor backtest | **Run over every alert on record** — 93 alerts / 59 days / 4 channels. Two live-path defects found and fixed (a carried position held a concurrency slot forever; an exit could not be attributed when two positions were open). See **`BACKTEST.md`**. |
 | Ops watchdog | **Built and proven** — `watch --once` reads the heartbeat + fill log and pages the phone (same bot as the desk digest) only when the hone is down, stale, or has raised an engine alert. Delivered live (message id 21). See **`HOTPATH.md`**. |
 | Risk layer | **Built** — a versioned, **reduce-only** risk policy (`live/policy.json`), a governor that turns it into a per-entry multiplier the engine cannot exceed, and a statistics layer (expectancy with confidence intervals, shrinkage, drawdown, runs test, channel allocation). Risk state is persisted so a restart cannot forget a drawdown; `arm` refuses without a valid, fresh, non-halted policy. See **`POLICY.md`**. |
+| Pre-trade risk budget | **Built, opt-in** — `scorpion_mff/risk.py` prices the loss *before* the order: total premium, per-underlying, declared correlation-cluster, and the daily **worst case** (`realised − open premium − new premium`). The governor reacts to money already lost; this pass shrinks the clip (never grows it) so two full clips cannot make the day's possible loss twice the daily limit. Every cap that binds is named in the fill log (`budget=total_premium+daily_worst_case`); `arm` refuses an unreadable budget instead of silently trading uncapped. `python -m scorpion_mff.cli risk init | show | validate`. |
+| Confirmed execution book | **Built, venue-unproven** — `scorpion_mff/execution_book.py` is the durable middle between "the engine decided" and "the venue acknowledged": an append-only `live/execution.jsonl` (intent / ack / fill / reject / unknown / expire / baseline), replayed into a book at arm time. Cumulative acks apply only the delta (a 5-lot filling 3-then-2 realises what one 5-lot realises), a repeated ack cannot double-fill, a regressing ack is refused, an oversell is clamped and counted, a sell with no lot realises nothing, and a transport failure is `unknown` (so `recover` can still settle it) rather than a terminal. `sync_engine` restores the engine as `baseline + confirmed events`, so a restart cannot erase a drawdown or forget a position, and a lot carried past expiry is released first. `book show / replay / verify / export / sync`; `arm` refuses on an unresolved order. `tests/test_execution_book.py` (G17). |
+| Confirmed exits in the **running** process | **Built** — the process that never restarts now follows the venue too. After every answer, `Listener` makes one contract's engine position match the confirmed book, refreshes `Engine.exit_in_flight`, and moves realised P&L from the posted price to the confirmed fill (idempotent under a redelivered ack). A refused, partial or unanswered **sell** restores the lot and blocks a second exit, add or breakeven flatten; the expiry cutoff pages `exit_in_flight` rather than selling twice. The asymmetry is deliberate: an unknown/partial **buy** keeps the engine's larger position, because the remainder can still fill. Idempotency keys are now per decision instant, so a retry of a refused exit is a new order. `tests/test_confirmed_exits.py` (G19). |
+| Operator flatten | **Built, dry-run by default** — `scorpion_mff/flatten.py` + `flatten` CLI is the exit no post was going to give you. It sells the **confirmed** book only, every lot at the **live bid** (never the posted price, the entry, or a market order), and leaves an unpriceable lot on the book with its name. A lot with an unanswered sell is `IN_FLIGHT` and never sold twice. `--live` places each sell through the same listener ladder as an exit post (intent → ack → confirmed book → in-flight reconciliation → realised-P&L correction); the default prints the plan and sends nothing. The kill switch is deliberately **not** consulted: it stops entries, and a desk that cannot flatten because it stopped buying has the safety inverted. Exit 0 flat / 1 a lot remains / 2 the book or feed cannot be trusted. `tests/test_flatten.py` (G20). |
+| Venue reconciliation | **Built, endpoint unconfirmed** — `scorpion_mff/reconcile.py` compares the local book with a venue snapshot and names `phantom_local` / `missing_local` / `quantity_mismatch`; malformed evidence is refused, not repaired. `scorpion_mff/venue.py` is the **feed**: a stamped snapshot from a file (`--venue-snapshot`) or an HTTP template you configure (`MFF_VENUE_URL` + `MFF_VENUE_POSITIONS_PATH`), refused when it is stale, undatable or not a book. `arm --venue-every 300` reconciles on a schedule: drift halts **new buys** and pages once (a repeated drift is a quiet row), a clean re-check does not lift the halt, and a dead or malformed feed pages **without** halting. `reconcile --source auto` compares the confirmed book once it has orders, and exits 0 / 1 / 2. `tests/test_reconcile.py` (G16), `tests/test_venue_feed.py` (G18). |
+| Shadow-live parity | **Built** — `scorpion_mff/parity.py` runs **one tape through two wirings over one scripted clock**: the decision path (parser → engine → `PaperBroker`) and the live ladder (same events → `ShadowBroker`, a venue *model* with no URL, token, transport or retry → `ExecutionBook`). After every message it compares the intents, every decision row with its reason and idempotency key, and the engine's book (positions, realised P&L, trades, closed set, halt, in-flight exits), and reports every divergence with the cause drawn from the rows themselves. The sep8 tape is byte-identical across both (`PARITY`, same digest); `--venue-fill/--venue-reject/--venue-transport` force the states a live venue produces and the harness names each one, so it is proven to fail. `shadow --trace-dir DIR` writes a reviewer-runnable trace manifest, `shadow --diff A B` compares two recorded traces, and `arm --trace` records a real session through the same `handle` hook. `tests/test_parity.py` (G21). |
+| Alert-to-fill drift | **Built, waiting on the first fill** — `scorpion_mff/drift.py` + `drift` CLI measures each hop of a real order: decision → send → venue answer → price, joined on the idempotency key. `_place` now stamps the terminal at the **answer** instant (the round trip in `latency_ms`), because a log that stamps the ack with the send instant cannot tell a 40ms venue from a 9-second one. Reports p50/p90/p99 of each hop, `fill − limit` and `fill − his_bid` in bps, and the pricing rule as `limit − his_bid`. Every suggestion is **withheld** under 20 timed answers (`REFUSED - n < floor 20`); above it, a p99-derived budget and a *descriptive-only* Spearman view, never a fitted slope. Unanswered intents are counted with their keys, breaker refusals have no round trip, and an intent with no decision row is named, not zeroed. `python -m scorpion_mff.cli drift [--json]`. `tests/test_drift.py` (G22). |
+| Add-path parity | **Built** — an add runs the same halt → kill-switch → governor → pre-trade-budget ladder as the entry. `STAND DOWN` followed by "adding" no longer increases exposure, and a daily stop cannot be undone by the next add; exits remain legal throughout. `tests/test_add_safety.py` (G15). |
+| Concentration cap | **Built, opt-in** — `scorpion_mff/exposure.py` refuses a second position in the same underlying, an expiry cluster, or a per-underlying gross-premium breach. Off by default (`exposure_limits=None`); `arm` activates it when `live/exposure.json` exists. `python -m scorpion_mff.cli exposure init | show`. See **`POLICY.md`**. |
+| Position stop + marks + log integrity | **Built, opt-in** — `scorpion_mff/stops.py` enforces the breakeven stop the trim already armed but nothing read back (`arm --enforce-breakeven`), marks the open book to a live bid with a total that **withholds itself** when any position cannot be priced, and `verify` proves the fill log parses back contiguous. `python -m scorpion_mff.cli marks [--check] | verify`. See **`HOTPATH.md`**. |
 | Execution quality (TCA) | **Built** — `tca path` measures the contract's real path on the repo's bars and **withholds aggregates it cannot support** (only 2 of 18 matched trades have both entry and exit inside coverage); it does price the *carry*: median −12.9% at the 09:30 open, 17% of contracts expire at ~zero. `tca fills` measures limit vs realised fill in bps, partials and latency, and suggests a calibrated `ask_multiple` — empty until the first live fill. See **`TCA.md`**. |
 | Adversarial hardening | **Built, and it found two real bugs** — a stochastic generator throws channel-shaped posts at the real parser and engine and checks ten invariants (no sale without a holding, no price from a percentage, no oversize book, kill switch blocks buys not exits, parser never raises...). 18,000 posts clean across six seeds, deterministic, `fuzz` exits 1 on a violation so CI can gate. Findings: a named exit for an unheld contract could flatten a different held position, and the kill-switch behaviour needed pinning. See **`HOTPATH.md`**. |
 | Backtest / signal corpus | In `mff-backtest/` (tape BT + scrapes) |
@@ -25,6 +59,7 @@ reports/               # generated artefacts (executor backtest)
 skills/                # Ross gapper skill
 config/                # agent profiles + cron routine snapshots (prompts)
 docs/HANDOFF.md        # full architecture + 9/8 failure + build target
+docs/GEMS.md           # one acceptance command per gem: invariant, failure mode, non-builds
 HOTPATH.md             # design decisions, non-changes, what is unproven
 BACKTEST.md            # the executor against 93 historical alerts
 POLICY.md              # the reduce-only risk layer + what the record says
@@ -34,10 +69,11 @@ TCA.md                 # execution quality: what the bars proved, what fills wil
 ## Primary files
 
 1. `docs/HANDOFF.md` — start here
-2. `BACKTEST.md` — what the executor does with the record
-3. `mff-backtest/bt_full/trades.json`
-4. `mff-backtest/bt_full/run_tape_bt.py`
-5. `mff-backtest/bt_full/sep8_alerts.json`
+2. `docs/GEMS.md` — the acceptance ledger (run one command per gem)
+3. `BACKTEST.md` — what the executor does with the record
+4. `mff-backtest/bt_full/trades.json`
+5. `mff-backtest/bt_full/run_tape_bt.py`
+6. `mff-backtest/bt_full/sep8_alerts.json`
 
 ## Build target (hot path) — BUILT
 
@@ -52,12 +88,45 @@ Discord Gateway MESSAGE_CREATE (4 channel IDs)
 
 Keep LLM agents for gapper desk / ops / STOP — not sub-10s exits.
 
-Run it: `python -m scorpion_mff.cli doctor | replay tapes/sep8.json | backtest | desk |
-         tca path | tca fills | policy show | watch --once | fuzz | arm | status`.
+Run it: `python -m scorpion_mff.cli doctor | replay tapes/sep8.json | backtest |
+         expiry audit | shadow tapes/sep8.json | drift | recover | verify | desk |
+         tca path | tca fills | policy show |
+         exposure show | risk show | risk validate | reconcile --snapshot SNAP |
+         watch --once | fuzz | arm | status | flatten [--live] |
+         marks [--check]`.
+`doctor` prints the **spread-gate setting** (`OFF (MFF_MAX_SPREAD_RATIO unset)` by
+default), the kill switch, the broker mode, and masked tokens — the arming surface is
+visible before `arm` is run. `expiry audit` measures the corpus against the 15-minute
+cutoff and **refuses** an assignment projection it cannot support. `recover` resolves a
+crash-left intent from a venue lookup and never places.
 Details, including what is still unproven and why: **`HOTPATH.md`**.
+One acceptance command per gem, with its invariant and failure mode: **`docs/GEMS.md`**.
 What the executor does with 93 real alerts, and the two defects that found: **`BACKTEST.md`**.
 The risk policy, the governor, and the expectancy/allocation statistics: **`POLICY.md`**.
 What our fills cost and what the bars did (and did not) prove: **`TCA.md`**.
+
+## Lane boundary
+
+- **PR #8 (this tree, `hardening/correlated-book-guard`) is the live lane.** Only it can
+  place an order, and only through `arm --live` after the token, policy, quote-feed and
+  kill-switch refusals. (Older docs call this lane "PR#2"; the GitHub number is **#8**.)
+- **PR #1 (`.worktrees/pr1`, `hardening/deterministic-control-plane`) is the paper plane.**
+  It is read-only source for ports; it never places an order.
+- **No cross-imports and no worktree edits.** `scorpion_mff/` never imports `scorpion` or
+  reaches into `.worktrees/`; `.worktrees/pr1/src/` never imports `scorpion_mff/`. The
+  two commands that prove the boundary and the merge order are in **`HOTPATH.md`**.
+
+| PR#1 read-only source | live port (PR #8) | Verdict |
+|---|---|---|
+| `.worktrees/pr1/src/scorpion/sessions.py` | `scorpion_mff/calendar.py` | ported + fail-closed hardening |
+| `.worktrees/pr1/src/scorpion/expiry.py` | `scorpion_mff/engine.py` `_expire_carried` | ported as a superset |
+| `.worktrees/pr1/src/scorpion/outbox.py` | `scorpion_mff/execution.py` `CircuitBreaker` | ported + stricter one-probe |
+| `.worktrees/pr1/src/scorpion/outbox.py` (UNKNOWN quarantine) | `scorpion_mff/listener.py` + `ledger.py` `transport_unknown` | ported in final integration; unknown exits page, nothing retries |
+| `.worktrees/pr1/src/scorpion/guard.py` | `scorpion_mff/execution.py` `spread_ok` | fail-closed philosophy only; check set not ported |
+| `.worktrees/pr1/src/scorpion/reconciliation.py` | `scorpion_mff/broker.py` `OrderLookup` + `ledger.py` | tri-state only; drift-halt not ported |
+
+The full matrix, with live line references and the two unported surfaces, is in
+**`HOTPATH.md`**.
 
 ## Secrets
 

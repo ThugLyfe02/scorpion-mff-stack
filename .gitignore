@@ -4,10 +4,18 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# the fleet's isolated build worktrees are machine state, not source
+.worktrees/
+
 # live runtime state: this is machine state, not source. The kill switch file is
 # deliberately NOT ignored - an arm-blocking file must be visible in the tree.
 live/fills.jsonl
 live/heartbeat.json
+# confirmed execution is runtime state too: the event log and its TCA export
+live/execution.jsonl
+live/executions.jsonl
+# the venue's own positions export: evidence, so it is dated by its writer
+live/venue-snapshot.json
 
 # risk state is machine state: a persisted drawdown must not be committed
 live/governor.json
