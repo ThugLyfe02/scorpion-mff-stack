@@ -1,10 +1,11 @@
 name: agent-fleet
 
-# Two lanes, in tandem: the architect builds the deterministic control plane and
-# the main builder hardens the coded hot path. Each lane runs its own model, its
-# own branch, its own gate (ruff -> mypy --strict -> pytest), and then opens its
-# pull request. A lane never ships red: the driver loops agent -> gate -> fix up
-# to `rounds` times and fails the job if the gate stays red.
+# Three lanes, in tandem: the architect builds the deterministic control plane, the
+# main builder hardens the coded hot path, and the semantic lane certifies parser
+# interpretation. Each lane runs its own model, its own branch, its own gate
+# (ruff -> mypy --strict -> pytest), and then opens its pull request. A lane never
+# ships red: the driver loops agent -> gate -> fix up to `rounds` times and fails the
+# job if the gate stays red.
 #
 # Safety: dispatching defaults to --dry-run (agents run, gate must be green,
 # nothing is pushed). Flip `dry_run` to false to actually open the PRs. The cron
@@ -34,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [architect, main]
+        lane: [architect, main, semantic]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

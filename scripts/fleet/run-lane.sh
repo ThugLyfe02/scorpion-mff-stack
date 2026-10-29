@@ -69,6 +69,7 @@ print(f"TITLE={q(lane['title'])}")
 print(f"MODEL={q(lane['model'])}")
 print(f"THINKING={q(lane['thinking'])}")
 print(f"PROMPT_FILE={q(lane['prompt_file'])}")
+print(f"MASTER_FILE={q(lane.get('master_file', ''))}")
 print(f"BODY_FILE={q(lane['body_file'])}")
 print(f"GATE={q(lane['gate'])}")
 print(f"CONFIG_ROUNDS={q(fleet.get('rounds', 3))}")
@@ -80,7 +81,19 @@ ROUNDS="${ROUNDS:-$CONFIG_ROUNDS}"
 log() { printf '\033[1;34m[fleet:%s]\033[0m %s\n' "$LANE_ID" "$*"; }
 fail() { printf '\033[1;31m[fleet:%s]\033[0m %s\n' "$LANE_ID" "$*" >&2; exit 1; }
 
-PROMPT="$(cat "$REPO_ROOT/$PROMPT_FILE")"
+# ── compose the brief ────────────────────────────────────────────────────────
+# Three documents, in order of authority: the fleet's shared law (`master.prompt.md`),
+# this lane's continuation brief (`master_file`), and the session brief. They are sent
+# once, in round 1; a fix round re-sends only the failing block (see run_agent below).
+MASTER_PROMPT_FILE="$REPO_ROOT/docs/fleet/master.prompt.md"
+[ -f "$MASTER_PROMPT_FILE" ] || fail "missing $MASTER_PROMPT_FILE"
+if [ -n "$MASTER_FILE" ]; then
+  [ -f "$REPO_ROOT/$MASTER_FILE" ] || fail "missing lane master brief: $MASTER_FILE"
+  LANE_MASTER="$(cat "$REPO_ROOT/$MASTER_FILE")"
+else
+  LANE_MASTER=""
+fi
+PROMPT="$(cat "$MASTER_PROMPT_FILE")"$'\n\n'"$LANE_MASTER"$'\n\n'"$(cat "$REPO_ROOT/$PROMPT_FILE")"
 BODY="$(cat "$REPO_ROOT/$BODY_FILE")"
 WORKDIR="$REPO_ROOT/.worktrees/fleet-$LANE_ID"
 RUNDIR="$(mktemp -d)"

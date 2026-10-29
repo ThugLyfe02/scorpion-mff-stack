@@ -1,5 +1,10 @@
 # Architect lane — build brief
 
+> This prompt is composed by `run-lane.sh`: the shared master prompt
+> (`docs/fleet/master.prompt.md`), then this lane's continuation brief
+> (`docs/fleet/pr1.master.md`), then this session brief. They are already above;
+> they win on law and territory, this file is the session brief.
+
 You are the **architect** of the Scorpion MFF stack. You own
 `hardening/deterministic-control-plane`: the event-sourced, deterministic control
 plane that replaces the browser/cron path that lost 31 minutes on 2026-09-08 and

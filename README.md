@@ -5,26 +5,29 @@ Trading stack for **Scorpion Capital**: MoneyForFun Discord options hone → Rob
 ## Where the work lives (the PR map)
 
 A reviewer should never have to guess which branch owns which answer. The live lane is
-**PR #8**; the control plane is **PR #1**; the semantic/calibration lane is **PR #3**
-(stacked on the precision-intelligence lane, PR #2). Older prose in `HOTPATH.md` and
-`docs/GEMS.md` calls the live lane "PR#2" from before the fleet opened its own pull
-request; the table below is the current mapping.
+**PR #8**; the control plane is **PR #1**; the semantic/calibration lane is **PR #3**.
+Older prose in `HOTPATH.md` and `docs/GEMS.md` calls the live lane "PR#2" from before
+the fleet opened its own pull request; the table below is the current mapping.
 
 | PR | Branch | Owns | Never does |
 |---|---|---|---|
 | **#8** | `hardening/correlated-book-guard` | `scorpion_mff/` — the live Discord → RH hot path, risk governor, pre-trade budget, exposure cap, stops, ledger, Gateway session | place an LLM in the exit path; import PR #1 |
 | **#1** | `hardening/deterministic-control-plane` | `src/scorpion/` — event-sourced paper/review control plane, research frontier | submit a live order |
 | **#3** | `hardening/calibrated-semantic-acceleration` | `src/scorpion/` semantic lane — parser calibration, certification, review queue | promote a parser on aggregate accuracy alone |
-| #2 | `hardening/precision-intelligence-layer` | crash recovery + shadow evaluation (PR #3's base) | — |
-| #4/#5 | adversarial + tournament lanes | audit forensics, risk lab, tournament intelligence | — |
-| #6 | `integration/scanner-context-v1` | scanner context as *verified research only* | grant execution authority |
-| #7 | `apex/program-a-baseline-attestation` | reconciled Program A baseline | claim a blocked gate passed |
+| #2 | `hardening/precision-intelligence-layer` | **retire** — #3 already contains every commit; one semantic PR, not a stale stack | — |
+| #4/#5 | adversarial + tournament lanes | **frozen archive** — harvest a finding into an owning lane; do not rebase | — |
+| #6 | `integration/scanner-context-v1` | scanner context as *verified research only* (frozen archive; owns the orphan's `context.py` harvest) | grant execution authority |
+| #7 | `apex/program-a-baseline-attestation` | **frozen archive** — baseline attestation is a document, not a lane | claim a blocked gate passed |
 
-## Status (2026-10-21)
+Where each lane goes next: **`docs/fleet/DIRECTION.md`**. Continuation briefs:
+**`docs/fleet/master.prompt.md`** plus `docs/fleet/pr{1,3,8}.master.md`. The orphan
+branch `feat/risk-budget-context` is an archive, not a lane — `docs/fleet/ORPHAN.md`.
+
+## Status (2026-10-29)
 
 | Layer | State |
 |---|---|
-| Live Discord → RH executor | **Coded hot path built** — `scorpion_mff/` (Gateway → parser → state machine → RH adapter → fill log, kill switch, latency budget). **585 offline tests green.** See **`HOTPATH.md`**. Live wiring pending: RH endpoint confirmation, quote feed, Gateway token + MESSAGE_CONTENT intent. |
+| Live Discord → RH executor | **Coded hot path built** — `scorpion_mff/` (Gateway → parser → state machine → RH adapter → fill log, kill switch, latency budget). **589 offline tests green.** See **`HOTPATH.md`**. Live wiring pending: RH endpoint confirmation, quote feed, Gateway token + MESSAGE_CONTENT intent. |
 | Control-plane ports (PR #1 → live PR #8) | **Ported without importing PR#1** — the fail-closed ET calendar, never-silent expiry slot release, one-probe circuit breaker, fail-closed spread gate, and tri-state order ledger are live in `scorpion_mff/`. Port matrix and the lane/merge boundary: **`HOTPATH.md`**. One acceptance command per gem: **`docs/GEMS.md`**. |
 | Expiry guard + audit | **Built** — three-valued `HOLD` / `FORCE_CLOSE` / `HALT_AND_PAGE`: flatten at a live bid, or page and leave the position on the book; the close is a clock (`Listener.tick`), not a post. `python -m scorpion_mff.cli expiry audit` reports 40/93 same-day, 65/93 no close, 0/40 cutoff force-close, 10/40 no exit time, and **REFUSES** assignment projection. |
 | Crash recovery | **Built** — `intent` is written before the broker call; `verify` flags an intent with no terminal; `recover` resolves it from a venue lookup (`SEEN` / `NOT_SEEN` / `CANNOT_SAY`) and **never places**. A transport failure is a non-terminal `transport_unknown` quarantine (never a fake `reject`), so an unconfirmed **exit** stays visible, pages immediately, and remains recoverable. |

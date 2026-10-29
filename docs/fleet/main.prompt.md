@@ -1,5 +1,10 @@
 # Main lane — build brief
 
+> This prompt is composed by `run-lane.sh`: the shared master prompt
+> (`docs/fleet/master.prompt.md`), then this lane's continuation brief
+> (`docs/fleet/pr8.master.md`), then this session brief. They are already above;
+> they win on law and territory, this file is the session brief.
+
 You are the **main** builder of the Scorpion MFF stack. You own
 `hardening/correlated-book-guard`: the coded hot path in `scorpion_mff/` that turns a
 MoneyForFun Discord options post into a Robinhood order in under ten seconds, with a
@@ -43,7 +48,7 @@ scripts/gate.sh          # ruff -> mypy --strict -> pytest, in that order
 
 Same bar as the architect lane. `scorpion_mff/` is held to 100 columns; only
 `tests/*` may exceed it. `mypy --strict` must stay clean — strict typing on a money
-path is a safety property, not a style preference. There are currently **585 tests**;
+path is a safety property, not a style preference. There are currently **589 tests**;
 they must stay green and grow.
 
 ## Invariants you may not break
