@@ -1,0 +1,1153 @@
+"""Operator CLI: doctor / replay / arm / status.
+
+    python -m scorpion_mff.cli doctor
+    python -m scorpion_mff.cli replay tapes/sep8.json
+    python -m scorpion_mff.cli arm            # dry-armed (no orders leave the box)
+    python -m scorpion_mff.cli arm --live     # needs MFF_RH_TOKEN, explicit opt-in
+    python -m scorpion_mff.cli status
+    python -m scorpion_mff.cli verify           # fill-log integrity + unresolved intents
+    python -m scorpion_mff.cli recover          # resolve crash-left intents (never places)
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import re
+import sys
+import time
+from collections.abc import Callable
+from pathlib import Path
+
+from .broker import (
+    HttpQuoteProvider,
+    OrderLookup,
+    PaperBroker,
+    RobinhoodAgenticBroker,
+    mask,
+)
+from .engine import Engine, EngineConfig
+from .fills import FillLog
+from .health import Heartbeat, LatencyBudget
+from .killswitch import KillSwitch
+from .ledger import Ledger
+from .listener import Listener, WebsocketGateway
+from .parser import CHANNEL_IDS, EXCLUDED_CHANNEL_IDS, EXCLUDED_TICKERS
+from .replay import load_quotes, load_tape, replay
+from .types import Fill, RawMessage
+
+ROOT = Path(__file__).resolve().parent.parent
+FILL_LOG = ROOT / "live" / "fills.jsonl"
+HEARTBEAT = ROOT / "live" / "heartbeat.json"
+NO_TRADE = ROOT / "live" / "NO_TRADE"
+
+__version__ = "0.1.0"
+
+
+def _spread_gate_text() -> str:
+    """Human-readable spread-gate state, shared by doctor and arm."""
+    ratio = EngineConfig().max_spread_ratio
+    if ratio is None:
+        return "OFF (MFF_MAX_SPREAD_RATIO unset)"
+    return f"ON (max {ratio:.1%})"
+
+
+def _parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="scorpion-mff", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version=f"scorpion-mff {__version__}")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("doctor", help="show channel/rule/switch/broker state; touches nothing")
+
+    rep = sub.add_parser("replay", help="run a recorded tape through the live pipeline")
+    rep.add_argument("tape", type=Path)
+    rep.add_argument("--json", action="store_true", help="machine-readable report")
+    rep.add_argument("--no-pipe-test", action="store_true",
+                     help="size the first trade at full clip (the pre-rule counterfactual)")
+
+    arm = sub.add_parser("arm", help="run the live Gateway listener")
+    arm.add_argument("--live", action="store_true",
+                     help="place REAL orders (needs MFF_RH_TOKEN)")
+    arm.add_argument("--limit", type=int, default=None, help="stop after N events")
+    arm.add_argument("--enforce-breakeven", action="store_true",
+                     help="poll quotes and flatten any position at/through its BE stop")
+    arm.add_argument("--no-expiry-guard", action="store_true",
+                     help="DISARM the expiry guard (default: on, see 'expiry audit')")
+    arm.add_argument("--expiry-cutoff", type=int, default=15, metavar="MINUTES",
+                     help="flatten window before the close (default 15 -> 15:45 ET)")
+    arm.add_argument("--tick-s", type=float, default=15.0,
+                     help="clock cadence of the no-traffic tick (default 15s)")
+    arm.add_argument("--max-quote-age", type=float, default=5.0,
+                     help="refuse a quote older than this many seconds (default 5)")
+
+    sub.add_parser("status", help="kill-switch state + tail of the fill log")
+
+    ver = sub.add_parser("verify", help="validate the fill log for gaps, duplicates, torn rows")
+    ver.add_argument("--fills", type=Path, default=None,
+                     help="fill log (default live/fills.jsonl)")
+
+    rec = sub.add_parser("recover",
+                         help="resolve crash-left intents from a broker lookup; never places")
+    rec.add_argument("--fills", type=Path, default=None,
+                     help="fill log (default live/fills.jsonl)")
+    rec.add_argument("--broker", choices=("robinhood", "paper"), default="robinhood",
+                     help="lookup backend (default robinhood; paper is deterministic)")
+
+    marks = sub.add_parser("marks", help="mark the open book to market (unrealised P&L)")
+    marks.add_argument("--fills", type=Path, default=None,
+                       help="fill log (default live/fills.jsonl)")
+    marks.add_argument("--quotes", type=Path, default=None,
+                       help="JSON quotes file; else the live quote feed when configured")
+    marks.add_argument("--json", action="store_true", help="machine-readable marks")
+    marks.add_argument("--check", action="store_true",
+                       help="exit 1 when any armed breakeven stop is through, "
+                            "or the book cannot be priced")
+
+    bt = sub.add_parser("backtest", help="run the executor over the historical alert corpus")
+    bt.add_argument("--corpus", type=Path, default=None,
+                    help="trades.json (default: mff-backtest/bt_full)")
+    bt.add_argument("--ask-multiple", type=float, default=1.05,
+                    help="how far through his posted bid we pay (default 1.05)")
+    bt.add_argument("--exit-slippage", type=float, default=1.0,
+                    help="fraction of his posted exit level we get (default 1.0)")
+    bt.add_argument("--no-pipe-test", action="store_true", help="full clip from the first trade")
+    bt.add_argument("--bare-exits", action="store_true",
+                    help="emit exits that name no contract (measures the ambiguity cost)")
+    bt.add_argument("--attribution", action="store_true",
+                    help="also show what each locked rule is worth, one rule at a time")
+    bt.add_argument("--md", type=Path, default=None, help="write the markdown report here")
+    bt.add_argument("--json", action="store_true", help="machine-readable summary")
+
+    wa = sub.add_parser("watch", help="check the hone's heartbeat and page a human if it is ill")
+    wa.add_argument("--once", action="store_true",
+                    help="single check (for Task Scheduler / cron); this is the only mode")
+    wa.add_argument("--stale-after", type=float, default=None,
+                    help="heartbeat age that counts as stale, seconds (default 120)")
+    wa.add_argument("--dry-run", action="store_true",
+                    help="build the page and print it; send nothing")
+    wa.add_argument("--heartbeat", type=Path, default=None)
+    wa.add_argument("--fills", type=Path, default=None)
+    wa.add_argument("--kill", type=Path, default=None)
+    wa.add_argument("--json", action="store_true", help="machine-readable state")
+
+    pol = sub.add_parser("policy", help="risk policy: show, validate, init, simulate")
+    pol_sub = pol.add_subparsers(dest="policy_cmd", required=True)
+    for name, helptext in (("show", "print the policy an operator must read before arming"),
+                           ("validate", "parse and check; non-zero exit if it is unsafe")):
+        sp = pol_sub.add_parser(name, help=helptext)
+        sp.add_argument("--path", type=Path, default=None)
+        sp.add_argument("--json", action="store_true")
+    init = pol_sub.add_parser("init", help="write the baseline policy (refuses to overwrite)")
+    init.add_argument("--path", type=Path, default=None)
+    init.add_argument("--name", default="baseline-v1")
+    sim = pol_sub.add_parser("simulate", help="run the corpus with the policy active")
+    sim.add_argument("--path", type=Path, default=None)
+    sim.add_argument("--exit-slippage", type=float, default=1.0,
+                     help="stress: fraction of his posted exit level we get (1.0 = as recorded)")
+    sim.add_argument("--ask-multiple", type=float, default=1.05,
+                     help="stress: how far through his bid we pay (default 1.05)")
+    sim.add_argument("--json", action="store_true")
+
+    desk = sub.add_parser("desk", help="expectancy, drawdown and allocation from the record")
+    desk.add_argument("--risk-unit", type=float, default=None,
+                      help="1R in USD (default: policy, else $1500)")
+    desk.add_argument("--json", action="store_true")
+    desk.add_argument("--md", type=Path, default=None, help="write the markdown report here")
+
+    tca = sub.add_parser("tca", help="execution quality: path analysis and venue fills")
+    tca_sub = tca.add_subparsers(dest="tca_cmd", required=True)
+    tp = tca_sub.add_parser("path", help="what the contract did between entry and exit (real bars)")
+    tp.add_argument("--bars", type=Path, default=None)
+    tp.add_argument("--ask-multiple", type=float, default=1.05)
+    tp.add_argument("--md", type=Path, default=None)
+    tp.add_argument("--json", action="store_true")
+    tf = tca_sub.add_parser("fills", help="realised venue fills: limit vs fill, bps, latency")
+    tf.add_argument("--executions", type=Path, default=None)
+    tf.add_argument("--json", action="store_true")
+
+    fz = sub.add_parser("fuzz", help="throw generated posts at the hot path and check invariants")
+    fz.add_argument("--iterations", type=int, default=3000)
+    fz.add_argument("--seed", type=int, default=7)
+    fz.add_argument("--json", action="store_true")
+
+    exp = sub.add_parser("exposure", help="correlated-book cap: init the limits, show the book")
+    exp_sub = exp.add_subparsers(dest="exposure_cmd", required=True)
+    e_init = exp_sub.add_parser("init", help="write default limits (refuses to overwrite)")
+    e_init.add_argument("--path", type=Path, default=None)
+    e_show = exp_sub.add_parser("show",
+                                help="rebuild the book from the fill log and show concentration")
+    e_show.add_argument("--path", type=Path, default=None,
+                        help="limits file (default live/exposure.json)")
+    e_show.add_argument("--fills", type=Path, default=None,
+                        help="fill log (default live/fills.jsonl)")
+    e_show.add_argument("--json", action="store_true")
+
+    xp = sub.add_parser("expiry", help="expiry guard: audit the corpus against the close cutoff")
+    xp_sub = xp.add_subparsers(dest="expiry_cmd", required=True)
+    xa = xp_sub.add_parser("audit", help="how many alerts are 0DTE, how many never closed, "
+                                          "and what the cutoff would have caught")
+    xa.add_argument("--corpus", type=Path, default=None,
+                    help="trades.json (default: mff-backtest/bt_full)")
+    xa.add_argument("--cutoff-minutes", type=int, default=15,
+                    help="flatten window before the close (default 15 -> 15:45 ET)")
+    xa.add_argument("--json", action="store_true", help="machine-readable audit")
+    return p
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    kill = KillSwitch(path=NO_TRADE)
+    hb = Heartbeat(path=HEARTBEAT)
+    if os.environ.get("DISCORD_BOT_TOKEN"):
+        discord_token = "present"
+    else:
+        discord_token = "MISSING (arm will refuse)"
+    broker_mode = "DRY (no orders leave the box)" if not os.environ.get("MFF_RH_LIVE") else "LIVE"
+    lines = [
+        f"scorpion-mff {__version__}",
+        "",
+        "channels (include):",
+        *[f"  {name:<26} {cid}" for name, cid in CHANNEL_IDS.items()],
+        "channels (exclude):",
+        *[f"  {name:<26} {cid}" for name, cid in EXCLUDED_CHANNEL_IDS.items()],
+        f"excluded tickers            {', '.join(sorted(EXCLUDED_TICKERS)) or '(none)'}",
+        "",
+        f"kill switch                 {kill.status()}   ({kill.path})",
+        f"heartbeat                   {hb.path}",
+        f"fill log                    {FILL_LOG}",
+        "",
+        f"discord token               {discord_token}",
+        f"robinhood token             {mask(os.environ.get('MFF_RH_TOKEN', ''))}",
+        f"robinhood base              {os.environ.get('MFF_RH_BASE', 'https://api.robinhood.com')}",
+        f"broker mode                 {broker_mode}",
+        f"spread gate                 {_spread_gate_text()}",
+        "",
+        "locked rules:",
+        "  entry limit = min(live_ask, his_bid * 1.15); skip if ask > +25% off his bid",
+        "  first trade of day = 1 contract (pipe test)",
+        "  clip: king/etf/platinum $1500 (add $2250) | high-confidence $3000 (add $4500)",
+        "  max concurrent 2; add once per position; trim/close -> trim to 1 + BE",
+        "  STOP/stand-down halts new buys (exits stay allowed)",
+    ]
+    print("\n".join(lines))
+    return 0
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    tape = load_tape(args.tape)
+    quotes = load_quotes(args.tape)
+    cfg = EngineConfig(pipe_test=not args.no_pipe_test)
+    report = replay(tape, quotes, engine_config=cfg)
+    if args.json:
+        print(json.dumps({
+            "events": report.events, "buys": report.buys, "sells": report.sells,
+            "contracts_bought": report.contracts_bought, "realized_usd": report.realized_usd,
+            "skipped": report.skipped, "rejected": report.rejected,
+            "budget": report.budget, "reasons": report.reasons,
+        }, indent=2))
+        return 0
+    print(f"replay {args.tape}  (pipe_test={cfg.pipe_test})")
+    print(report.to_text())
+    return 0
+
+
+async def pump_listener(listener: Listener, limit: int | None = None,
+                        out: Callable[[str], None] = print) -> int:
+    """Messages as they arrive, plus a tick whenever the channel goes quiet.
+
+    `asyncio.wait_for(anext(...), tick_s)` is what gives the expiry guard a clock: nothing
+    else fires at 15:45 ET if nobody posts. It is wrapped in `shield` deliberately, and
+    that is not decoration. A bare `wait_for` CANCELS `anext` on timeout, and cancelling an
+    async generator's `__anext__` closes the generator - the Gateway connection is torn
+    down, the pump exits, and the bot goes silent on the first quiet quarter hour of the
+    session. That is the 9/8 failure with extra steps. So the pending fetch is shielded
+    and merely re-awaited: the timeout fires the tick, the in-flight fetch survives, and no
+    message can be swallowed by a tick.
+
+    Returns the number of messages handled. `--limit` counts messages only, never ticks,
+    so a bounded run cannot be starved by an idle channel.
+    """
+    count = 0
+    ticks = 0
+    messages = listener.transport.messages()
+    pending: asyncio.Future[RawMessage] | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(anext(messages))
+            try:
+                message = await asyncio.wait_for(asyncio.shield(pending), listener.tick_s)
+                pending = None
+            except TimeoutError:
+                ticks += 1
+                clock = listener.clock()
+                if ticks == 1 or ticks % 20 == 0:
+                    out(f"  {clock:>10.3f} {'tick':<24} expiry-guard      "
+                        f"{len(listener.engine.open_positions)} open "
+                        f"{listener.engine.stats.expiry_pages} page(s)")
+                listener.tick(clock)
+                continue
+            except StopAsyncIteration:
+                pending = None
+                break
+            intents = listener.handle(message)
+            stops = listener.refresh_stops()
+            kind = "trade" if intents else "none"
+            out(f"  {message.ts:>10.3f} {message.channel:<24} {kind:<6} "
+                f"{len(intents)} intent(s) {len(stops)} stop(s) "
+                f"latency={listener.budget.worst_ms}ms")
+            count += 1
+            if limit is not None and count >= limit:
+                break
+    finally:
+        if pending is not None:
+            pending.cancel()
+    return count
+
+
+def cmd_arm(args: argparse.Namespace) -> int:
+    token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+    if not token:
+        print("DISCORD_BOT_TOKEN is not set - refusing to arm", file=sys.stderr)
+        return 1
+    kill = KillSwitch(path=NO_TRADE)
+    if kill.active():
+        print(f"kill switch is active: {kill.status()}  "
+              f"(delete {kill.path} to arm)", file=sys.stderr)
+        return 1
+
+    # The risk policy is a precondition, not a decoration. A missing, invalid or
+    # unreviewed policy is a refusal: the desk does not trade without a written
+    # risk limit, and it does not trade on one nobody has looked at in a week.
+    from . import policy as policy_mod
+    from .governor import GovernorState, make_governor
+
+    policy_path = ROOT / "live" / "policy.json"
+    try:
+        risk_policy = policy_mod.load(policy_path)
+    except policy_mod.PolicyError as exc:
+        print(f"{exc}\nrefusing to arm: no valid risk policy at {policy_path}", file=sys.stderr)
+        return 1
+    if risk_policy.is_stale():
+        age_h = (risk_policy.age_minutes() or 0) / 60
+        print(f"policy {risk_policy.name} is {age_h:.1f}h old (limit "
+              f"{risk_policy.stale_after_minutes / 60:.0f}h) - review and re-date it, "
+              f"then arm", file=sys.stderr)
+        return 1
+
+    state_path = ROOT / "live" / "governor.json"
+    try:
+        risk_state = GovernorState.load(state_path)
+    except ValueError as exc:
+        print(f"{exc}\nrefusing to arm: a corrupt risk file could silently reset a "
+              f"drawdown limit", file=sys.stderr)
+        return 1
+    if risk_state.halted_reason:
+        print(f"risk state is stood down: {risk_state.halted_reason}\n"
+              f"delete {state_path} after a review to re-arm", file=sys.stderr)
+        return 1
+
+    live = bool(args.live)
+    if live and not os.environ.get("MFF_RH_TOKEN"):
+        print("--live needs MFF_RH_TOKEN", file=sys.stderr)
+        return 1
+    quotes = HttpQuoteProvider()
+    if live and not quotes.configured:
+        print("--live needs a quote feed: set MFF_QUOTE_URL_TEMPLATE (see doctor). "
+              "Without it every entry would fail closed with no_quote - correct but useless.",
+              file=sys.stderr)
+        return 1
+    from . import exposure as exposure_mod
+    exposure_path = ROOT / "live" / "exposure.json"
+    exposure_limits = None
+    if exposure_path.exists():
+        try:
+            exposure_limits = exposure_mod.load_limits(exposure_path)
+        except (OSError, ValueError) as exc:
+            print(f"refusing to arm: invalid exposure limits at {exposure_path}: {exc}",
+                  file=sys.stderr)
+            return 1
+
+    broker = RobinhoodAgenticBroker(dry_run=not live)
+    expiry_guard = not bool(args.no_expiry_guard)
+    listener = Listener(
+        transport=WebsocketGateway(token=token),
+        engine=Engine(
+            config=EngineConfig(enforce_breakeven=bool(args.enforce_breakeven),
+                                 enforce_expiry=expiry_guard,
+                                 expiry_cutoff_minutes=int(args.expiry_cutoff),
+                                 max_quote_age_s=args.max_quote_age),
+            fills=FillLog(path=FILL_LOG, fsync=False),
+            governor=make_governor(risk_policy),
+            exposure_limits=exposure_limits,
+            risk_state=risk_state, risk_state_path=state_path),
+        broker=broker,
+        quotes=quotes,
+        budget=LatencyBudget(),
+        heartbeat=Heartbeat(path=HEARTBEAT),
+        kill=kill,
+        tick_s=float(args.tick_s),
+    )
+    quotes_status = "configured" if quotes.configured else "NOT configured (entries will reject)"
+    print(f"armed | broker={'LIVE' if live else 'DRY'} | "
+          f"quotes={quotes_status} | "
+          f"channels={','.join(CHANNEL_IDS)}")
+    guard = (f"ON (flatten at {args.expiry_cutoff}m before the ET close, tick "
+             f"{args.tick_s:g}s)" if expiry_guard else "OFF (--no-expiry-guard)")
+    print(f"expiry | guard {guard} | backtest parity unaffected (this is the live path)")
+    print(f"risk  | policy {risk_policy.name} (1R=${risk_policy.risk_unit_usd:,.0f}, "
+          f"daily stop ${risk_policy.daily_loss_limit_usd_effective() or 0:,.0f}) | "
+          f"equity ${risk_state.equity_usd:,.2f} | peak ${risk_state.peak_equity_usd:,.2f}")
+    print(f"spread | gate {_spread_gate_text()}")
+
+    try:
+        asyncio.run(pump_listener(listener, args.limit))
+    except KeyboardInterrupt:
+        print("interrupted")
+    return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """The fill log is the product; verify it can be read back intact.
+
+    A gap means a lost decision, a duplicate means a double-counted fill, and a
+    torn last line means a crash mid-append. None may pass silently: a book
+    reconstructed from a corrupt log would trade on a lie. Since the intent row
+    arrived, there is one more defect: an intent with no later terminal - an
+    order that may or may not have reached the venue. That is a divergence, not
+    a clean log. A `transport_unknown` row explains one cause of that divergence
+    (the socket died mid-order); it is named here so the operator can tell a
+    venue ambiguity from a plain crash, and either way the answer is the same:
+    resolve it with `recover` from a lookup, never with a retry.
+    """
+    fills_path = args.fills or FILL_LOG
+    if not fills_path.exists():
+        print(f"no fill log yet at {fills_path}")
+        return 0
+    problems = FillLog().verify_file(fills_path)
+    rows = FillLog().replay_file(fills_path)
+    print(f"fill log: {len(rows)} rows at {fills_path}")
+    if problems:
+        for problem in problems:
+            print(f"  PROBLEM {problem}")
+    unresolved = Ledger.unresolved(rows)
+    quarantined = Ledger.quarantine_reasons(rows)
+    if unresolved:
+        print(f"{len(unresolved)} unresolved intent(s) - a decision with no terminal:")
+        for intent in unresolved:
+            why = quarantined.get(intent.note)
+            cause = f" [transport unknown: {why}]" if why else ""
+            print(f"  UNRESOLVED {intent.seq} {intent.contract_key:<28} "
+                  f"{intent.qty:>3}x key={intent.note} ({intent.reason}){cause}")
+    if problems or unresolved:
+        if problems:
+            print(f"{len(problems)} problem(s): the log cannot be trusted as-is")
+        else:
+            print("run `recover` to resolve them from a broker lookup")
+        return 1
+    print("intact: sequence contiguous, every row readable, no unresolved intents")
+    return 0
+
+
+def make_recover_broker(kind: str) -> PaperBroker | RobinhoodAgenticBroker:
+    """The lookup-only broker for `recover`; paper is deterministic, Robinhood
+    reads MFF_RH_ORDER_LOOKUP_TEMPLATE (see RobinhoodAgenticBroker.lookup)."""
+    if kind == "paper":
+        return PaperBroker()
+    return RobinhoodAgenticBroker()
+
+
+def cmd_recover(args: argparse.Namespace) -> int:
+    """Close the mid-order silence: turn unresolved intents into terminals.
+
+    The ONLY thing recover may do is ask the broker what happened to each
+    unresolved idempotency key and append the answer: SEEN -> recovered,
+    NOT_SEEN -> not_sent, CANNOT_SAY -> the row stays unresolved and the exit
+    code is 1. It never places an order and never retries one - the whole point
+    is to stop guessing what a dead process may or may not have sent.
+    """
+    fills_path = args.fills or FILL_LOG
+    if not fills_path.exists():
+        print(f"no fill log yet at {fills_path}")
+        return 0
+    rows = FillLog().replay_file(fills_path)
+    unresolved = Ledger.unresolved(rows)
+    print(f"recover: {len(rows)} rows, {len(unresolved)} unresolved intent(s) at {fills_path}")
+    if not unresolved:
+        return 0
+
+    lookup = make_recover_broker(args.broker)
+    next_seq = max(f.seq for f in rows) + 1
+    appended: list[Fill] = []
+    still_unresolved: list[Fill] = []
+    for intent in unresolved:
+        result = lookup.lookup(intent.note)
+        if result is OrderLookup.CANNOT_SAY:
+            still_unresolved.append(intent)
+            print(f"  UNRESOLVED {intent.contract_key} key={intent.note} (lookup cannot_say)")
+            continue
+        event = "recovered" if result is OrderLookup.SEEN else "not_sent"
+        appended.append(Fill(
+            seq=next_seq, ts=time.time(), event=event, contract_key=intent.contract_key,
+            qty=intent.qty, price=intent.price, reason=f"{event}:{intent.reason}",
+            accepted=True, latency_ms=None, note=intent.note,
+        ))
+        next_seq += 1
+        print(f"  {event:<9} {intent.contract_key} key={intent.note}")
+
+    if appended:
+        FillLog(path=fills_path).append_rows(appended)
+        print(f"appended {len(appended)} terminal row(s) to {fills_path}")
+    if still_unresolved:
+        print(f"{len(still_unresolved)} intent(s) still unresolved (lookup cannot_say) - "
+              f"re-run `recover` once the lookup can decide")
+        return 1
+    return 0
+
+
+def cmd_marks(args: argparse.Namespace) -> int:
+    """The open book, marked to market: what it is worth right now, and whether
+    any armed breakeven stop is through. Total is withheld when any position
+    cannot be priced - a partial total would be a lie in a summary."""
+    from . import stops as stops_mod
+
+    fills_path = args.fills or FILL_LOG
+    fills = FillLog().replay_file(fills_path) if fills_path.exists() else []
+    book = stops_mod.book_from_fills(fills)
+
+    if args.quotes is not None:
+        bids = stops_mod.load_bids(args.quotes)
+    else:
+        provider = HttpQuoteProvider()
+        bids = {}
+        for key in book:
+            try:
+                quote = provider.quote(key)
+            except Exception:
+                quote = None
+            if quote is not None:
+                bids[key] = quote.bid
+
+    marks = stops_mod.mark_book(book.values(), bids)
+    total = marks.total_unrealized_usd
+    # A stop that is through is a decision the engine owes but has not made; a
+    # book that cannot be priced is the 9/8 failure in different clothes. Either
+    # is a page, so `--check` is the cron tripwire the report's `watch` sibling
+    # is not: it pages on the book's P&L, not on the heartbeat.
+    at_risk = marks.unpriced > 0 or marks.stopped_count > 0
+
+    if args.json:
+        print(json.dumps({
+            "positions": len(book),
+            "priced": marks.priced,
+            "unpriced": marks.unpriced,
+            "stopped_count": marks.stopped_count,
+            "total_unrealized_usd": total,
+            "marks": [
+                {"contract_key": m.contract_key, "contracts": m.contracts,
+                 "avg_price": m.avg_price, "bid": m.bid,
+                 "unrealized_usd": m.unrealized_usd,
+                 "breakeven_stop": m.breakeven_stop, "stopped": m.stopped}
+                for m in marks.marks
+            ],
+        }, indent=2))
+        return 1 if (args.check and at_risk) else 0
+
+    print(f"book: {len(book)} position(s) | priced {marks.priced} | "
+          f"unpriced {marks.unpriced} | stopped {marks.stopped_count}")
+    if total is None:
+        print("unrealised P&L: WITHHELD (some position cannot be priced)")
+    else:
+        print(f"unrealised P&L: ${total:,.2f}")
+    for m in marks.marks:
+        flag = "STOP" if m.stopped else "    "
+        print(f"  {flag} {m.contracts:>3}x {m.contract_key:<28} "
+              f"avg {m.avg_price:<7.2f} bid {m.bid:<7.2f} "
+              f"unreal ${m.unrealized_usd:>9,.2f}")
+    return 1 if (args.check and at_risk) else 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    kill = KillSwitch(path=NO_TRADE)
+    print(f"kill switch: {kill.status()}")
+    if not FILL_LOG.exists():
+        print(f"no fill log yet at {FILL_LOG}")
+        return 0
+    rows = FillLog().replay_file(FILL_LOG)
+    print(f"fill log: {len(rows)} rows, seq {rows[0].seq}..{rows[-1].seq}")
+    for fill in rows[-15:]:
+        print(f"  {fill.seq:>5} {fill.event:<8} {fill.qty:>3}x {fill.contract_key:<28} "
+              f"{fill.price:<8.2f} {fill.reason}")
+    return 0
+
+
+def cmd_backtest(args: argparse.Namespace) -> int:
+    from . import historic
+
+    kwargs = dict(ask_multiple=args.ask_multiple, exit_slippage=args.exit_slippage,
+                  pipe_test=not args.no_pipe_test, named_exits=not args.bare_exits)
+    if args.corpus is not None:
+        kwargs["corpus"] = args.corpus
+    report = historic.run_backtest(**kwargs)
+
+    if args.md is not None:
+        args.md.parent.mkdir(parents=True, exist_ok=True)
+        args.md.write_text(report.to_markdown(), encoding="utf-8")
+
+    if args.json:
+        print(json.dumps({
+            "corpus": str(args.corpus or historic.DEFAULT_CORPUS),
+            "alerts": report.trades, "days": report.days,
+            "taken": report.taken, "skipped": report.skipped, "rejected": report.rejected,
+            "contracts": report.contracts, "notional_usd": report.notional_usd,
+            "pnl_usd": report.pnl_usd, "avg_pnl_usd": round(report.avg_pnl_usd, 2),
+            "win_rate_pct": round(report.win_rate, 2),
+            "by_channel": report.by_channel, "skip_reasons": report.skip_reasons,
+            "assumptions": {"ask_multiple": report.ask_multiple,
+                            "exit_slippage": report.exit_slippage,
+                            "pipe_test": report.pipe_test},
+        }, indent=2))
+        return 0
+
+    print(report.to_text())
+    if args.md is not None:
+        print(f"\nmarkdown report -> {args.md}")
+
+    if args.attribution:
+        print("\nwhat each locked rule is worth (one rule changed at a time):")
+        base = None
+        for label, variant in historic.attribution(corpus=args.corpus or historic.DEFAULT_CORPUS):
+            if base is None:
+                base = variant.pnl_usd
+            print(f"  {label:<44} taken {variant.taken:>3}  contracts {variant.contracts:>4}  "
+                  f"pnl ${variant.pnl_usd:>11,.2f}  vs locked {variant.pnl_usd - base:+,.2f}")
+    return 0
+
+
+# ── expiry audit ─────────────────────────────────────────────────────────────
+# Phrases that state a FINAL exit of the whole position. Deliberately narrow: "50%" or
+# "runners at 100%" is a scale-out, not a close, so counting those would overstate how
+# much of the record actually finished. The result is therefore a LOWER bound on
+# "never closed", which is the honest direction for a risk number - and it is checked
+# against the corpus's own outcome grading (win_partial + unknown) below.
+FINAL_CLOSE_PHRASES: tuple[str, ...] = (
+    r"\ball out\b", r"\bfully closed\b", r"\bclosed fully\b", r"\bfull close\b",
+    r"\bclosed full position\b", r"\bclosed out\b", r"\bclose fully\b",
+    r"\bsold remaining\b", r"\bsold majority\b", r"\bclosed remaining\b",
+    r"\bclose remaining\b", r"\blast runner\b", r"\bout at\b", r"\bsl close\b",
+    r"\bstop loss\b", r"\bclosed at breakeven\b", r"\bclosed no profit\b",
+    r"\bexplicit sl\b", r"\bclosed \d", r"\bclosed at \d", r"\bexit(?:ed)? all\b",
+)
+_FINAL_CLOSE_RE = re.compile("|".join(FINAL_CLOSE_PHRASES), re.IGNORECASE)
+_HHMM_RE = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
+UNCLOSED_OUTCOMES = ("win_partial", "unknown")
+
+
+def _notes_exit_mark(notes: str, entry_ts: float) -> tuple[int, int] | None:
+    """The last HH:MM in the notes that is not before the entry - or None.
+
+    None is the interesting answer: it means the record never said when (or whether) the
+    position was left, which is precisely the case the cutoff guard exists for.
+    """
+    from datetime import datetime
+
+    from . import historic
+
+    entry = datetime.fromtimestamp(entry_ts, historic.ET)
+    marks = [(int(h), int(m)) for h, m in _HHMM_RE.findall(notes or "")]
+    later = [mark for mark in marks if mark >= (entry.hour, entry.minute)]
+    return max(later) if later else None
+
+
+def expiry_audit(corpus: str | Path | None = None,
+                 cutoff_minutes: int = 15) -> dict[str, object]:
+    """Measure the expiry guard against the only record that exists. Read-only.
+
+    Three questions, and a refusal:
+
+      1. how much of the corpus is 0DTE (a contract that dies at the bell)?
+      2. how many alerts never recorded an explicit final close - i.e. how many
+         positions the live book would still be carrying?
+      3. of the same-day ones, what share would the cutoff force-close, and what share
+         has no recorded exit time at all (those PAGE - they cannot be force-closed on
+         a price nobody wrote down)?
+
+    And the refusal: **assignment is not projected.** The corpus records the option
+    premium (`entry_bid`, `exit_pct`) and nothing about the underlying, so the shares a
+    0DTE would deliver are unknowable from it. `100 x contracts` here would be an
+    invention, and a missing price is not an out-of-the-money contract.
+    """
+    from datetime import date
+
+    from . import historic
+    from .calendar import CalendarError, session_for
+    from .expiry import SAME_DAY_TOKENS
+
+    path = Path(corpus) if corpus is not None else historic.DEFAULT_CORPUS
+    trades = historic.load_trades(path)
+    if not trades:
+        raise ValueError(f"empty corpus at {path}")
+
+    def is_same_day(trade: historic.Trade) -> bool:
+        return (trade.expiry.strip() == trade.date.strip()
+                or trade.expiry.strip().upper() in SAME_DAY_TOKENS)
+
+    same_day = [t for t in trades if is_same_day(t)]
+    unclosed = [t for t in trades if not _FINAL_CLOSE_RE.search(t.notes or "")]
+    floor = [t for t in trades if t.outcome in UNCLOSED_OUTCOMES]
+    outcome_counts: dict[str, int] = {}
+    for trade in same_day:
+        outcome_counts[trade.outcome] = outcome_counts.get(trade.outcome, 0) + 1
+
+    forced = 0
+    known = 0
+    no_mark = 0
+    latest: tuple[int, int] | None = None
+    cutoff_et_marks: set[str] = set()
+    half_days = 0
+    no_session = 0
+    for trade in same_day:
+        try:
+            session = session_for(date.fromisoformat(trade.date))
+        except (CalendarError, ValueError):
+            session = None
+        if session is None:
+            no_session += 1
+            continue
+        half_days += int(session.half_day)
+        cutoff = session.cutoff_utc(cutoff_minutes).astimezone(historic.ET)
+        cutoff_et_marks.add(f"{cutoff.hour:02d}:{cutoff.minute:02d}")
+        mark = _notes_exit_mark(trade.notes, trade.entry_ts)
+        if mark is None:
+            no_mark += 1
+            continue
+        known += 1
+        if latest is None or mark > latest:
+            latest = mark
+        if mark >= (cutoff.hour, cutoff.minute):
+            forced += 1
+
+    def pct(part: int, whole: int) -> float:
+        return round(100.0 * part / whole, 2) if whole else 0.0
+
+    def hhmm(mark: tuple[int, int] | None) -> str | None:
+        return None if mark is None else f"{mark[0]:02d}:{mark[1]:02d}"
+
+    floor_detail = " + ".join(f"{sum(1 for t in trades if t.outcome == name)} {name}"
+                              for name in UNCLOSED_OUTCOMES)
+    return {
+        "corpus": str(path),
+        "alerts": len(trades),
+        "days": len({t.date for t in trades}),
+        "first_date": min(t.date for t in trades),
+        "last_date": max(t.date for t in trades),
+        "same_day": {
+            "count": len(same_day),
+            "of": len(trades),
+            "share_pct": pct(len(same_day), len(trades)),
+            "by_outcome": dict(sorted(outcome_counts.items(), key=lambda kv: -kv[1])),
+            "half_day_sessions": half_days,
+            "no_session": no_session,
+        },
+        "no_explicit_close": {
+            "count": len(unclosed),
+            "of": len(trades),
+            "share_pct": pct(len(unclosed), len(trades)),
+            "same_day": sum(1 for t in unclosed if is_same_day(t)),
+            "outcome_floor": len(floor),
+            "outcome_floor_detail": floor_detail,
+            "consistent_with_floor": len(unclosed) >= len(floor),
+        },
+        "cutoff": {
+            "minutes": cutoff_minutes,
+            "cutoff_et": sorted(cutoff_et_marks),
+            "force_close": forced,
+            "known_exit_time": known,
+            "no_exit_time": no_mark,
+            "share_of_same_day_pct": pct(forced, len(same_day)),
+            "share_of_known_pct": pct(forced, known),
+            "latest_exit_et": hhmm(latest),
+            "clock_caveat": (
+                "the corpus carries no timezone proof: its recorded entry times precede "
+                "the 09:30 ET open, so the cutoff share is computed on the declared ET "
+                "clock and the recorded marks are read as written"),
+        },
+        "assignment": {
+            "status": "refused",
+            "shares": None,
+            "reason": (
+                "the corpus records the option premium only: it has no underlying close "
+                "at expiry, so assignment shares cannot be projected. A missing price "
+                "is not an out-of-the-money contract"),
+            "unresolved_positions": no_mark,
+        },
+    }
+
+
+def _expiry_audit_text(audit: dict[str, object]) -> str:
+    same = audit["same_day"]
+    unclosed = audit["no_explicit_close"]
+    cutoff = audit["cutoff"]
+    assignment = audit["assignment"]
+    assert isinstance(same, dict) and isinstance(unclosed, dict)
+    assert isinstance(cutoff, dict) and isinstance(assignment, dict)
+    marks = ", ".join(cutoff["cutoff_et"]) or "?"
+    latest = cutoff["latest_exit_et"] or "none on record"
+    lines = [
+        f"expiry audit - {audit['corpus']}",
+        f"{audit['alerts']} alerts over {audit['days']} sessions "
+        f"({audit['first_date']} .. {audit['last_date']})",
+        "",
+        f"same-day expiry         {same['count']:>3} / {same['of']}  "
+        f"({same['share_pct']:.1f}%)   every one dies at the bell",
+        f"no explicit final close {unclosed['count']:>3} / {unclosed['of']}  "
+        f"({unclosed['share_pct']:.1f}%)   floor {unclosed['outcome_floor']} from the "
+        f"outcomes ({unclosed['outcome_floor_detail']})",
+        f"   same-day among them   {unclosed['same_day']:>3} / {same['count']} same-day",
+        f"cutoff force-close      {cutoff['force_close']:>3} / {same['count']} same-day "
+        f"({cutoff['share_of_same_day_pct']:.1f}% of same-day, "
+        f"{cutoff['share_of_known_pct']:.1f}% of the {cutoff['known_exit_time']} with a "
+        f"recorded exit time)",
+        f"   cutoff {marks} ET for a {cutoff['minutes']}m window, latest recorded "
+        f"same-day exit {latest} ET, half-day sessions {same['half_day_sessions']}",
+        f"   no recorded exit time {cutoff['no_exit_time']:>3} / {same['count']} - at the "
+        f"cutoff these PAGE (HALT_AND_PAGE) instead of flattening on an invented price",
+        f"assignment projection   REFUSED - {assignment['reason']}",
+        "",
+        f"clock caveat: {cutoff['clock_caveat']}",
+    ]
+    if not unclosed["consistent_with_floor"]:
+        lines.append(
+            f"WARNING: the notes show only {unclosed['count']} unclosed, below the "
+            f"{unclosed['outcome_floor']} the outcome grading implies - the phrase list "
+            f"or the corpus has drifted")
+    return "\n".join(lines)
+
+
+def cmd_expiry(args: argparse.Namespace) -> int:
+    """`expiry audit`: the guard, measured against the corpus. Places nothing."""
+    if args.expiry_cmd != "audit":                     # pragma: no cover - argparse
+        print(f"unknown expiry subcommand: {args.expiry_cmd}", file=sys.stderr)
+        return 2
+    try:
+        audit = expiry_audit(args.corpus, cutoff_minutes=int(args.cutoff_minutes))
+    except (OSError, ValueError) as exc:
+        print(f"cannot audit {args.corpus or 'the default corpus'}: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(audit, indent=2))
+    else:
+        print(_expiry_audit_text(audit))
+    unclosed = audit["no_explicit_close"]
+    assert isinstance(unclosed, dict)
+    return 0 if unclosed["consistent_with_floor"] else 1
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    from . import watch as watch_mod
+
+    kwargs = {"dry_run": args.dry_run}
+    if args.stale_after is not None:
+        kwargs["stale_after_s"] = args.stale_after
+    if args.heartbeat is not None:
+        kwargs["heartbeat_path"] = args.heartbeat
+    if args.fills is not None:
+        kwargs["fills_path"] = args.fills
+    if args.kill is not None:
+        kwargs["kill_path"] = args.kill
+
+    health, result = watch_mod.run_watch(**kwargs)
+    if args.json:
+        payload = health.to_dict()
+        payload["page"] = result.to_dict() if result is not None else None
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"watch: {health.status.upper()}")
+        for problem in health.problems:
+            print(f"  {problem}")
+        if result is None:
+            print("  nothing to page")
+        elif result.dry_run:
+            print("\n--- page that would be sent ---")
+            print(health.page_text())
+        elif result.ok:
+            print(f"  paged: {result.chunks} message(s), ids {list(result.message_ids)}")
+        else:
+            print(f"  PAGE FAILED: {result.error}")
+    if health.healthy:
+        return 0
+    if result is not None and result.dry_run:
+        return 1
+    return 1 if (result is not None and result.ok) else 2
+
+
+def cmd_policy(args: argparse.Namespace) -> int:
+    from . import policy as policy_mod
+
+    path = args.path or policy_mod.DEFAULT_POLICY_PATH
+    if args.policy_cmd == "init":
+        if Path(path).exists():
+            print(f"refusing to overwrite {path} - a risk policy is not a generated file")
+            return 2
+        written = policy_mod.write(policy_mod.baseline(args.name), path)
+        print(f"wrote baseline policy -> {written}")
+        print()
+        print(policy_mod.summarise(policy_mod.load(written)))
+        return 0
+
+    if args.policy_cmd == "simulate":
+        from . import historic
+        try:
+            policy = policy_mod.load(path)
+        except policy_mod.PolicyError as exc:
+            print(exc)
+            return 2
+        base = historic.run_backtest(ask_multiple=args.ask_multiple,
+                                     exit_slippage=args.exit_slippage)
+        governed, decisions = historic.run_governed(policy,
+                                                    ask_multiple=args.ask_multiple,
+                                                    exit_slippage=args.exit_slippage)
+        if args.json:
+            print(json.dumps({
+                "policy": policy.name,
+                "ungoverned": {"taken": base.taken, "contracts": base.contracts,
+                               "pnl_usd": base.pnl_usd},
+                "governed": {"taken": governed.taken, "contracts": governed.contracts,
+                             "pnl_usd": governed.pnl_usd,
+                             "skip_reasons": governed.skip_reasons},
+                "interventions": [{"date": t.date, "channel": t.channel, "factor": f,
+                                   "reason": r} for t, f, r in decisions],
+            }, indent=2))
+            return 0
+        print(f"policy {policy.name} over the corpus")
+        print(f"  ungoverned : taken {base.taken:>3}  contracts {base.contracts:>4}  "
+              f"pnl ${base.pnl_usd:>11,.2f}")
+        print(f"  governed   : taken {governed.taken:>3}  contracts {governed.contracts:>4}  "
+              f"pnl ${governed.pnl_usd:>11,.2f}")
+        delta = governed.pnl_usd - base.pnl_usd
+        print(f"  difference : ${delta:+,.2f}  "
+              f"({len(decisions)} entries touched by the policy)")
+        if decisions:
+            print("\n  interventions:")
+            for trade, factor, reason in decisions[:20]:
+                print(f"    {trade.date} {trade.time_et} {trade.channel:<22} "
+                      f"x{factor:<4g} {reason}")
+            if len(decisions) > 20:
+                print(f"    ... and {len(decisions) - 20} more")
+        if governed.skip_reasons:
+            print("\n  governed skips:", ", ".join(
+                f"{k}={v}" for k, v in sorted(governed.skip_reasons.items())))
+        return 0
+
+    # show / validate
+    try:
+        policy = policy_mod.load(path)
+    except policy_mod.PolicyError as exc:
+        print(exc)
+        return 2
+    if args.json:
+        print(json.dumps(policy.to_dict(), indent=2))
+        return 0
+    print(policy_mod.summarise(policy))
+    if args.policy_cmd == "validate":
+        print("\n  valid: parses, every multiplier within the locked cap, reduce-only\n"
+              "  note: freshness is checked at arm time, not here - a stale policy "
+              "still parses")
+    return 0
+
+
+def cmd_desk(args: argparse.Namespace) -> int:
+    """The statistics layer: what the record says, and where the next dollar belongs."""
+    from . import expectancy, historic
+    from . import policy as policy_mod
+
+    risk_unit = args.risk_unit
+    if risk_unit is None:
+        try:
+            risk_unit = policy_mod.load().risk_unit_usd
+        except policy_mod.PolicyError:
+            risk_unit = policy_mod.DEFAULT_R_USD
+
+    report = historic.run_backtest()
+    rows = historic.outcomes_from(report)
+    desk = expectancy.report(rows, risk_unit_usd=risk_unit)
+
+    if args.md is not None:
+        args.md.parent.mkdir(parents=True, exist_ok=True)
+        args.md.write_text(desk.to_markdown(), encoding="utf-8")
+
+    if args.json:
+        print(json.dumps({
+            "overall": desk.overall.to_dict(),
+            "channels": {name: stats.to_dict() for name, stats in desk.channels.items()},
+            "ranking": [{"channel": name, "score": round(score, 4)}
+                        for name, score, _ in desk.ranking],
+            "drawdown": desk.dd.to_dict(),
+            "runs_test": desk.runs,
+            "streak_expectations": [{"length": n, "expected": round(v, 2)}
+                                    for n, v in desk.streak_table],
+            "risk_unit_usd": desk.risk_unit_usd,
+        }, indent=2))
+        return 0
+
+    print(desk.to_text())
+    if args.md is not None:
+        print(f"\nmarkdown report -> {args.md}")
+    return 0
+
+
+def cmd_tca(args: argparse.Namespace) -> int:
+    """Execution quality. `path` needs bars (here); `fills` needs venue executions (live)."""
+    from . import historic
+    from . import tca as tca_mod
+
+    if args.tca_cmd == "fills":
+        path = args.executions or (ROOT / "live" / "executions.jsonl")
+        log = tca_mod.ExecutionLog.load(path)
+        fill_report = tca_mod.FillReport(executions=log.records)
+        if args.json:
+            print(json.dumps({"executions": len(log.records),
+                              "mean_cost_bps": round(fill_report.mean_cost_bps, 1),
+                              "p90_cost_bps": round(fill_report.p90_cost_bps, 1),
+                              "total_cost_usd": fill_report.total_cost_usd,
+                              "at_or_better_pct": round(fill_report.at_or_better_share, 1),
+                              "partial_pct": round(fill_report.partial_share, 1),
+                              "latency_p90_ms": round(fill_report.latency_p90_ms, 1),
+                              "suggested_ask_multiple": fill_report.suggested_ask_multiple(),
+                              "source": str(path)}, indent=2))
+            return 0
+        print(fill_report.to_text())
+        if not log.records:
+            print(f"  (looked in {path})")
+        return 0
+
+    bars_dir = args.bars or tca_mod.DEFAULT_BARS_DIR
+    barsets = tca_mod.load_barsets(bars_dir)
+    if not barsets:
+        print(f"no bar series under {bars_dir} - nothing to analyse", file=sys.stderr)
+        return 2
+    path_report = tca_mod.analyse_paths(barsets, historic.load_trades(),
+                                        ask_multiple=args.ask_multiple)
+    if args.md is not None:
+        args.md.parent.mkdir(parents=True, exist_ok=True)
+        args.md.write_text(path_report.to_markdown(), encoding="utf-8")
+    if args.json:
+        measurable = path_report.measurable_enough
+        print(json.dumps({
+            "barsets": path_report.barsets, "joined": path_report.n,
+            "measurable": len(path_report.measurable),
+            "entry_before_coverage": path_report.n - len(path_report.in_coverage),
+            "aggregates_withheld": not measurable,
+            "mae_median_pct": round(path_report.mae_median, 2) if measurable else None,
+            "mfe_median_pct": round(path_report.mfe_median, 2) if measurable else None,
+            "stop30_hit_pct": round(path_report.stop30_share, 1) if measurable else None,
+            "carry_median_pct": round(path_report.carry_median, 2),
+            "expired_pct": round(path_report.expired_share, 1),
+            "unmatched": path_report.unmatched,
+            "rows": [r.to_dict() for r in path_report.rows],
+        }, indent=2))
+        return 0
+    print(path_report.to_text())
+    if args.md is not None:
+        print(f"\nmarkdown report -> {args.md}")
+    return 0
+
+
+def cmd_exposure(args: argparse.Namespace) -> int:
+    """The correlated-book cap: write the limits file once, then inspect the book."""
+    from . import exposure as exposure_mod
+
+    path = args.path or (ROOT / "live" / "exposure.json")
+    if args.exposure_cmd == "init":
+        if Path(path).exists():
+            print(f"refusing to overwrite {path} - exposure limits are a decision, "
+                  "not a generated file")
+            return 2
+        init_limits = exposure_mod.ExposureLimits()
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(json.dumps(init_limits.to_dict(), indent=2) + "\n", encoding="utf-8")
+        print(f"wrote default exposure limits -> {path}")
+        print(json.dumps(init_limits.to_dict(), indent=2))
+        return 0
+
+    limits: exposure_mod.ExposureLimits | None = None
+    if Path(path).exists():
+        try:
+            limits = exposure_mod.load_limits(path)
+        except (OSError, ValueError) as exc:
+            print(f"cannot read exposure limits at {path}: {exc}", file=sys.stderr)
+            return 2
+
+    fills_path = args.fills or FILL_LOG
+    fills = FillLog().replay_file(fills_path) if fills_path.exists() else []
+    positions = exposure_mod.positions_from_fills(fills)
+    book = exposure_mod.book_exposure(positions)
+
+    if args.json:
+        print(json.dumps({
+            "limits": limits.to_dict() if limits else {"active": False},
+            "book": book,
+        }, indent=2))
+        return 0
+
+    if limits is None:
+        print(f"exposure limits: OFF (no {path})")
+    else:
+        cap = limits.max_premium_per_underlying_usd
+        print(f"exposure limits: per underlying {limits.max_per_underlying} | "
+              f"per expiry {limits.max_per_expiry} | "
+              f"premium cap {'$' + f'{cap:,.0f}' if cap else 'off'}")
+    print(f"book: {book['positions']} position(s) | gross premium "
+          f"${book['gross_premium_usd']:,.2f} | net ${book['net_premium_usd']:,.2f}")
+    for ticker, row in book["per_underlying"].items():
+        print(f"  {ticker:<8} {row['positions']} pos {row['contracts']} contracts "
+              f"premium ${row['premium_usd']:,.2f} (calls {row['calls']} / puts {row['puts']})")
+    for expiry, row in book["per_expiry"].items():
+        print(f"  exp {expiry:<12} {row['positions']} pos {row['contracts']} contracts "
+              f"premium ${row['premium_usd']:,.2f}")
+    return 0
+
+
+def cmd_fuzz(args: argparse.Namespace) -> int:
+    """Exit 1 on a violation, so CI can gate on it."""
+    from . import fuzz
+
+    campaign = fuzz.run_campaign(seed=args.seed, iterations=args.iterations)
+    if args.json:
+        print(json.dumps({"seed": args.seed, "iterations": args.iterations,
+                          "posts": campaign.posts, "intents": campaign.intents,
+                          "clean": campaign.clean,
+                          "violations": [{"invariant": v.invariant, "detail": v.detail,
+                                          "post": v.post} for v in campaign.violations],
+                          "statuses": campaign.statuses}, indent=2))
+    else:
+        print(campaign.to_text())
+    return 0 if campaign.clean else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    handlers = {
+        "doctor": cmd_doctor,
+        "replay": cmd_replay,
+        "arm": cmd_arm,
+        "status": cmd_status,
+        "verify": cmd_verify,
+        "recover": cmd_recover,
+        "marks": cmd_marks,
+        "backtest": cmd_backtest,
+        "watch": cmd_watch,
+        "policy": cmd_policy,
+        "desk": cmd_desk,
+        "tca": cmd_tca,
+        "fuzz": cmd_fuzz,
+        "exposure": cmd_exposure,
+        "expiry": cmd_expiry,
+    }
+    return handlers[args.cmd](args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
