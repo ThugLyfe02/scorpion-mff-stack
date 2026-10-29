@@ -15,6 +15,7 @@ Layering, all stdlib:
     fills     - append-only structured fill log
     killswitch- NO_TRADE file, STOP/stand-down, fail-closed
     health    - per-event latency budget + deadman heartbeat
+    gateway   - Discord session resume, heartbeat ACK, sequence-gap alarm, fatal closes
     listener  - Gateway transport -> parser -> engine -> broker, event driven
     replay    - the same pipeline over a recorded tape (offline proof)
     calendar  - the ET clock, sessions, half-days, holidays; fails closed on an unknown year

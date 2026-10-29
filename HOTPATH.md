@@ -46,6 +46,36 @@ scheduler to be starved.
 | STOP/stand-down = halt (exits still allowed) | `engine._on_stop` / `halted` | `test_engine.py` |
 | event-driven, not cron | `listener.Listener.handle` | `test_listener.py` |
 
+## The Gateway is a session, not a socket
+
+A websocket drop used to end the async generator, which ended the pump, which stopped the
+heartbeat and made the hone silent until a human noticed. That is the 9/8 failure wearing
+a transport costume. `scorpion_mff/gateway.py` keeps the Discord session across sockets and
+`listener.WebsocketGateway` consumes it:
+
+| Invariant | Why it costs money when wrong | Test |
+|---|---|---|
+| Every DISPATCH sequence is tracked | RESUME replays from the last sequence, so losing it replays the wrong window | `tests/test_gateway.py` |
+| The heartbeat carries the last sequence | A heartbeat with no `s` cannot resume at the right point | `test_heartbeat_carries_the_last_sequence_and_tracks_the_ack` |
+| An unACKed heartbeat is a zombie | A half-dead socket looks connected and delivers nothing | `test_a_missing_heartbeat_ack_is_a_zombie...` |
+| A sequence gap is paged | A missed `MESSAGE_CREATE` is a missed exit, not a cosmetic counter | `test_the_socket_loop_pages_a_gap_and_skips_a_duplicate` |
+| A redelivery is skipped by sequence | The listener's message-id dedupe is the second fence, not the first | `test_a_redelivered_sequence_is_duplicate...` |
+| RESUME after op 7 / resumable op 9 | A re-IDENTIFY starts a new session and drops everything buffered | `test_identify_then_resume_carries_session_and_last_sequence` |
+| Non-resumable closes force IDENTIFY | 4007/4009 cannot be replayed; pretending otherwise stalls forever | `test_unresumable_close_codes...` |
+| Fatal closes stop and page | Reconnecting on 4004 (bad token) is an infinite silent loop | `test_fatal_close_codes_stop_instead_of_reconnecting` |
+
+`arm` writes a `gateway_reconnect` row for a routine reconnect and a `gateway_gap` /
+`gateway_fatal` **alert** row for the cases a human must see. `watch --once` already pages
+on alert rows, so the transport has one observability path, not two.
+
+```bash
+.venv/Scripts/python -m pytest tests/test_gateway.py -q     # 20 tests, offline
+```
+
+What this does not prove: a real Discord handshake. The state machine and the socket loop's
+frame handling are exercised with a scripted socket; the token, intents and guild membership
+still have to be real. The lifecycle is no longer the unproven part.
+
 ## The lane boundary: PR#2 is live, PR#1 is paper
 
 Two PRs, two jobs, one gate. The boundary is not a preference; it is what keeps a
@@ -57,7 +87,7 @@ research component from becoming a live dependency by accident.
 | Job | live Discord -> Robinhood executor | event-sourced control plane / research frontier |
 | May place an order? | yes, `arm --live` only, after the policy/token/quote refusals | **no** — paper plane |
 | Imports the other lane? | never | never |
-| 3.a gate | ruff clean, mypy 27 files, **516 passed** (513 at 3.a; +3 integration tests) | ruff clean, mypy 63 files, **551 passed + 1 xfailed** |
+| 3.a gate | ruff clean, mypy 28 files, **536 passed** (513 at 3.a; +3 transport, +20 gateway) | ruff clean, mypy 63 files, **551 passed + 1 xfailed** |
 
 The merge boundary is explicit:
 
@@ -116,7 +146,7 @@ Full acceptance ledger, one command per gem: **`docs/GEMS.md`**.
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install pytest            # tests only
-.venv/Scripts/python -m pytest tests -q               # 516 tests, offline
+.venv/Scripts/python -m pytest tests -q               # 536 tests, offline
 
 .venv/Scripts/python -m scorpion_mff.cli doctor       # rules, switches, broker mode,
                                                       #   spread-gate setting (OFF unless armed)
@@ -172,7 +202,9 @@ ledger, and `recover` are also proven offline; `docs/GEMS.md` is the one-command
    without it.
 3. **The Gateway.** Needs a bot token with the **MESSAGE_CONTENT** privileged
    intent enabled in the Discord developer portal, plus guild membership for the
-   four channel ids.
+   four channel ids. The session lifecycle (RESUME, heartbeat ACK, sequence gaps,
+   fatal closes) is now proven offline against a scripted socket; only the real
+   handshake and credentials remain.
 4. **LOTTO policy.** Posts flagged LOTTO (a lottery play, e.g. `CALL/ ODTE LOTTO
    TICKER TSLA`) are IGNORED by default. The lock names lotto-* CHANNELS as
    excluded; whether a LOTTO-flagged post inside `options-king` is also out is a

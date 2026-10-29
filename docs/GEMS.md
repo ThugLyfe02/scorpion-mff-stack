@@ -15,9 +15,9 @@ python -m pytest --version         # if this fails, use .venv/Scripts/python.exe
 
 If the venv is not active, replace `python` with `.venv/Scripts/python.exe` (Windows)
 or `.venv/bin/python` (POSIX). `scripts/gate.sh` resolves the venv itself and is the
-single top-level check: `ruff -> mypy --strict -> pytest`, currently **516 passed**
+single top-level check: `ruff -> mypy --strict -> pytest`, currently **536 passed**
 (513 at the 3.a red-team, plus the three transport-quarantine tests added by final
-integration that close O1).
+integration that close O1, plus the offline Gateway lifecycle suite).
 
 ## The one-line index
 
@@ -35,6 +35,7 @@ integration that close O1).
 | G10 | a replay that is not the live path | `python -m scorpion_mff.cli replay tapes/sep8.json` |
 | G11 | an input the invariants do not cover | `python -m scorpion_mff.cli fuzz --iterations 5000 --seed 7` |
 | G12 | a switch you cannot see before arming | `python -m scorpion_mff.cli doctor` |
+| G13 | a reconnect that silently drops the session | `python -m pytest tests/test_gateway.py -q` |
 
 Each gem follows the same shape: **what it is**, **the acceptance command**, **the
 invariant**, **the failure mode it buys down**, and the **3.a red-team record** for it.
@@ -358,6 +359,34 @@ the fill log after it has already decided.
 
 ---
 
+## G13. A reconnect is a session, not a restart
+
+`scorpion_mff/gateway.py` is the Discord session state machine; `listener.WebsocketGateway`
+is the socket loop that consumes it. A dropped websocket no longer ends the pump: the
+transport reconnects with the prior `session_id` and the last dispatched sequence (RESUME),
+so alerts posted during the gap are replayed instead of being lost.
+
+**Acceptance (one command):** `python -m pytest tests/test_gateway.py -q` -> 20 passed.
+
+**Invariant:** every DISPATCH sequence is tracked and the heartbeat carries the last one; an
+unACKed heartbeat is a zombie connection and reconnects; op 7 and a resumable op 9 keep the
+session; 4007/4009 forget it and re-IDENTIFY; 4004/4010-4014 stop and page instead of
+looping; a sequence gap is paged, never smoothed over; a redelivered sequence is dropped
+before the parser sees it. Routine reconnects write a `gateway_reconnect` row; a gap,
+zombie or fatal close writes an **alert** row that `watch --once` already pages on.
+
+**Failure mode it buys down:** a routine websocket close ends the async generator, the pump
+exits, the heartbeat stops, and the hone is silent while the market keeps moving - the 9/8
+failure in transport form. A re-IDENTIFY after every close drops every alert buffered during
+the reconnect. A zombie socket looks alive and delivers nothing. A missed sequence is a
+missed exit, not a counter.
+
+**Not a port:** PR#1 and PR#3 use `discord.py`, which owns this lifecycle for them. This
+state machine exists because the live lane hand-rolls the Gateway to keep the standard
+library as its only runtime dependency.
+
+---
+
 ## What we deliberately do not build
 
 These are not backlog items with an ETA. They are gates that would have to open before the
@@ -468,7 +497,7 @@ place. The corpus backtest and the 9/8 replay are unchanged (they have no transp
 The short version, in the order that fails fastest:
 
 ```bash
-./scripts/gate.sh                                            # ruff -> mypy -> pytest, 516
+./scripts/gate.sh                                            # ruff -> mypy -> pytest, 536
 python -m scorpion_mff.cli backtest                          # 93/91/405/$57,951.00
 python -m scorpion_mff.cli replay tapes/sep8.json            # 4/2/6/$211.00, 0 breaches
 python -m scorpion_mff.cli expiry audit                      # 40/93, 65/93, 0/40, 10/40, REFUSED
@@ -486,6 +515,7 @@ python -m pytest tests/test_execution.py -q -k breaker                      # 6
 python -m pytest tests/test_execution.py -q -k spread                       # 5
 python -m pytest tests/test_ledger.py -q                                    # 21
 python -m pytest tests/test_ledger.py -q -k recover                         # 3
+python -m pytest tests/test_gateway.py -q                                   # 20
 ```
 
 A failure in any of these is a gem failing, not a flaky test: every command is offline,

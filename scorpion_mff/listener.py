@@ -17,6 +17,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Callable, Iterable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -24,15 +25,19 @@ from .broker import BrokerError, QuoteProvider, TransportError, intent_key
 from .engine import Engine
 from .execution import BreakerState, CircuitBreaker
 from .fills import FillLog
+from .gateway import (
+    GATEWAY_URL,
+    NORMAL_CLOSE_CODE,
+    ZOMBIE_CLOSE_CODE,
+    CloseAction,
+    GatewayFatalError,
+    GatewaySession,
+)
 from .health import Heartbeat, LatencyBudget
 from .killswitch import KillSwitch
 from .ledger import TRANSPORT_UNKNOWN
 from .parser import CHANNEL_IDS, parse
 from .types import OrderIntent, RawMessage
-
-GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
-INTENTS_GUILD_MESSAGES = 1 << 9          # GUILD_MESSAGES
-INTENT_MESSAGE_CONTENT = 1 << 15         # MESSAGE_CONTENT (privileged)
 
 
 class GatewayTransport(Protocol):
@@ -301,10 +306,12 @@ class Listener:
 # ── the real Gateway ─────────────────────────────────────────────────────────
 @dataclass
 class WebsocketGateway:
-    """Discord Gateway v10 client: IDENTIFY, heartbeat, RESUME, MESSAGE_CREATE.
+    """Discord Gateway v10 client: IDENTIFY, RESUME, heartbeat, MESSAGE_CREATE.
 
     Only the four allowlisted channel ids are yielded upward; every other guild
-    event is dropped before it can reach the parser.
+    event is dropped before it can reach the parser. A dropped socket reconnects
+    with the prior session (RESUME) so alerts posted during the reconnect are
+    replayed instead of being lost; a gap, zombie or fatal close is paged.
     """
 
     token: str
@@ -312,6 +319,9 @@ class WebsocketGateway:
     url: str = GATEWAY_URL
     heartbeat_margin: float = 0.1
     name_to_id: dict[str, str] = field(default_factory=lambda: dict(CHANNEL_IDS))
+    alert: Callable[[str, str], None] | None = None
+    backoff_s: float = 1.0
+    max_backoff_s: float = 30.0
 
     async def messages(self) -> AsyncIterator[RawMessage]:
         try:
@@ -321,46 +331,134 @@ class WebsocketGateway:
                 "the live Gateway needs the optional dependency: pip install websockets"
             ) from exc
 
+        session = GatewaySession(token=self.token)
         allowed = {str(c) for c in self.channel_ids}
-        async with websockets.connect(self.url, max_size=2**23) as ws:
-            hello = json.loads(await ws.recv())
-            interval = float(hello["d"]["heartbeat_interval"]) / 1000.0
-            await ws.send(json.dumps({
-                "op": 2,
-                "d": {
-                    "token": self.token,
-                    "intents": INTENTS_GUILD_MESSAGES | INTENT_MESSAGE_CONTENT,
-                    "properties": {"os": "windows", "browser": "scorpion-mff",
-                                   "device": "scorpion-mff"},
-                },
-            }))
-            beat = asyncio.create_task(self._heartbeat(ws, interval))
-            try:
-                async for frame in ws:
-                    event = json.loads(frame)
-                    if event.get("op") != 0 or event.get("t") != "MESSAGE_CREATE":
-                        continue
-                    payload = event.get("d") or {}
-                    channel_id = str(payload.get("channel_id", ""))
-                    if channel_id not in allowed:
-                        continue
-                    yield RawMessage(
-                        channel=self._name_for(channel_id),
-                        channel_id=channel_id,
-                        text=str(payload.get("content", "")),
-                        message_id=str(payload.get("id", "")),
-                        ts=time.time(),
-                    )
-            finally:
-                beat.cancel()
-
-    async def _heartbeat(self, ws: Any, interval: float) -> None:
+        delay = self.backoff_s
         while True:
-            await asyncio.sleep(max(1.0, interval * (1 - self.heartbeat_margin)))
+            session.begin()
+            action = CloseAction.IDENTIFY
+            note = ""
             try:
-                await ws.send(json.dumps({"op": 1, "d": None}))
+                url = session.connect_url(self.url)
+                async with websockets.connect(url, max_size=2**23) as ws:
+                    async for message in self._session(ws, session, allowed):
+                        # A healthy stream resets the backoff immediately; a run of
+                        # failed reconnects backs off so a Discord outage is not a
+                        # tight reconnect loop.
+                        delay = self.backoff_s
+                        yield message
+                    if not session.last_note:
+                        session.on_close(NORMAL_CLOSE_CODE)
+                    action = session.next_action
+                    note = session.last_note
+            except GatewayFatalError as exc:
+                self._alert("gateway_fatal", str(exc))
+                raise
+            except Exception as exc:               # noqa: BLE001 - transport boundary
+                prior_note = session.last_note
+                action = session.on_close(self._close_code(exc))
+                note = prior_note or session.last_note
+                note = f"{note}: {exc}" if str(exc) else note
+            if action is CloseAction.FATAL:
+                self._alert("gateway_fatal", note)
+                raise GatewayFatalError(note)
+            self._alert("gateway_reconnect", f"{action.value}: {note}")
+            await asyncio.sleep(delay)
+            delay = min(self.max_backoff_s, delay * 2)
+
+    async def _session(self, ws: Any, session: GatewaySession,
+                       allowed: set[str]) -> AsyncIterator[RawMessage]:
+        """One socket: HELLO -> IDENTIFY/RESUME -> DISPATCH, with a heartbeat task."""
+        heartbeat: asyncio.Task[None] | None = None
+        try:
+            async for frame in ws:
+                event = json.loads(frame)
+                op = event.get("op")
+                if op == 10:                       # HELLO
+                    payload = event.get("d")
+                    hello = payload if isinstance(payload, dict) else {}
+                    await ws.send(json.dumps(session.on_hello(hello)))
+                    heartbeat = asyncio.create_task(self._heartbeat(ws, session))
+                    continue
+                if op == 11:                       # HEARTBEAT ACK
+                    session.on_heartbeat_ack()
+                    continue
+                if op == 1:                        # server asks for a beat now
+                    await ws.send(json.dumps(session.heartbeat_frame()))
+                    continue
+                if op == 7:                        # RECONNECT
+                    session.on_reconnect()
+                    await ws.close(code=ZOMBIE_CLOSE_CODE)
+                    return
+                if op == 9:                        # INVALID_SESSION
+                    session.on_invalid_session(bool(event.get("d")))
+                    await ws.close(code=ZOMBIE_CLOSE_CODE)
+                    return
+                if op != 0:
+                    continue
+                dispatch = session.on_dispatch(event)
+                if dispatch.gap:
+                    self._alert(
+                        "gateway_gap",
+                        f"{dispatch.event_type} seq={dispatch.sequence}: "
+                        f"{dispatch.reason}",
+                    )
+                if dispatch.duplicate:
+                    continue
+                if dispatch.event_type in {"READY", "RESUMED"}:
+                    continue
+                if dispatch.event_type != "MESSAGE_CREATE":
+                    continue
+                payload = dispatch.payload
+                channel_id = str(payload.get("channel_id", ""))
+                if channel_id not in allowed:
+                    continue
+                yield RawMessage(
+                    channel=self._name_for(channel_id),
+                    channel_id=channel_id,
+                    text=str(payload.get("content", "")),
+                    message_id=str(payload.get("id", "")),
+                    ts=time.time(),
+                )
+        finally:
+            if heartbeat is not None:
+                heartbeat.cancel()
+                with suppress(asyncio.CancelledError):
+                    await heartbeat
+
+    async def _heartbeat(self, ws: Any, session: GatewaySession) -> None:
+        """Beat with the last sequence; a missing ACK means the socket is a zombie."""
+        while True:
+            interval = session.heartbeat_interval_s
+            await asyncio.sleep(max(1.0, interval * (1 - self.heartbeat_margin)))
+            if session.pending_ack:
+                session.on_zombie()
+                with suppress(Exception):
+                    await ws.close(code=ZOMBIE_CLOSE_CODE)
+                return
+            try:
+                await ws.send(json.dumps(session.heartbeat_frame()))
             except Exception:  # noqa: BLE001 - the reader owns the failure path
                 return
+
+    def _alert(self, reason: str, note: str) -> None:
+        """A transport alert is best-effort: a broken pager must not stop the stream."""
+        if self.alert is None:
+            return
+        try:
+            self.alert(reason, note)
+        except Exception:  # noqa: BLE001 - alerting is not the trade path
+            return
+
+    @staticmethod
+    def _close_code(exc: BaseException) -> int:
+        """Extract a Discord close code from a websockets exception, or 0."""
+        code = getattr(exc, "code", None)
+        if isinstance(code, int):
+            return code
+        received = getattr(exc, "rcvd", None)
+        code = getattr(received, "code", None)
+        return code if isinstance(code, int) else 0
 
     def _name_for(self, channel_id: str) -> str:
         for name, cid in self.name_to_id.items():

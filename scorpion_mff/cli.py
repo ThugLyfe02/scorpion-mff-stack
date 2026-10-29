@@ -30,6 +30,7 @@ from .broker import (
 )
 from .engine import Engine, EngineConfig
 from .fills import FillLog
+from .gateway import GatewayFatalError
 from .health import Heartbeat, LatencyBudget
 from .killswitch import KillSwitch
 from .ledger import Ledger
@@ -372,8 +373,9 @@ def cmd_arm(args: argparse.Namespace) -> int:
 
     broker = RobinhoodAgenticBroker(dry_run=not live)
     expiry_guard = not bool(args.no_expiry_guard)
+    gateway = WebsocketGateway(token=token)
     listener = Listener(
-        transport=WebsocketGateway(token=token),
+        transport=gateway,
         engine=Engine(
             config=EngineConfig(enforce_breakeven=bool(args.enforce_breakeven),
                                  enforce_expiry=expiry_guard,
@@ -390,6 +392,17 @@ def cmd_arm(args: argparse.Namespace) -> int:
         kill=kill,
         tick_s=float(args.tick_s),
     )
+
+    def record_gateway_alert(reason: str, note: str) -> None:
+        # A reconnect is routine; a gap, zombie or fatal close is a decision-level
+        # event. All of them land in the same fill log as orders, so `watch` can
+        # page on a transport failure without a second observability system.
+        listener.engine.fills.record(
+            event="alert", contract_key="", qty=0, price=0.0, reason=reason,
+            accepted=False, ts=time.time(), note=note,
+        )
+
+    gateway.alert = record_gateway_alert
     quotes_status = "configured" if quotes.configured else "NOT configured (entries will reject)"
     print(f"armed | broker={'LIVE' if live else 'DRY'} | "
           f"quotes={quotes_status} | "
@@ -404,6 +417,9 @@ def cmd_arm(args: argparse.Namespace) -> int:
 
     try:
         asyncio.run(pump_listener(listener, args.limit))
+    except GatewayFatalError as exc:
+        print(f"gateway fatal: {exc}", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         print("interrupted")
     return 0
