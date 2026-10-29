@@ -9,5 +9,7 @@ This folder is for **shared, drift-resistant** state your coding collaborator an
 | `watch-health/` | Discord tab / Gateway health pings |
 | `decisions.md` | Append-only decisions that change rules (date, who, change) |
 | `RULES.lock.md` | Canonical locked rules — edit only via PR, never ad-hoc chat drift |
+| `risk-budget.example.json` | Reviewed starter for the pre-trade worst-case budget (`risk init`) |
+| `venue-snapshot.example.json` | Shape of the venue book for `reconcile --snapshot`: `[{contract_key, contracts}]` |
 
 Bot/agent should write here; humans review in PRs.

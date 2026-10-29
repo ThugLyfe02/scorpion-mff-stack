@@ -15,7 +15,7 @@ python -m pytest --version         # if this fails, use .venv/Scripts/python.exe
 
 If the venv is not active, replace `python` with `.venv/Scripts/python.exe` (Windows)
 or `.venv/bin/python` (POSIX). `scripts/gate.sh` resolves the venv itself and is the
-single top-level check: `ruff -> mypy --strict -> pytest`, currently **565 passed**
+single top-level check: `ruff -> mypy --strict -> pytest`, currently **585 passed**
 (513 at the 3.a red-team, plus the three transport-quarantine tests added by final
 integration that close O1, plus the offline Gateway lifecycle suite).
 
@@ -38,6 +38,7 @@ integration that close O1, plus the offline Gateway lifecycle suite).
 | G13 | a reconnect that silently drops the session | `python -m pytest tests/test_gateway.py -q` |
 | G14 | a daily loss limit that only fires after the loss | `python -m pytest tests/test_risk_budget.py -q` |
 | G15 | an add that bypasses the stand-down or the governor | `python -m pytest tests/test_add_safety.py -q` |
+| G16 | a book that disagrees with the venue and does not say so | `python -m pytest tests/test_reconcile.py -q` |
 
 Each gem follows the same shape: **what it is**, **the acceptance command**, **the
 invariant**, **the failure mode it buys down**, and the **3.a red-team record** for it.
@@ -449,6 +450,35 @@ position could undo the stop that was supposed to prevent it. The same shape as 
 budget, governor, pre-trade budget, mutation - so a future check added to the entry
 has one obvious counterpart to add here.
 
+## G16. A book that disagrees with the venue must say so
+
+`scorpion_mff/reconcile.py` + `Engine.reconcile_positions`. The engine's positions
+are a decision cache; the venue holds the contracts. Nothing compared them, so a
+restart, a rejected buy, a partial fill or a manual trade could leave the bot flat in
+its own memory while the venue still held risk (or the reverse).
+
+**Acceptance (one command):** `python -m pytest tests/test_reconcile.py -q` -> 20 passed.
+
+**Invariant:** the comparator names all three drift directions in one report -
+`phantom_local` (we hold it, the venue does not), `missing_local` (the venue holds it,
+we do not), `quantity_mismatch` (both, different counts). A duplicate venue line, a
+negative/boolean/float count, or a line without a contract key is **refused**, not
+summed or clamped. A clean snapshot writes one `reconcile` row; drift sets
+`halt_reason=reconcile-drift`, writes an alert, and rejects new buys with
+`halted:reconcile-drift` - while an exit still runs. The operator surface is
+`reconcile --snapshot SNAP`: exit 0 clean, 1 drift (page), 2 malformed snapshot.
+
+**Failure mode it buys down:** the bot believes it is flat while the venue holds a
+position, so no exit will ever be posted for it; or the bot believes it holds a
+contract it cannot sell, so P&L and the governor are fiction. Both are silent, which
+is the exact class of failure this package exists to remove.
+
+**What is not built:** the venue *feed*. The comparison is built and the snapshot
+format is documented; a positions endpoint (or an operator upload) is the remaining
+integration, and the CLI is honest about it (`--snapshot` is required). The gate stays
+closed rather than inventing a snapshot from the fill log, which would compare the
+book with itself and always pass.
+
 ---
 
 ## What we deliberately do not build
@@ -561,7 +591,7 @@ place. The corpus backtest and the 9/8 replay are unchanged (they have no transp
 The short version, in the order that fails fastest:
 
 ```bash
-./scripts/gate.sh                                            # ruff -> mypy -> pytest, 565
+./scripts/gate.sh                                            # ruff -> mypy -> pytest, 585
 python -m scorpion_mff.cli backtest                          # 93/91/405/$57,951.00
 python -m scorpion_mff.cli replay tapes/sep8.json            # 4/2/6/$211.00, 0 breaches
 python -m scorpion_mff.cli expiry audit                      # 40/93, 65/93, 0/40, 10/40, REFUSED

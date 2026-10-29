@@ -23,6 +23,7 @@ Layering, all stdlib:
     execution - the one-probe transport breaker and the fail-closed spread gate
     ledger    - intent -> terminal matching; a transport failure stays unresolved
     risk      - pre-trade worst-case-loss budget; shrinks size, never grows it
+    reconcile - engine book vs venue book; drift halts buys, never exits
 
 Everything except the live Gateway transport and the RH HTTP call is pure and
 unit-tested offline. `listener.WebsocketGateway` needs the optional `websockets`

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -49,6 +49,7 @@ from .exposure import guard as exposure_guard
 from .fills import FillLog
 from .governor import Governor, GovernorState, apply_contracts
 from .pricing import far_off_bid, marketable_limit, pct_off_bid
+from .reconcile import ReconcileReport, VenuePosition, reconcile
 from .risk import RiskBudget
 from .sizing import (
     MAX_CONCURRENT,
@@ -191,6 +192,32 @@ class Engine:
                 # settling, but it must be visible in the log.
                 self.fills.record(event="alert", contract_key="", qty=0, price=0.0,
                                   reason=f"risk_state_unwritable:{exc}", ts=ts)
+
+    def reconcile_positions(self, venue: Iterable[VenuePosition],
+                            now: float | None = None) -> ReconcileReport:
+        """Compare the engine's book with the venue, and halt NEW BUYS on drift.
+
+        The comparator is pure (`reconcile.py`); this method is the live consequence.
+        A clean snapshot writes one `reconcile` row and changes nothing. Any drift
+        sets `halted` with reason `reconcile-drift` and writes an alert that `watch`
+        already pages on. Exits stay legal: a desk that cannot reconcile must still be
+        able to leave a position it is in, and trapping it would be the worse failure.
+        """
+        ts = self.clock() if now is None else now
+        report = reconcile(self.open_positions, venue)
+        if report.clean:
+            self.fills.record(event="reconcile", contract_key="", qty=0, price=0.0,
+                              reason="clean", ts=ts,
+                              note=f"local={report.local_positions} "
+                                   f"venue={report.venue_positions}")
+            return report
+        self.halted = True
+        self.halt_reason = "reconcile-drift"
+        self.fills.record(event="alert", contract_key="", qty=0, price=0.0,
+                          reason=f"reconcile_drift:{report.reason_text}", ts=ts,
+                          accepted=False,
+                          note="new buys halted; exits remain legal")
+        return report
 
     # ── book helpers ─────────────────────────────────────────────────────────
     def _quote_for(self, key: str, explicit: Quote | None, now: float) -> Quote | None:

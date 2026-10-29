@@ -146,7 +146,7 @@ Full acceptance ledger, one command per gem: **`docs/GEMS.md`**.
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install pytest            # tests only
-.venv/Scripts/python -m pytest tests -q               # 565 tests, offline
+.venv/Scripts/python -m pytest tests -q               # 585 tests, offline
 
 .venv/Scripts/python -m scorpion_mff.cli doctor       # rules, switches, broker mode,
                                                       #   spread-gate setting (OFF unless armed)
@@ -435,6 +435,31 @@ money defect, not a style one:
 buys, never sells, because a switch that traps a position is worse than no switch.
 
 The regression suite is `tests/test_add_safety.py` (G15 in `docs/GEMS.md`).
+
+## Venue reconciliation (`reconcile.py`)
+
+The engine's book is a decision cache. The venue is the truth. Nothing compared them,
+so a restart, a rejected buy, a partial fill or a manual trade could leave the bot flat
+in memory while the venue still held risk - and no exit would ever be posted for that
+position. `reconcile.py` is the missing comparison:
+
+| drift | local | venue | what it means |
+|---|---|---|---|
+| `phantom_local` | 5 | 0 | the engine will try to sell a contract it does not have |
+| `missing_local` | 0 | 5 | real risk the exit path, governor and marks cannot see |
+| `quantity_mismatch` | 5 | 2 | a partial fill recorded as a full clip |
+
+A snapshot is evidence. Duplicate keys, negative/boolean/float counts and missing
+contract keys are refused rather than summed or clamped; a malformed file is not a
+flat book. `Engine.reconcile_positions` consumes a clean report as one `reconcile` row
+and drift as `halt_reason=reconcile-drift` + an alert + `halted:reconcile-drift` on new
+buys. **Exits stay legal**: a desk that cannot reconcile must still be able to leave a
+position it is in.
+
+The operator surface is `reconcile --snapshot SNAP`: exit 0 clean, 1 drift (a page),
+2 malformed. The venue *feed* is not built; the snapshot format is
+`live/venue-snapshot.example.json`, and requiring it is deliberate - deriving the venue
+side from the fill log would compare the book with itself and always pass.
 
 ## Adversarial hardening (`fuzz`)
 

@@ -43,7 +43,7 @@ scripts/gate.sh          # ruff -> mypy --strict -> pytest, in that order
 
 Same bar as the architect lane. `scorpion_mff/` is held to 100 columns; only
 `tests/*` may exceed it. `mypy --strict` must stay clean — strict typing on a money
-path is a safety property, not a style preference. There are currently **565 tests**;
+path is a safety property, not a style preference. There are currently **585 tests**;
 they must stay green and grow.
 
 ## Invariants you may not break

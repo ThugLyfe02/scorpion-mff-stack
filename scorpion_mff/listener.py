@@ -37,6 +37,7 @@ from .health import Heartbeat, LatencyBudget
 from .killswitch import KillSwitch
 from .ledger import TRANSPORT_UNKNOWN
 from .parser import CHANNEL_IDS, parse
+from .reconcile import ReconcileReport, VenuePosition
 from .types import OrderIntent, RawMessage
 
 
@@ -288,6 +289,17 @@ class Listener:
         placed.extend(self.refresh_stops())
         self.heartbeat.beat(note="tick:expiry")
         return placed
+
+    def reconcile(self, venue: Iterable[VenuePosition],
+                  now: float | None = None) -> ReconcileReport:
+        """Check the engine's book against a venue snapshot.
+
+        Called by whoever holds the venue feed (a positions endpoint, an operator
+        upload, a broker callback). This method is deliberately a thin delegate: the
+        comparison is pure and tested in its own module, and the engine owns the
+        consequence (halt buys, keep exits).
+        """
+        return self.engine.reconcile_positions(venue, now)
 
     def _bids_for_book(self) -> dict[str, float]:
         """A bid per open contract, or no entry at all. Never a guessed price."""

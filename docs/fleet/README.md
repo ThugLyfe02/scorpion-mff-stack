@@ -75,7 +75,7 @@ different questions:
   behind a fit gate that refuses what the data cannot support.
 - **Main** — *does the hot path that will place money hold its invariants?* The
   deterministic parser → engine → broker with the reduce-only governor, the
-  correlated-book cap, the fill log, and the kill switch. 565 tests, strict types.
+  correlated-book cap, the fill log, and the kill switch. 585 tests, strict types.
 
 They must never drift into each other. The fleet keeps them separate, gated, and
 reviewable as two PRs.

@@ -202,6 +202,14 @@ def _parser() -> argparse.ArgumentParser:
     rk_val.add_argument("--path", type=Path, default=None)
     rk_val.add_argument("--json", action="store_true")
 
+    rc = sub.add_parser("reconcile",
+                        help="compare the local book with a venue snapshot; drift exits 1")
+    rc.add_argument("--snapshot", type=Path, required=True,
+                    help="JSON array of {contract_key, contracts}")
+    rc.add_argument("--fills", type=Path, default=None,
+                    help="fill log (default live/fills.jsonl)")
+    rc.add_argument("--json", action="store_true")
+
     xp = sub.add_parser("expiry", help="expiry guard: audit the corpus against the close cutoff")
     xp_sub = xp.add_subparsers(dest="expiry_cmd", required=True)
     xa = xp_sub.add_parser("audit", help="how many alerts are 0DTE, how many never closed, "
@@ -1253,6 +1261,41 @@ def cmd_risk(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reconcile(args: argparse.Namespace) -> int:
+    """The book the engine holds vs the book the venue holds. Drift is a page, not a guess."""
+    from . import exposure as exposure_mod
+    from .reconcile import ReconcileError, load_snapshot, reconcile
+
+    try:
+        venue = load_snapshot(args.snapshot)
+    except ReconcileError as exc:
+        print(f"cannot use venue snapshot: {exc}", file=sys.stderr)
+        return 2
+    fills_path = args.fills or FILL_LOG
+    fills = FillLog().replay_file(fills_path) if fills_path.exists() else []
+    local = exposure_mod.positions_from_fills(fills)
+    try:
+        report = reconcile(local, venue)
+    except ReconcileError as exc:
+        print(f"cannot reconcile: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps({"snapshot": str(args.snapshot),
+                          "report": report.to_dict()}, indent=2))
+    else:
+        print(f"reconcile | local {report.local_positions} position(s) / "
+              f"{report.local_contracts} contract(s) | venue "
+              f"{report.venue_positions} / {report.venue_contracts}")
+        if report.clean:
+            print("  CLEAN - the two books agree")
+        else:
+            print(f"  DRIFT - {len(report.drifts)} disagreement(s); halt new buys:")
+            for drift in report.drifts:
+                print(f"    {drift.kind:<18} {drift.contract_key:<28} "
+                      f"local={drift.local:<4} venue={drift.venue}")
+    return 0 if report.clean else 1
+
+
 def _money(value: float | None) -> str:
     return "n/a" if value is None else f"${value:,.2f}"
 
@@ -1275,6 +1318,7 @@ def main(argv: list[str] | None = None) -> int:
         "fuzz": cmd_fuzz,
         "exposure": cmd_exposure,
         "risk": cmd_risk,
+        "reconcile": cmd_reconcile,
         "expiry": cmd_expiry,
     }
     return handlers[args.cmd](args)
