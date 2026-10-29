@@ -1,80 +1,67 @@
 # Scorpion MFF Stack
 
-Trading-control research stack for **Scorpion Capital**: MoneyForFun Discord options signals,
-deterministic signal/replay infrastructure, and a Ross-style gapper research desk.
+Trading stack for **Scorpion Capital**: MoneyForFun Discord options hone → Robinhood Agentic, plus Ross-style gapper research desk.
 
-## Status (2026-09-08)
+## Status (2026-10-21)
 
 | Layer | State |
 |---|---|
-| Discord ingest | **V2 push-based component implemented** in `src/scorpion/ingest/discord.py` |
-| Parser / state | **Deterministic V2 implemented** with explicit ambiguity + event-sourced reducer |
-| Durable audit | **SQLite WAL event/effect/heartbeat store implemented** |
-| Execution | **Paper/shadow + review-only boundary implemented**; no autonomous live submission |
-| Backtest / signal corpus | Legacy evidence in `mff-backtest/`; correctness caveats documented |
-| Research frontier | **Path signatures built** — exact truncated signature, lead-lag transform, Levy area, and a fit gate that refuses a level-3 fit on 107 trades. See `docs/FRONTIER_7.md` |
-| Out-of-sample policy tournament | **Built** — walk-forward folds with purge/embargo, Deflated Sharpe, PBO, paired block bootstrap, and named refusals. The shipped corpus holds the incumbent: no challenger beat the baseline in any fold. See `docs/TOURNAMENT.md` |
-| Gapper scanner | Agent research only — no scanner binary |
+| Live Discord → RH executor | **Coded hot path built** — `scorpion_mff/` (Gateway → parser → state machine → RH adapter → fill log, kill switch, latency budget). **257 offline tests green.** See **`HOTPATH.md`**. Live wiring pending: RH endpoint confirmation, quote feed, Gateway token + MESSAGE_CONTENT intent. |
+| Executor backtest | **Run over every alert on record** — 93 alerts / 59 days / 4 channels. Two live-path defects found and fixed (a carried position held a concurrency slot forever; an exit could not be attributed when two positions were open). See **`BACKTEST.md`**. |
+| Ops watchdog | **Built and proven** — `watch --once` reads the heartbeat + fill log and pages the phone (same bot as the desk digest) only when the hone is down, stale, or has raised an engine alert. Delivered live (message id 21). See **`HOTPATH.md`**. |
+| Risk layer | **Built** — a versioned, **reduce-only** risk policy (`live/policy.json`), a governor that turns it into a per-entry multiplier the engine cannot exceed, and a statistics layer (expectancy with confidence intervals, shrinkage, drawdown, runs test, channel allocation). Risk state is persisted so a restart cannot forget a drawdown; `arm` refuses without a valid, fresh, non-halted policy. See **`POLICY.md`**. |
+| Execution quality (TCA) | **Built** — `tca path` measures the contract's real path on the repo's bars and **withholds aggregates it cannot support** (only 2 of 18 matched trades have both entry and exit inside coverage); it does price the *carry*: median −12.9% at the 09:30 open, 17% of contracts expire at ~zero. `tca fills` measures limit vs realised fill in bps, partials and latency, and suggests a calibrated `ask_multiple` — empty until the first live fill. See **`TCA.md`**. |
+| Adversarial hardening | **Built, and it found two real bugs** — a stochastic generator throws channel-shaped posts at the real parser and engine and checks ten invariants (no sale without a holding, no price from a percentage, no oversize book, kill switch blocks buys not exits, parser never raises...). 18,000 posts clean across six seeds, deterministic, `fuzz` exits 1 on a violation so CI can gate. Findings: a named exit for an unheld contract could flatten a different held position, and the kill-switch behaviour needed pinning. See **`HOTPATH.md`**. |
+| Backtest / signal corpus | In `mff-backtest/` (tape BT + scrapes) |
+| Gapper scanner | Agent cron + Ross skill — **no scanner binary** |
 
-The former browser/LLM cron path is retained only as operational history. It must not be treated as a
-sub-second control plane.
+## Repo layout
 
-## V2 architecture
-
-```text
-Discord Gateway MESSAGE_CREATE
-  -> immutable UTC RawDiscordMessage
-  -> durable event store
-  -> deterministic parse Entry|Add|Trim|Exit|Ignore|Ambiguous
-  -> conservative association
-  -> pure event reducer + generation/idempotency controls
-  -> durable proposed effects
-  -> paper/shadow OR explicit operator review
+```
+mff-backtest/          # tape backtest, channel IDs, trades.json, bars
+scorpion_mff/          # the hot path (parser, engine, pricing, sizing, broker, fills, ...)
+tapes/                 # recorded replay tapes (sep8.json = the 9/8 post-mortem)
+reports/               # generated artefacts (executor backtest)
+skills/                # Ross gapper skill
+config/                # agent profiles + cron routine snapshots (prompts)
+docs/HANDOFF.md        # full architecture + 9/8 failure + build target
+HOTPATH.md             # design decisions, non-changes, what is unproven
+BACKTEST.md            # the executor against 93 historical alerts
+POLICY.md              # the reduce-only risk layer + what the record says
+TCA.md                 # execution quality: what the bars proved, what fills will prove
 ```
 
-Research/chat/scanner workloads are outside this path and cannot block Discord ingestion.
+## Primary files
 
-## Start here
+1. `docs/HANDOFF.md` — start here
+2. `BACKTEST.md` — what the executor does with the record
+3. `mff-backtest/bt_full/trades.json`
+4. `mff-backtest/bt_full/run_tape_bt.py`
+5. `mff-backtest/bt_full/sep8_alerts.json`
 
-1. `docs/ARCHITECTURE_V2.md`
-2. `docs/IMPLEMENTATION_STATUS.md`
-3. `docs/BACKTEST_CORRECTNESS.md`
-4. `docs/SECURITY.md`
-5. `docs/TOURNAMENT.md`
-6. `live/RULES.lock.md`
-7. `docs/HANDOFF.md`
+## Build target (hot path) — BUILT
 
-## Development
-
-Python 3.13:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-pytest
+```
+Discord Gateway MESSAGE_CREATE (4 channel IDs)
+  → parse Entry|Exit|Ignore               scorpion_mff/parser.py
+  → state machine (1-lot pipe → size; max 2; +25% skip; no chase closed)
+                                          scorpion_mff/engine.py + sizing.py + pricing.py
+  → Robinhood Agentic order adapter       scorpion_mff/broker.py
+  → structured fill log + kill switch     scorpion_mff/fills.py + killswitch.py
 ```
 
-Runtime Discord ingest requires an authorized bot token and a strict signal-author allowlist:
+Keep LLM agents for gapper desk / ops / STOP — not sub-10s exits.
 
-```bash
-export SCORPION_DISCORD_TOKEN='...'
-export SCORPION_SIGNAL_AUTHOR_IDS='1234567890'
-export SCORPION_DB='scorpion.db'
-scorpion-ingest
-```
+Run it: `python -m scorpion_mff.cli doctor | replay tapes/sep8.json | backtest | desk |
+         tca path | tca fills | policy show | watch --once | fuzz | arm | status`.
+Details, including what is still unproven and why: **`HOTPATH.md`**.
+What the executor does with 93 real alerts, and the two defects that found: **`BACKTEST.md`**.
+The risk policy, the governor, and the expectancy/allocation statistics: **`POLICY.md`**.
+What our fills cost and what the bars did (and did not) prove: **`TCA.md`**.
 
-Do not put tokens, cookies, broker credentials, or account identifiers in Git.
+## Secrets
 
-## Historical research
-
-`mff-backtest/` contains the legacy tape/upper-bound research. Do **not** use its headline outputs as
-live sizing evidence without the corrections described in `docs/BACKTEST_CORRECTNESS.md`.
-
-## Repository security
-
-This repository contains sensitive operational information and should be private. Masking sensitive
-values in a later commit does not purge earlier Git history; see `docs/SECURITY.md`.
+Do **not** commit Robinhood tokens, Discord bot tokens, or `.env`. Channel IDs are included (guild membership still required).
 
 ## License
 

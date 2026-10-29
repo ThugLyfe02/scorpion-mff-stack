@@ -1,3 +1,4 @@
+# local environment (never the code)
 .venv/
 __pycache__/
 *.pyc
@@ -14,3 +15,12 @@ logs/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# live runtime state: this is machine state, not source. The kill switch file is
+# deliberately NOT ignored - an arm-blocking file must be visible in the tree.
+live/fills.jsonl
+live/heartbeat.json
+
+# risk state is machine state: a persisted drawdown must not be committed
+live/governor.json
+live/governor.json.tmp

@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "name": "baseline-v1",
+  "risk_unit_usd": 1500.0,
+  "daily_loss_limit_r": -2.0,
+  "daily_loss_limit_usd": null,
+  "max_drawdown_r": -6.0,
+  "ladder": [
+    {
+      "at_r": -1.0,
+      "factor": 0.5
+    },
+    {
+      "at_r": -2.0,
+      "factor": 0.0
+    }
+  ],
+  "loss_streak": [
+    {
+      "at": 2,
+      "factor": 0.5
+    },
+    {
+      "at": 3,
+      "factor": 0.0
+    }
+  ],
+  "channel_multipliers": {},
+  "session_multipliers": {},
+  "stale_after_minutes": 10080,
+  "written_utc": 1792600554.1966844,
+  "provenance": "hand-written; derived from BACKTEST.md, review before arming"
+}

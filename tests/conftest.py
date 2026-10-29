@@ -1,8 +1,23 @@
+"""Shared fixtures for the control-plane tests and the live-lane tests.
+
+The `sys.path` bootstrap makes the repo root importable without an install step
+(added by `main`); `raw_factory` is the control plane's message builder. Merging
+the two lanes must not drop either, so this file is the union, not a choice.
+"""
+
+from __future__ import annotations
+
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
 from scorpion.domain import RawDiscordMessage
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 @pytest.fixture
