@@ -186,8 +186,29 @@ The full PR#3 gate:
 ```text
 ruff check src tests            -> All checks passed
 mypy src/scorpion (strict)      -> Success: no issues found in 33 source files
-pytest                          -> 126 collected, all passing
+pytest                          -> 150 collected, all passing
 ```
+
+## Handoff: the parser pin
+
+A certificate answers *may this parser be promoted?* It does not force the parser that runs to
+be the parser the certificate measured, and it does not notice an edit after the fact. The pin
+(`parser_pin.py`, `scorpion-pin`) is the artifact that closes that seam, so a downstream lane can
+check it without importing this one:
+
+- `write` refuses a `REFUSED` certificate, refuses a certificate whose `candidate` is not the
+  parser being pinned (a valid certificate for A pinned to B is laundering), and refuses to
+  overwrite an existing pin without `--replace`;
+- the pin records the sha256 of the **module source that will run** (line endings normalised, so
+  a CRLF checkout is not drift), the corpus digest, the certificate digest and decision, the
+  criteria digest, and its own content digest;
+- `verify` re-derives every digest and reports **every** disagreement at once in a documented
+  order (`module_drift`, `corpus_drift`, `pin_corrupt`, `certificate_changed`,
+  `certificate_unverified`, `pin_stale`, `*_unreadable`); the corpus and the certificate are
+  required arguments, because a verifier that can skip evidence can be made to pass by omission;
+- exit codes are the contract: `write` 0/2, `verify` 0/1/2.
+
+Full rationale, the JSON shape and the refusal table: **`docs/PARSER_PIN.md`**.
 
 ## What this does not prove
 

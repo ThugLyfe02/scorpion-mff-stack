@@ -26,6 +26,7 @@ scorpion-health = "scorpion.cli:health_main"
 scorpion-accuracy = "scorpion.cli:accuracy_main"
 scorpion-review = "scorpion.review:review_main"
 scorpion-certify = "scorpion.certification:certify_main"
+scorpion-pin = "scorpion.parser_pin:pin_main"
 scorpion-ingest = "scorpion.runtime:ingest_main"
 
 [tool.hatch.build.targets.wheel]
