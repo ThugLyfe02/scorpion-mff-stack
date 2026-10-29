@@ -304,6 +304,15 @@ class Engine:
                 return in_channel[0]
         return None
 
+    def trading_day(self, ts: float) -> str:
+        """Public name for the ET trading-date label (see `_trading_day`).
+
+        The execution book needs the same day label the engine rolls on, so a restart
+        replays `live/execution.jsonl` onto the session it actually belongs to instead
+        of inventing a second definition of "today" from the UTC clock.
+        """
+        return self._trading_day(ts)
+
     def _trading_day(self, ts: float) -> str:
         """The ET trading date of an instant - the label the expiry book turns on.
 

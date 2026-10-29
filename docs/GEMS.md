@@ -15,7 +15,7 @@ python -m pytest --version         # if this fails, use .venv/Scripts/python.exe
 
 If the venv is not active, replace `python` with `.venv/Scripts/python.exe` (Windows)
 or `.venv/bin/python` (POSIX). `scripts/gate.sh` resolves the venv itself and is the
-single top-level check: `ruff -> mypy --strict -> pytest`, currently **589 passed**
+single top-level check: `ruff -> mypy --strict -> pytest`, currently **655 passed**
 (513 at the 3.a red-team, plus the three transport-quarantine tests added by final
 integration that close O1, plus the offline Gateway lifecycle suite).
 
@@ -39,6 +39,7 @@ integration that close O1, plus the offline Gateway lifecycle suite).
 | G14 | a daily loss limit that only fires after the loss | `python -m pytest tests/test_risk_budget.py -q` |
 | G15 | an add that bypasses the stand-down or the governor | `python -m pytest tests/test_add_safety.py -q` |
 | G16 | a book that disagrees with the venue and does not say so | `python -m pytest tests/test_reconcile.py -q` |
+| G17 | a confirmed fill that a restart, a duplicate or a partial can corrupt | `python -m pytest tests/test_execution_book.py -q` |
 
 Each gem follows the same shape: **what it is**, **the acceptance command**, **the
 invariant**, **the failure mode it buys down**, and the **3.a red-team record** for it.
@@ -481,6 +482,55 @@ book with itself and always pass.
 
 ---
 
+## G17. A confirmed fill survives a restart, a duplicate and a partial
+
+`scorpion_mff/execution_book.py` + the `book` command group. The fill log records
+decisions, `ledger.py` matches an intent to a terminal, and `reconcile.py` compares two
+books - but none of them is durable **state**. So four defects were structurally possible:
+a rejected buy holding a concurrency slot forever, a partial fill booked as the full clip
+(overstating realised P&L and the equity path), a rejected sell that had already moved the
+drawdown, and a restart that forgot every open position.
+
+**Acceptance (one command):** `python -m pytest tests/test_execution_book.py -q`
+-> 66 passed.
+
+**Invariant:** an ack carries a **cumulative** quantity, so only the delta is applied and a
+3-then-2 split realises exactly what one 5-lot realises ($250 on a 1.00 -> 1.50 move).
+Repeating the same ack applies nothing and counts as a duplicate; a *regressing* ack is
+refused, never clamped; a reject is terminal and a late reject cannot undo a fill; a sell
+larger than the lot is clamped and counted; a sell with no lot realises nothing (this book
+is long premium only, so an unheld sell is an anomaly, not a short); a fill for an order
+this book never recorded is refused (adopting an unseen execution is an operator act). A
+transport failure is `unknown`, never a terminal, so the order stays unresolved until
+`recover` settles it from a venue lookup. A torn **final** append is ignored and counted; a
+torn middle line is refused. `sync_engine` restores the engine as `baseline + confirmed
+events`, so the drawdown, the peak equity path, the closed contracts and the pipe-test
+counter all survive a restart - and a lot carried past expiry is released first, marked at
+zero and flagged `assumed_zero`.
+
+**Operator surface (all offline):**
+
+```bash
+python -m scorpion_mff.cli book show                          # the book, digest, anomalies
+python -m scorpion_mff.cli book replay                        # replay twice; exit 1 on divergence
+python -m scorpion_mff.cli book verify [--strict]             # defects; --strict fails on unresolved
+python -m scorpion_mff.cli book sync                          # restore a fresh engine from the log
+python -m scorpion_mff.cli book export                        # confirmed fills -> tca executions
+```
+
+`arm` refuses to start when any order has no venue answer (override: `--allow-unresolved`),
+because arming on a hypothesis is how a restart becomes a double entry.
+
+**Failure mode it buys down:** two truths about what is held. The engine's position book is
+a decision cache; the venue's answer is the truth; without a durable middle the two drift
+apart silently and the drift is discovered by a rejected exit at the worst moment.
+
+**What is not built:** the live venue's ack shape is still unconfirmed, so the book is
+proven offline only. `book export` exists so the first real ack prices itself through
+`tca fills` rather than being typed in by hand.
+
+---
+
 ## What we deliberately do not build
 
 These are not backlog items with an ETA. They are gates that would have to open before the
@@ -591,7 +641,7 @@ place. The corpus backtest and the 9/8 replay are unchanged (they have no transp
 The short version, in the order that fails fastest:
 
 ```bash
-./scripts/gate.sh                                            # ruff -> mypy -> pytest, 589
+./scripts/gate.sh                                            # ruff -> mypy -> pytest, 655
 python -m scorpion_mff.cli backtest                          # 93/91/405/$57,951.00
 python -m scorpion_mff.cli replay tapes/sep8.json            # 4/2/6/$211.00, 0 breaches
 python -m scorpion_mff.cli expiry audit                      # 40/93, 65/93, 0/40, 10/40, REFUSED
@@ -611,6 +661,7 @@ python -m pytest tests/test_ledger.py -q                                    # 21
 python -m pytest tests/test_ledger.py -q -k recover                         # 3
 python -m pytest tests/test_gateway.py -q                                   # 20
 python -m pytest tests/test_risk_budget.py -q                               # 24
+python -m pytest tests/test_execution_book.py -q                            # 66
 ```
 
 A failure in any of these is a gem failing, not a flaky test: every command is offline,

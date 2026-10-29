@@ -8,7 +8,9 @@ switch, and offline replay over the full alert corpus.
 deterministic, standard-library-only, fail-closed — plus the breakeven stop the trim
 armed but nothing read back (`stops.py`, opt-in via `--enforce-breakeven`), a
 mark-to-market view whose total withholds itself when the book cannot be priced
-(`marks --check`), and fill-log integrity verification (`verify`). 589 tests green,
+(`marks --check`), fill-log integrity verification (`verify`), and the confirmed-execution book
+(`execution_book.py`): cumulative acks, partials, a restart replay and an `arm` that
+refuses on an unresolved order. 655 tests green,
 `ruff` clean, `mypy --strict` clean.
 
 **Gate:** `scripts/gate.sh` — ruff → mypy `--strict` → pytest, all green.

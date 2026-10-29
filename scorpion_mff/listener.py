@@ -21,9 +21,10 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from .broker import BrokerError, QuoteProvider, TransportError, intent_key
+from .broker import Ack, BrokerError, QuoteProvider, TransportError, intent_key
 from .engine import Engine
 from .execution import BreakerState, CircuitBreaker
+from .execution_book import ExecutionBook
 from .fills import FillLog
 from .gateway import (
     GATEWAY_URL,
@@ -73,6 +74,10 @@ class Listener:
     fills: FillLog | None = None
     clock: Callable[[], float] = time.time
     breaker: CircuitBreaker = field(default_factory=CircuitBreaker)
+    # The confirmed book, when attached: intents and venue answers are folded into a
+    # durable state that survives a restart. It is optional so every offline path
+    # (replay, fuzz, the corpus) keeps running on the fill log alone.
+    execution: ExecutionBook | None = None
     processed: int = 0
     seen: dict[str, None] = field(default_factory=dict)   # message_id -> nothing
     seen_max: int = 5000                                  # bounded; oldest evicted
@@ -162,10 +167,14 @@ class Listener:
                     price=intent.limit, reason="breaker_open", accepted=False,
                     ts=now, note=key)
             return
+        # The confirmed book records what was SENT, not what was considered: the
+        # breaker refusal above never reaches a venue, so it has no place in a book
+        # of confirmed execution. From here on, every outcome is folded in.
+        booked = self._book_intent(intent, key, now)
         try:
             ack = self.broker.place(intent)
         except TransportError as exc:
-            self._on_transport_failure(intent, key, now, exc)
+            self._on_transport_failure(intent, key, now, exc, booked)
             return
         except BrokerError as exc:
             # A business reject is the venue answering: transport is working, so
@@ -177,6 +186,7 @@ class Listener:
                     event="reject", contract_key=intent.contract_key, qty=intent.qty,
                     price=intent.limit, reason=f"broker:{exc}", accepted=False,
                     ts=now, note=key)
+            self._book_reject(booked, f"broker:{exc}", now)
             return
         self.breaker.record_success()
         if self.fills is not None:
@@ -184,9 +194,10 @@ class Listener:
                 event="ack", contract_key=ack.contract_key, qty=ack.qty,
                 price=ack.price, reason=intent.reason, ts=now,
                 note=key)
+        self._book_ack(booked, ack, now)
 
     def _on_transport_failure(self, intent: OrderIntent, key: str, now: float,
-                              exc: TransportError) -> None:
+                              exc: TransportError, booked: str = "") -> None:
         """Quarantine an order the venue may or may not have: never fake a terminal.
 
         A transport error is not a rejection. It means the socket died and the answer
@@ -228,6 +239,68 @@ class Listener:
                     qty=intent.qty, price=intent.limit,
                     reason="exit_unknown:transport", accepted=False, ts=now,
                     note=f"{key}: {reason}; local book is flat, venue state is unknown")
+        self._book_unknown(booked, f"transport:{exc}", now)
+
+    # ── confirmed execution: the book behind the fill log ─────────────────────
+    #
+    # These four methods are the only place the listener touches the execution book.
+    # Each failure is turned into an `alert` row instead of an exception: the book is
+    # the durable record, but it is not the venue. A bug in bookkeeping must not abort
+    # an order that has already been sent, and it must not vanish either - `watch`
+    # pages on engine alerts, so a book that cannot write is a page, not a silence.
+    def _book_alert(self, action: str, exc: Exception) -> None:
+        if self.fills is None:
+            return
+        self.fills.record(
+            event="alert", contract_key="", qty=0, price=0.0,
+            reason=f"execution_book:{action}:{exc}", accepted=False, ts=self.clock(),
+            note="the fill log still holds the venue answer; the confirmed book does not")
+
+    def _book_intent(self, intent: OrderIntent, key: str, now: float) -> str:
+        """Book the intent before the send; return the client id the venue answers on."""
+        execution = self.execution
+        if execution is None:
+            return ""
+        channel = ""
+        position = self.engine.positions.get(intent.contract_key)
+        if position is not None:
+            channel = position.channel
+        try:
+            return execution.record_intent(intent, ts=now, channel=channel,
+                                           source_id=key).client_id
+        except Exception as exc:            # noqa: BLE001 - surfaced as an alert row
+            self._book_alert("intent", exc)
+            return ""
+
+    def _book_ack(self, booked: str, ack: Ack, now: float) -> None:
+        """Fold the venue's cumulative answer into the book (no-op without a book)."""
+        execution = self.execution
+        if execution is None or not booked:
+            return
+        try:
+            execution.apply_ack(booked, ack, ts=now)
+        except Exception as exc:            # noqa: BLE001 - surfaced as an alert row
+            self._book_alert("ack", exc)
+
+    def _book_reject(self, booked: str, reason: str, now: float) -> None:
+        """A business reject is terminal: the venue answered, and it said no."""
+        execution = self.execution
+        if execution is None or not booked:
+            return
+        try:
+            execution.reject(booked, reason=reason, ts=now)
+        except Exception as exc:            # noqa: BLE001 - surfaced as an alert row
+            self._book_alert("reject", exc)
+
+    def _book_unknown(self, booked: str, reason: str, now: float) -> None:
+        """A transport failure: the order stays OPEN so `recover` can settle it."""
+        execution = self.execution
+        if execution is None or not booked:
+            return
+        try:
+            execution.mark_unknown(booked, reason=reason, ts=now)
+        except Exception as exc:            # noqa: BLE001 - surfaced as an alert row
+            self._book_alert("unknown", exc)
 
     def refresh_stops(self) -> list[OrderIntent]:
         """Poll quotes for open positions and fire any armed breakeven stop.

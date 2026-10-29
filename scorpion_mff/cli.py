@@ -7,6 +7,7 @@
     python -m scorpion_mff.cli status
     python -m scorpion_mff.cli verify           # fill-log integrity + unresolved intents
     python -m scorpion_mff.cli recover          # resolve crash-left intents (never places)
+    python -m scorpion_mff.cli book show        # the confirmed book (acks, partials, digest)
 """
 
 from __future__ import annotations
@@ -41,6 +42,11 @@ from .types import Fill, RawMessage
 
 ROOT = Path(__file__).resolve().parent.parent
 FILL_LOG = ROOT / "live" / "fills.jsonl"
+# The confirmed-execution log: intent -> venue ack -> fill, folded into a durable book.
+# Machine state, like the fill log, and never committed (see .gitignore).
+EXECUTION_LOG = ROOT / "live" / "execution.jsonl"
+# One tca.Execution row per filled order: the shape `tca fills` measures.
+EXECUTIONS_LOG = ROOT / "live" / "executions.jsonl"
 HEARTBEAT = ROOT / "live" / "heartbeat.json"
 NO_TRADE = ROOT / "live" / "NO_TRADE"
 
@@ -83,6 +89,9 @@ def _parser() -> argparse.ArgumentParser:
                      help="clock cadence of the no-traffic tick (default 15s)")
     arm.add_argument("--max-quote-age", type=float, default=5.0,
                      help="refuse a quote older than this many seconds (default 5)")
+    arm.add_argument("--allow-unresolved", action="store_true",
+                     help="arm even when the confirmed book has an order with no venue "
+                          "answer (default: refuse until `recover` settles it)")
 
     sub.add_parser("status", help="kill-switch state + tail of the fill log")
 
@@ -209,6 +218,38 @@ def _parser() -> argparse.ArgumentParser:
     rc.add_argument("--fills", type=Path, default=None,
                     help="fill log (default live/fills.jsonl)")
     rc.add_argument("--json", action="store_true")
+
+    bk = sub.add_parser("book",
+                        help="confirmed execution book: what the venue answered, replayable")
+    bk_sub = bk.add_subparsers(dest="book_cmd", required=True)
+    bk_show = bk_sub.add_parser("show", help="the confirmed book, replayed from its log")
+    bk_show.add_argument("--path", type=Path, default=None,
+                         help="execution log (default live/execution.jsonl)")
+    bk_show.add_argument("--json", action="store_true")
+    bk_replay = bk_sub.add_parser(
+        "replay", help="replay the log twice and prove the two books are identical")
+    bk_replay.add_argument("--path", type=Path, default=None)
+    bk_replay.add_argument("--json", action="store_true")
+    bk_verify = bk_sub.add_parser(
+        "verify", help="structural defects in the log; --strict also fails on unresolved")
+    bk_verify.add_argument("--path", type=Path, default=None)
+    bk_verify.add_argument("--strict", action="store_true",
+                           help="exit 1 when an order has no venue answer (cron mode)")
+    bk_verify.add_argument("--json", action="store_true")
+    bk_sync = bk_sub.add_parser(
+        "sync", help="rebuild a fresh engine from confirmed state (the restart proof)")
+    bk_sync.add_argument("--path", type=Path, default=None)
+    bk_sync.add_argument("--now", type=float, default=None,
+                         help="epoch seconds to restore at (default: now)")
+    bk_sync.add_argument("--json", action="store_true")
+    bk_export = bk_sub.add_parser(
+        "export", help="write confirmed fills as tca executions, so `tca fills` prices real fills")
+    bk_export.add_argument("--path", type=Path, default=None)
+    bk_export.add_argument("--executions", type=Path, default=None,
+                           help="target file (default live/executions.jsonl)")
+    bk_export.add_argument("--replace", action="store_true",
+                           help="overwrite an existing executions file")
+    bk_export.add_argument("--json", action="store_true")
 
     xp = sub.add_parser("expiry", help="expiry guard: audit the corpus against the close cutoff")
     xp_sub = xp.add_subparsers(dest="expiry_cmd", required=True)
@@ -412,23 +453,58 @@ def cmd_arm(args: argparse.Namespace) -> int:
     broker = RobinhoodAgenticBroker(dry_run=not live)
     expiry_guard = not bool(args.no_expiry_guard)
     gateway = WebsocketGateway(token=token)
+    engine = Engine(
+        config=EngineConfig(enforce_breakeven=bool(args.enforce_breakeven),
+                            enforce_expiry=expiry_guard,
+                            expiry_cutoff_minutes=int(args.expiry_cutoff),
+                            max_quote_age_s=args.max_quote_age),
+        fills=FillLog(path=FILL_LOG, fsync=False),
+        governor=make_governor(risk_policy),
+        risk_budget=risk_budget,
+        exposure_limits=exposure_limits,
+        risk_state=risk_state, risk_state_path=state_path)
+
+    # The confirmed book is restored BEFORE the first message is handled. The engine's
+    # positions are a decision cache; this is the state the venue actually confirmed,
+    # so a restart resumes holding what it holds instead of an empty book - and it
+    # cannot forget a realised drawdown, because the book carries the baseline.
+    from .execution_book import ExecutionBook, ExecutionBookError
+
+    execution_path = EXECUTION_LOG
+    try:
+        execution = ExecutionBook.load(execution_path, day_of=engine.trading_day)
+    except ExecutionBookError as exc:
+        print(f"refusing to arm: the confirmed execution log at {execution_path} cannot "
+              f"be trusted: {exc}", file=sys.stderr)
+        return 1
+    execution.ensure_baseline(
+        equity_usd=risk_state.equity_usd, peak_equity_usd=risk_state.peak_equity_usd,
+        day=risk_state.day, realized_today_usd=risk_state.realized_today_usd,
+        trades_today=risk_state.trades_today,
+        consecutive_losses=risk_state.consecutive_losses, ts=time.time())
+    restored = execution.sync_engine(engine, time.time())
+    if restored.unresolved and not args.allow_unresolved:
+        # An order with no venue answer means the book is a hypothesis. Arming on a
+        # hypothesis is how a restart becomes a double entry, so this is a refusal:
+        # `recover` settles it from a lookup, and `--allow-unresolved` is the explicit
+        # override for an operator who has checked by hand.
+        print(f"refusing to arm: {restored.unresolved} order(s) have no venue answer "
+              f"(run `book verify` then `recover`) - pass --allow-unresolved to override",
+              file=sys.stderr)
+        for order in execution.unresolved_orders():
+            print(f"  {order.state:<8} {order.action:<4} {order.contract_key:<28} "
+                  f"{order.filled_qty}/{order.intent.qty} {order.client_id}", file=sys.stderr)
+        return 1
+
     listener = Listener(
         transport=gateway,
-        engine=Engine(
-            config=EngineConfig(enforce_breakeven=bool(args.enforce_breakeven),
-                                 enforce_expiry=expiry_guard,
-                                 expiry_cutoff_minutes=int(args.expiry_cutoff),
-                                 max_quote_age_s=args.max_quote_age),
-            fills=FillLog(path=FILL_LOG, fsync=False),
-            governor=make_governor(risk_policy),
-            risk_budget=risk_budget,
-            exposure_limits=exposure_limits,
-            risk_state=risk_state, risk_state_path=state_path),
+        engine=engine,
         broker=broker,
         quotes=quotes,
         budget=LatencyBudget(),
         heartbeat=Heartbeat(path=HEARTBEAT),
         kill=kill,
+        execution=execution,
         tick_s=float(args.tick_s),
     )
 
@@ -453,6 +529,15 @@ def cmd_arm(args: argparse.Namespace) -> int:
           f"daily stop ${risk_policy.daily_loss_limit_usd_effective() or 0:,.0f}) | "
           f"equity ${risk_state.equity_usd:,.2f} | peak ${risk_state.peak_equity_usd:,.2f}")
     print(f"spread | gate {_spread_gate_text()}")
+    print(f"book  | {restored.positions} confirmed position(s) / {restored.contracts} "
+          f"contract(s) | realised ${restored.realized_usd:,.2f} | "
+          f"{restored.unresolved} unresolved | digest {execution.digest()[:16]}")
+    if restored.expired:
+        print(f"       {restored.expired} carried lot(s) expired before this arm and were "
+              f"released (marked at zero; see `book show`)")
+    if restored.unresolved:
+        print(f"       armed with {restored.unresolved} unresolved order(s) "
+              f"(--allow-unresolved): the venue state for them is still unknown")
     if risk_budget is None:
         print("budget | OFF (no live/risk-budget.json; worst-case day is unbounded)")
     else:
@@ -1296,6 +1381,163 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     return 0 if report.clean else 1
 
 
+def cmd_book(args: argparse.Namespace) -> int:
+    """The confirmed book: what the venue answered, rebuilt from an append-only log.
+
+    The fill log records *decisions*; this book records *confirmed executions*. It is
+    the difference between "we decided to sell" and "the venue says we sold 3 of 5".
+    Every subcommand is offline: nothing here places, retries or cancels.
+
+    Exit codes follow the rest of the operator surface: 0 clean, 1 a defect (or, with
+    `--strict`, an unresolved order), 2 a log that cannot be used as evidence.
+    """
+    from .execution_book import ExecutionBook, ExecutionBookError, utc_day
+
+    path = args.path or EXECUTION_LOG
+    engine = Engine() if args.book_cmd == "sync" else None
+    # The day key must match the engine's ET trading day, or a 20:00 ET settle is
+    # filed under tomorrow. `load` only groups events; it never invents one.
+    day_of = engine.trading_day if engine is not None else utc_day
+    try:
+        book = ExecutionBook.load(path, day_of=day_of)
+    except ExecutionBookError as exc:
+        print(f"cannot use the execution log at {path}: {exc}", file=sys.stderr)
+        return 2
+
+    if args.book_cmd == "show":
+        if args.json:
+            print(json.dumps({"path": str(path), "digest": book.digest(),
+                              "book": book.snapshot(),
+                              "unresolved": [o.to_dict() for o in book.unresolved_orders()]},
+                             indent=2))
+            return 0
+        print(book.report_text())
+        print(f"  log      {path}")
+        return 0
+
+    if args.book_cmd == "replay":
+        try:
+            again = ExecutionBook.load(path, day_of=day_of)
+        except ExecutionBookError as exc:          # pragma: no cover - first load checked
+            print(f"cannot replay the execution log: {exc}", file=sys.stderr)
+            return 2
+        same = book.digest() == again.digest()
+        if args.json:
+            print(json.dumps({"path": str(path), "identical": same,
+                              "digest": book.digest(), "replay_digest": again.digest(),
+                              "events_replayed": len(book.orders) + len(book.fills),
+                              "torn_lines": book.torn_lines}, indent=2))
+            return 0 if same else 1
+        print(f"replay | {path}")
+        print(f"  digest        {book.digest()}")
+        print(f"  replayed      {again.digest()}")
+        print(f"  orders        {len(book.orders)} | fills {len(book.fills)} | "
+              f"trades {len(book.realized)}")
+        if book.torn_lines:
+            print(f"  torn lines    {book.torn_lines} (final append only, ignored)")
+        print("  IDENTICAL - the same log rebuilds the same book" if same else
+              "  DIVERGED - replay is not deterministic; do not trade on this log")
+        return 0 if same else 1
+
+    if args.book_cmd == "verify":
+        problems = book.problems()
+        unresolved = book.unresolved_orders()
+        unknown = book.unknown_orders()
+        failed = bool(problems) or (bool(args.strict) and bool(unresolved))
+        if args.json:
+            print(json.dumps({"path": str(path), "ok": not failed,
+                              "problems": problems,
+                              "unresolved": [o.to_dict() for o in unresolved],
+                              "unknown": [o.client_id for o in unknown],
+                              "anomalies": book.snapshot()["anomalies"],
+                              "duplicates": book.duplicates,
+                              "torn_lines": book.torn_lines}, indent=2))
+            return 1 if failed else 0
+        print(f"execution log: {len(book.orders)} order(s) at {path}")
+        for problem in problems:
+            print(f"  PROBLEM {problem}")
+        if unresolved:
+            print(f"{len(unresolved)} unresolved order(s) - sent, no venue answer:")
+            for order in unresolved:
+                cause = f" [transport unknown: {order.last_unknown}]" if order.unknown else ""
+                print(f"  UNRESOLVED {order.state:<8} {order.action:<4} "
+                      f"{order.contract_key:<28} {order.filled_qty}/{order.intent.qty} "
+                      f"key={order.client_id}{cause}")
+        if book.anomalies:
+            print(f"  anomalies {dict(sorted(book.anomalies.items()))}")
+        if book.duplicates:
+            print(f"  duplicate answers ignored: {book.duplicates}")
+        if book.torn_lines:
+            print(f"  one torn final append ignored: {book.torn_lines}")
+        if failed:
+            if problems:
+                print(f"{len(problems)} problem(s): the book cannot be trusted as-is")
+            else:
+                print("unresolved orders: settle them with `recover` before arming")
+            return 1
+        if unresolved:
+            print("structurally intact; unresolved orders are in flight or awaiting "
+                  "`recover` (use --strict to fail on them)")
+        else:
+            print("intact: every order has a terminal, lots are consistent, "
+                  "realised total equals its trades")
+        return 0
+
+    if args.book_cmd == "sync":
+        assert engine is not None                     # constructed above for day_of
+        report = book.sync_engine(engine, args.now if args.now is not None else time.time())
+        if args.json:
+            print(json.dumps({"path": str(path), "digest": book.digest(),
+                              "restored": report.to_dict(),
+                              "positions": [p.contract_key for p in engine.open_positions],
+                              "realized_usd": engine.stats.realized_usd,
+                              "governor": engine.governor_state.to_dict()}, indent=2))
+            return 0
+        print(f"sync | restored {report.positions} position(s) / {report.contracts} "
+              f"contract(s) onto day {report.day}")
+        print(f"  realised      ${report.realized_usd:,.2f} | entries today "
+              f"{report.entries_today} | settles today {report.trades_today}")
+        if report.expired:
+            print(f"  expired       {report.expired} carried lot(s) released before the "
+                  f"restore (a dead contract must not hold a slot)")
+        if report.unresolved:
+            print(f"  unresolved    {report.unresolved} order(s) with no venue answer - "
+                  f"run `recover` before arming")
+        for position in engine.open_positions:
+            print(f"  POSITION  {position.contract_key:<28} {position.contracts:>3} @ "
+                  f"{position.avg_price:g}  {position.channel}")
+        print(f"  digest        {book.digest()[:16]}")
+        return 0
+
+    # export: the confirmed fills, in the shape `tca fills` measures
+    from . import tca as tca_mod
+
+    rows = book.execution_rows()
+    target = args.executions or EXECUTIONS_LOG
+    if not rows:
+        print("no confirmed fills yet - nothing to export (this is not an error)")
+        return 0
+    if target.exists() and target.stat().st_size and not args.replace:
+        print(f"refusing to overwrite {target}: it already holds executions. "
+              f"Re-run with --replace if this is the same book.", file=sys.stderr)
+        return 2
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if args.replace:
+        target.write_text("", encoding="utf-8")
+    log = tca_mod.ExecutionLog(path=target)
+    for row in rows:
+        log.record(row)
+    partials = sum(1 for row in rows if row.fill_ratio < 1.0)
+    if args.json:
+        print(json.dumps({"source": str(path), "target": str(target), "executions": len(rows),
+                          "partials": partials}, indent=2))
+        return 0
+    print(f"exported {len(rows)} confirmed fill(s) -> {target} ({partials} partial)")
+    print("  next: `tca fills` measures them; it still refuses to suggest an "
+          "ask_multiple under ten priced fills")
+    return 0
+
+
 def _money(value: float | None) -> str:
     return "n/a" if value is None else f"${value:,.2f}"
 
@@ -1319,6 +1561,7 @@ def main(argv: list[str] | None = None) -> int:
         "exposure": cmd_exposure,
         "risk": cmd_risk,
         "reconcile": cmd_reconcile,
+        "book": cmd_book,
         "expiry": cmd_expiry,
     }
     return handlers[args.cmd](args)

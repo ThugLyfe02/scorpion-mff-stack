@@ -192,7 +192,10 @@ state-machine transition, the fill log, the kill switch, the latency budget,
 the HTTP order shape (against a real local server: idempotency key, retry ladder,
 429 honouring `retry_after`, token never in an error), and the 9/8 replay. Since the
 PR#1 ports, the ET calendar, the 0DTE cutoff matrix, the one-probe breaker, the tri-state
-ledger, and `recover` are also proven offline; `docs/GEMS.md` is the one-command index.
+ledger, and `recover` are also proven offline. Since the confirmed-execution book, the
+cumulative ack, the split fill, the oversell clamp, the restart replay and the
+`sync_engine` drawdown restore are proven offline too - 655 tests, `docs/GEMS.md` is the
+one-command index.
 
 **Not yet proven — needs your credentials or a decision:**
 
@@ -216,11 +219,12 @@ ledger, and `recover` are also proven offline; `docs/GEMS.md` is the one-command
 5. **Automatic venue-side reconciliation (3.a O2).** A transport-failed order is now
    quarantined rather than closed with a fake `reject`: the intent stays unresolved, an
    unknown **exit** pages immediately (`exit_unknown:transport`), `verify` names the
-   ambiguity, and `recover` settles it from a venue lookup. What does not exist is an
-   automatic book-vs-venue **drift halt** — there is no venue positions snapshot to compare
-   against on a schedule, so a human (or `verify`/`recover`) must act on the page. This is
-   unported, not hidden; do not "fix" it by making `recover` retry. See `docs/GEMS.md` for
-   the recorded risk and the gate that would have to open.
+   ambiguity, and `recover` settles it from a venue lookup. The confirmed book adds the
+   durable side of the same story: an order with no venue answer stays `PENDING`,
+   `arm` refuses to start on it, and `book verify --strict` fails on it. What still does
+   not exist is the venue **positions feed** and a scheduled drift halt - `reconcile`
+   compares a snapshot a human or an adapter supplies. That is unported, not hidden; do
+   not "fix" it by making `recover` retry.
 
 ## Defects found and fixed (why the replay harness and a second opinion exist)
 
@@ -464,6 +468,61 @@ The operator surface is `reconcile --snapshot SNAP`: exit 0 clean, 1 drift (a pa
 2 malformed. The venue *feed* is not built; the snapshot format is
 `live/venue-snapshot.example.json`, and requiring it is deliberate - deriving the venue
 side from the fill log would compare the book with itself and always pass.
+
+## Confirmed execution: the durable book (`execution_book.py`)
+
+Reconciliation compares two books; the fill log records decisions; the ledger matches an
+intent to a terminal. None of them is **state**. Nothing in the stack could answer "what
+does the venue's answer say we hold, and how much did we realise?" after a restart, so
+four defects were structurally possible: a rejected buy holding a concurrency slot
+forever, a partial fill booked as the full clip (overstating realised P&L and equity), a
+rejected sell that had already moved the drawdown, and a restart that forgot every open
+position.
+
+`scorpion_mff/execution_book.py` is that state. It is append-only (`live/execution.jsonl`,
+seven event kinds), replayable, and it is the only thing the engine's book is synced
+*from* at arm time.
+
+| Invariant | Why it costs money when wrong | Test |
+|---|---|---|
+| An ack's `qty` is **cumulative**; only the delta is applied | a 3-then-2 split booked as 3+2 is 6 contracts and 2x the realised R | `test_a_second_ack_applies_only_the_delta_and_averages_the_price` |
+| An identical repeat ack applies 0 and is counted | a redelivered broker response becomes a double fill | `test_an_identical_ack_cannot_double_fill` |
+| A regressing ack is refused, never clamped | a smaller cumulative means a reused id or a corrupt log | `test_a_regressing_ack_is_refused_rather_than_clamped` |
+| A reject is terminal; a late reject cannot undo a fill | the venue did execute, whatever the cancel said | `test_a_late_reject_cannot_undo_a_full_fill` |
+| A sell larger than the lot is clamped and counted | a negative lot or invented contracts | `test_a_sell_larger_than_the_lot_is_clamped_and_counted` |
+| A sell with no lot realises nothing | this book is long premium only; a short would be a lie about risk | `test_a_sell_with_no_lot_invents_nothing` |
+| A fill with no intent is refused | adopting an unseen execution is an operator act, not an auto-create | `test_a_fill_with_no_intent_is_refused` |
+| A transport failure is `unknown`, never a terminal | a reject for a send that may have arrived hides the order from `recover` | `test_a_restart_mid_send_leaves_the_order_unresolved` |
+| A torn **last** line is ignored; a torn middle line is refused | accepting mid-history corruption silently discards confirmed fills | `test_corruption_in_the_middle_is_refused` |
+| `sync_engine` = `baseline + confirmed events` | a restart that resets a drawdown is a max-drawdown rule that does not exist | `test_sync_engine_restores_positions_and_does_not_erase_a_drawdown` |
+| A lot carried past expiry is released first | a dead contract holding a slot is the concurrency bug with a restart in front of it | `test_sync_engine_expires_a_lot_the_market_already_took` |
+| A trim arms the breakeven stop on the **confirmed** lot | the stop `stops.py` enforces must be the one the fill created | `test_a_trim_arms_the_breakeven_stop_on_the_confirmed_lot` |
+
+The four operator commands, all offline:
+
+```bash
+python -m scorpion_mff.cli book show      # the book, its digest, its anomalies
+python -m scorpion_mff.cli book replay    # replay twice; exit 1 if the digests differ
+python -m scorpion_mff.cli book verify    # structural defects; --strict fails on unresolved
+python -m scorpion_mff.cli book sync      # restore a fresh engine from confirmed state
+python -m scorpion_mff.cli book export    # confirmed fills -> tca.Execution rows for `tca fills`
+```
+
+Two decisions are worth naming because they are refusals, not features:
+
+* **`arm` refuses when an order has no venue answer.** An unresolved order means the book
+  is a hypothesis, and arming on a hypothesis is how a restart becomes a double entry.
+  `recover` settles it from a lookup; `--allow-unresolved` is the explicit, visible
+  override.
+* **The expiry assumption is stated, not implied.** With no settlement feed, a carried
+  long is marked at **zero** - the maximum loss - and flagged `assumed_zero` in the log.
+  `assume_zero=False` releases the slot without manufacturing P&L and counts
+  `expired_unsettled`, which is the operator's cue to reconcile.
+
+What this does **not** claim: no real venue fill has been booked yet, so the book is
+proven offline (66 tests) and unproven against Robinhood's ack shape. The `tca.Execution`
+export exists so that the first real ack prices itself through `tca fills` instead of
+being entered by hand.
 
 ## Adversarial hardening (`fuzz`)
 

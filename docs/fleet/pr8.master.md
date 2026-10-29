@@ -7,7 +7,7 @@ Measured baseline on 2026-10-29:
 
 ```text
 drift vs main     11 ahead, 0 behind
-gate               ruff clean · mypy --strict clean (30 files) · 589 passed
+gate               ruff clean · mypy --strict clean (31 files) · 655 passed
 live wiring        RH order endpoint unconfirmed · quote feed unconfigured · Gateway token absent
 ```
 
@@ -61,8 +61,19 @@ GEMS entry — never imported, never copied wholesale.
 
 The lane is offline-proven and live-unproven. The next three moves convert offline
 proof into execution truth, in dependency order. Do not start move 3 before move 2.
+**Move 1 is built** (`scorpion_mff/execution_book.py`, gem G17); move 2 is next.
 
 ### Move 1 — make confirmed execution the authority (not the engine's memory)
+
+**Status: BUILT.** `scorpion_mff/execution_book.py` (G17, 66 tests) is the durable
+middle this section asked for: an append-only `live/execution.jsonl` replayed into a
+book, a cumulative ack that applies only the delta, a repeat ack that applies nothing,
+a regressing ack that is refused, an oversell that is clamped and counted, a
+transport failure that stays `unknown` (so `recover` can settle it), and `sync_engine`
+that restores the engine as `baseline + confirmed events`. `arm` refuses to start on an
+unresolved order and `book export` turns the first real ack into `tca.Execution` rows.
+What is still open is exactly the credential-shaped part: no real ack has been booked,
+so the venue's field names remain unconfirmed.
 
 Today the engine's position book is a decision cache; the broker is the filler; the
 ledger is tri-state. What is still missing is the *durable* middle: intent → ack →

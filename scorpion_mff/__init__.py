@@ -24,6 +24,7 @@ Layering, all stdlib:
     ledger    - intent -> terminal matching; a transport failure stays unresolved
     risk      - pre-trade worst-case-loss budget; shrinks size, never grows it
     reconcile - engine book vs venue book; drift halts buys, never exits
+    execution_book - confirmed execution state: cumulative acks, partials, restart replay
 
 Everything except the live Gateway transport and the RH HTTP call is pure and
 unit-tested offline. `listener.WebsocketGateway` needs the optional `websockets`
