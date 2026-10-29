@@ -26,7 +26,7 @@ import json
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -326,6 +326,187 @@ class Certificate:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(self.to_json() + "\n", encoding="utf-8")
         return target
+
+
+@dataclass(frozen=True, slots=True)
+class CertificateVerification:
+    """The result of reading a certificate back before acting on it.
+
+    A certificate is a claim about a corpus that was true when it was written.
+    Verification asks the questions the file cannot answer for itself: is the
+    content still the content that was digested, is it recent enough to describe
+    the corpus being promoted today, and was it issued for THIS candidate and
+    baseline rather than another pair? Any failure refuses the promotion.
+    """
+
+    ok: bool
+    reasons: tuple[str, ...]
+    digest: str
+    age_hours: float | None
+    candidate: str
+    baseline: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "reasons": list(self.reasons),
+            "digest": self.digest,
+            "age_hours": round(self.age_hours, 4) if self.age_hours is not None else None,
+            "candidate": self.candidate,
+            "baseline": self.baseline,
+        }
+
+
+def load_certificate(path: str | Path) -> Certificate:
+    """Read a written certificate without trusting its fields.
+
+    The digest is kept as data and re-derived by `verify_certificate`; this
+    loader only enforces the shape needed to recompute it. A missing or
+    unreadable file is a certification error, not a silent "no certificate".
+    """
+    target = Path(path)
+    try:
+        raw: object = json.loads(target.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise CertificationError("certificate_not_found", str(target)) from None
+    except OSError as exc:
+        raise CertificationError("certificate_unreadable", f"{target}: {exc}") from None
+    except json.JSONDecodeError as exc:
+        raise CertificationError("certificate_not_json", f"{target}: {exc}") from None
+    if not isinstance(raw, dict):
+        raise CertificationError("certificate_not_object", str(target))
+    digest = raw.pop("digest", "")
+    if not isinstance(digest, str) or not digest:
+        raise CertificationError("certificate_missing_digest", str(target))
+    decision = raw.get("decision")
+    reasons = raw.get("reasons")
+    if not isinstance(decision, str) or not isinstance(reasons, list):
+        raise CertificationError("certificate_malformed", str(target))
+    return Certificate(
+        decision=decision,
+        certified=decision == "CERTIFIED" and not reasons,
+        reasons=tuple(str(item) for item in reasons),
+        digest=digest,
+        payload=raw,
+    )
+
+
+def certificate_digest(payload: Mapping[str, Any]) -> str:
+    """Recompute the content digest exactly as `certify` wrote it.
+
+    `generated_utc` is excluded because two runs over the same evidence at
+    different times are the same claim; `digest` is excluded because it is the
+    output. Everything else - metrics, corpus counts, criteria, segments - is
+    identity.
+    """
+    body = {key: value for key, value in payload.items()
+            if key not in {"generated_utc", "digest"}}
+    return hashlib.sha256(_canonical(body).encode()).hexdigest()
+
+
+def verify_certificate(
+    certificate: Certificate,
+    *,
+    now: datetime | None = None,
+    max_age: timedelta = timedelta(hours=168),
+    future_skew: timedelta = timedelta(minutes=5),
+    expected_candidate: str | None = None,
+    expected_baseline: str | None = None,
+    require_certified: bool = True,
+) -> CertificateVerification:
+    """Verify a certificate before a promotion may rely on it.
+
+    Refusals, in the order an operator should read them:
+
+      * `digest_mismatch` - the file was edited after it was issued;
+      * `not_certified` / `carries_refusals` - the certificate says no;
+      * `generated_utc:*` - an unreadable, naive, or future clock;
+      * `stale:*` - older than the promotion window;
+      * `candidate_mismatch` / `baseline_mismatch` - issued for another pair;
+      * `corpus:*` - impossible counts or parser errors inside the evidence;
+      * `segment_regression:*` - the aggregate was bought with a regression.
+    """
+    reasons: list[str] = []
+    payload = certificate.payload
+    schema = payload.get("schema")
+    if schema != "scorpion.certification/1":
+        reasons.append(f"schema:{schema!r}")
+
+    recomputed = certificate_digest(payload)
+    if recomputed != certificate.digest:
+        reasons.append("digest_mismatch")
+
+    if require_certified:
+        if certificate.decision != "CERTIFIED" or not certificate.certified:
+            reasons.append("not_certified")
+        if certificate.reasons:
+            reasons.append("carries_refusals")
+
+    candidate = str(payload.get("candidate") or "")
+    baseline = str(payload.get("baseline") or "")
+    if expected_candidate is not None and candidate != expected_candidate:
+        reasons.append(f"candidate_mismatch:{candidate!r}!={expected_candidate!r}")
+    if expected_baseline is not None and baseline != expected_baseline:
+        reasons.append(f"baseline_mismatch:{baseline!r}!={expected_baseline!r}")
+
+    current = now or datetime.now(UTC)
+    generated_raw = payload.get("generated_utc")
+    age_hours: float | None = None
+    try:
+        if not isinstance(generated_raw, str):
+            raise ValueError("not a string")
+        generated = datetime.fromisoformat(generated_raw)
+    except ValueError as exc:
+        reasons.append(f"generated_utc:unreadable:{exc}")
+    else:
+        if generated.tzinfo is None:
+            reasons.append("generated_utc:naive")
+        else:
+            age = current - generated
+            age_hours = age.total_seconds() / 3600.0
+            if age < -future_skew:
+                reasons.append(f"generated_utc:future:{-age_hours:.2f}h")
+            if age > max_age:
+                reasons.append(f"stale:{age_hours:.2f}h>{max_age.total_seconds() / 3600:.2f}h")
+
+    corpus = payload.get("corpus")
+    if not isinstance(corpus, Mapping):
+        reasons.append("corpus:missing")
+    else:
+        cases = _count(corpus.get("cases"))
+        paired = _count(corpus.get("paired"))
+        adjudicated = _count(corpus.get("adjudicated"))
+        errors = corpus.get("errors")
+        if cases < 1:
+            reasons.append("corpus:empty")
+        if paired > cases or adjudicated > paired:
+            reasons.append(
+                f"corpus:impossible_counts:cases={cases},paired={paired},"
+                f"adjudicated={adjudicated}"
+            )
+        if isinstance(errors, list) and errors:
+            reasons.append(f"corpus:parser_errors:{len(errors)}")
+
+    segments = payload.get("segments")
+    if isinstance(segments, Mapping):
+        regressions = segments.get("regressions")
+        if isinstance(regressions, list) and regressions:
+            reasons.append(f"segment_regression:{len(regressions)}")
+
+    return CertificateVerification(
+        ok=not reasons,
+        reasons=tuple(reasons),
+        digest=certificate.digest,
+        age_hours=age_hours,
+        candidate=candidate,
+        baseline=baseline,
+    )
+
+
+def _count(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return -1
+    return value
 
 
 def _canonical(payload: Any) -> str:
@@ -811,8 +992,7 @@ def certify(
             "the digest is content identity, not a signature: this system has no key management",
         ],
     }
-    digest_payload = {key: value for key, value in payload.items() if key != "generated_utc"}
-    digest = hashlib.sha256(_canonical(digest_payload).encode()).hexdigest()
+    digest = certificate_digest(payload)
     return Certificate(
         decision=str(payload["decision"]),
         certified=not reasons,
@@ -872,7 +1052,7 @@ def certify_main(argv: list[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(prog="scorpion-certify")
-    parser.add_argument("--corpus", required=True, help="JSONL or JSON array of raw messages")
+    parser.add_argument("--corpus", default="", help="JSONL or JSON array of raw messages")
     parser.add_argument("--db", default="", help="optional store with adjudications")
     parser.add_argument(
         "--baseline",
@@ -886,7 +1066,38 @@ def certify_main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--out", default="")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--verify",
+        default="",
+        metavar="CERT",
+        help="verify a written certificate before a promotion relies on it",
+    )
+    parser.add_argument(
+        "--max-age-hours",
+        type=float,
+        default=168.0,
+        help="maximum certificate age for --verify (default 168 = 7 days)",
+    )
+    parser.add_argument("--expect-candidate", default="")
+    parser.add_argument("--expect-baseline", default="")
     args = parser.parse_args(argv)
+    if args.verify:
+        try:
+            written = load_certificate(args.verify)
+            result = verify_certificate(
+                written,
+                max_age=timedelta(hours=args.max_age_hours),
+                expected_candidate=args.expect_candidate or None,
+                expected_baseline=args.expect_baseline or None,
+            )
+        except CertificationError as error:
+            print(json.dumps({"ok": False, "error": error.code,
+                              "detail": error.detail}))
+            return 2
+        print(json.dumps(result.to_dict(), indent=2))
+        return 0 if result.ok else 1
+    if not args.corpus:
+        parser.error("--corpus is required unless --verify is used")
     try:
         cases = load_corpus(args.corpus)
         adjudications: dict[str, tuple[EventKind, str | None]] = {}

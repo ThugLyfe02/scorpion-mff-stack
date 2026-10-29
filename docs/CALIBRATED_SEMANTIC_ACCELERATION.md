@@ -137,7 +137,10 @@ closes that gap:
   action escalations, calibration error, risk coverage, per-channel/per-rule parity and the
   downstream semantic state/effect multiset all pass; an aggregate gain cannot buy a segment
   regression, and an underpowered segment is reported rather than counted as a pass;
-* the certificate is canonically serialised and digested, with the refusal reasons named.
+* the certificate is canonically serialised and digested, with the refusal reasons named;
+* `load_certificate` + `verify_certificate` read it back before a promotion relies on it: a
+tampered digest, a stale or future-dated timestamp, a certificate issued for another parser pair,
+impossible corpus counts, or a segment regression all refuse with a named reason.
 
 See `docs/SEMANTIC_CONTROL_PLANE.md` for the gates and `scorpion-review` / `scorpion-certify`.
 Neither component has execution authority.

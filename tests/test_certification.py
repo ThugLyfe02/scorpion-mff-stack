@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -19,12 +19,14 @@ from scorpion.certification import (
     calibration_report,
     certify,
     certify_main,
+    load_certificate,
     load_corpus,
     load_parser,
     mcnemar_exact,
     render,
     risk_coverage,
     segment_report,
+    verify_certificate,
 )
 from scorpion.config import CHANNELS
 from scorpion.domain import EventKind, SignalEvent
@@ -440,3 +442,116 @@ def test_segment_report_refuses_an_impossible_floor():
         segment_report((), min_samples=0)
     with pytest.raises(CertificationError, match="bad_max_segment_accuracy_drop"):
         segment_report((), max_accuracy_drop=1.5)
+
+
+# ── a certificate is only useful if it can be read back before it is acted on ──
+def _certified(raw_factory):
+    return certify(
+        _corpus(raw_factory),
+        baseline=ParserSpec("baseline", parse_message_with_evidence),
+        candidate=ParserSpec("candidate", _candidate),
+        criteria=CertificationCriteria(min_adjudicated_samples=50),
+        generated_at=BASE,
+    )
+
+
+def test_a_written_certificate_verifies_and_reports_its_age(raw_factory):
+    certificate = _certified(raw_factory)
+    result = verify_certificate(certificate, now=datetime(2026, 9, 9, 14, tzinfo=UTC))
+    assert result.ok is True
+    assert result.reasons == ()
+    assert result.age_hours == pytest.approx(24.0)
+    assert result.candidate == "candidate"
+
+
+def test_an_edited_certificate_is_refused_by_the_digest(raw_factory):
+    certificate = _certified(raw_factory)
+    payload = json.loads(json.dumps(certificate.payload, default=str))
+    payload["metrics"]["candidate"]["accuracy"] = 0.0
+    tampered = replace(certificate, payload=payload)
+    result = verify_certificate(tampered, now=datetime(2026, 9, 9, tzinfo=UTC))
+    assert result.ok is False
+    assert "digest_mismatch" in result.reasons
+
+
+def test_a_stale_certificate_is_refused(raw_factory):
+    certificate = _certified(raw_factory)
+    result = verify_certificate(
+        certificate,
+        now=datetime(2026, 10, 1, tzinfo=UTC),
+        max_age=timedelta(days=7),
+    )
+    assert result.ok is False
+    assert any(reason.startswith("stale:") for reason in result.reasons)
+
+
+def test_a_certificate_issued_for_another_pair_is_refused(raw_factory):
+    certificate = _certified(raw_factory)
+    result = verify_certificate(
+        certificate,
+        now=datetime(2026, 9, 9, tzinfo=UTC),
+        expected_candidate="a.different.parser",
+    )
+    assert result.ok is False
+    assert any(reason.startswith("candidate_mismatch:") for reason in result.reasons)
+
+
+def test_a_refused_certificate_cannot_be_read_as_permission(raw_factory):
+    certificate = certify(
+        _corpus(raw_factory)[:5],
+        baseline=ParserSpec("baseline", parse_message_with_evidence),
+        candidate=ParserSpec("candidate", _candidate),
+        criteria=CertificationCriteria(min_adjudicated_samples=50),
+        generated_at=BASE,
+    )
+    result = verify_certificate(certificate, now=datetime(2026, 9, 9, tzinfo=UTC))
+    assert result.ok is False
+    assert "not_certified" in result.reasons
+
+
+def test_a_future_dated_certificate_is_refused(raw_factory):
+    certificate = _certified(raw_factory)
+    result = verify_certificate(certificate, now=datetime(2026, 9, 1, tzinfo=UTC))
+    assert result.ok is False
+    assert any(reason.startswith("generated_utc:future:") for reason in result.reasons)
+
+
+def test_a_naive_timestamp_is_not_a_certificate_time(raw_factory):
+    certificate = _certified(raw_factory)
+    payload = {**certificate.payload, "generated_utc": "2026-09-08T14:00:00"}
+    result = verify_certificate(
+        replace(certificate, payload=payload),
+        now=datetime(2026, 9, 9, tzinfo=UTC),
+    )
+    assert "generated_utc:naive" in result.reasons
+
+
+def test_load_certificate_round_trips_a_written_file(raw_factory, tmp_path):
+    certificate = _certified(raw_factory)
+    path = certificate.write(tmp_path / "cert.json")
+    loaded = load_certificate(path)
+    assert loaded.digest == certificate.digest
+    assert loaded.decision == "CERTIFIED"
+    result = verify_certificate(loaded, now=datetime(2026, 9, 9, tzinfo=UTC))
+    assert result.ok is True
+
+
+def test_load_certificate_refuses_a_missing_file(tmp_path):
+    with pytest.raises(CertificationError, match="certificate_not_found"):
+        load_certificate(tmp_path / "absent.json")
+
+
+def test_cli_verify_passes_a_good_certificate_and_fails_a_tampered_one(
+    raw_factory, tmp_path, capsys
+):
+    certificate = _certified(raw_factory)
+    path = certificate.write(tmp_path / "cert.json")
+    assert certify_main(["--verify", str(path), "--max-age-hours", "100000"]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+    written = json.loads(path.read_text(encoding="utf-8"))
+    written["decision"] = "CERTIFIED"
+    written["metrics"]["candidate"]["accuracy"] = 0.0
+    path.write_text(json.dumps(written), encoding="utf-8")
+    assert certify_main(["--verify", str(path), "--max-age-hours", "100000"]) == 1
+    assert json.loads(capsys.readouterr().out)["ok"] is False

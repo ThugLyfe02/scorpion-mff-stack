@@ -134,6 +134,34 @@ scorpion-certify --corpus corpus.jsonl --db scorpion.db \
   --candidate my_parser:parse_with_evidence --out certificate.json
 ```
 
+### Reading a certificate back before acting on it
+
+A certificate is a claim about a corpus at a moment in time. `load_certificate` +
+`verify_certificate` are the read-back path, and a promotion that skips them is trusting a
+file it has not checked:
+
+| Refusal | What it catches |
+|---|---|
+| `digest_mismatch` | the JSON was edited after it was issued |
+| `not_certified` / `carries_refusals` | the certificate itself says no |
+| `generated_utc:naive` / `:future:` / `stale:` | a clock that cannot date the evidence, or evidence older than the promotion window (default 7 days) |
+| `candidate_mismatch` / `baseline_mismatch` | a certificate issued for a different parser pair |
+| `corpus:empty` / `:impossible_counts` / `:parser_errors` | evidence that cannot be what the certificate claims |
+| `segment_regression` | an aggregate gain hiding a named segment loss |
+
+The digest is recomputed over everything except `generated_utc` and `digest`, so the same
+evidence certified twice on different days has the same identity. Verification never edits the
+file and never promotes: it returns a named result, and the caller must refuse on `ok=false`.
+
+```bash
+scorpion-certify --verify certificate.json --max-age-hours 48
+scorpion-certify --verify certificate.json \
+  --expect-candidate my_parser:parse_with_evidence --json
+```
+
+Exit codes match the rest of the lane: `0` verified, `1` refused by a named reason, `2` the
+file could not be read as a certificate.
+
 The corpus loader accepts JSONL or a JSON array. Required: `content` or `text`. Optional:
 `message_id`/`id`, `source_ts_utc`/`timestamp`, `guild_id`, `channel_id`, `author_id`,
 `expected_kind`/`kind`, `expected_contract_key`. A record without content is refused, not skipped.
@@ -144,17 +172,21 @@ claim being certified.
 
 `tests/test_review.py` (9 tests) covers idempotent enqueue, refusal of an unstored event, claim ->
 resolve -> calibration, dismissal that stays dismissed, backfill with real decision audits,
-metrics and renders, and the CLI. `tests/test_certification.py` (16 tests) covers a faithful
+metrics and renders, and the CLI. `tests/test_certification.py` (26 tests) covers a faithful
 candidate, an action escalation, poor calibration, too few adjudications, identical baseline and
 candidate, exact McNemar, risk-coverage selection, calibration bins, a channel-level segment
 regression, an underpowered segment that is reported rather than refused, corpus loading, and the CLIs.
+It also covers the read-back path: a valid certificate verifies with its age, an edited payload is
+refused by the digest, a stale or future-dated certificate is refused, a certificate issued for
+another parser pair is refused, a refused certificate cannot be read as permission, a naive
+timestamp is not a certificate time, and the CLI returns 0/1/2 for verified/refused/unreadable.
 
 The full PR#3 gate:
 
 ```text
 ruff check src tests            -> All checks passed
-mypy src/scorpion (strict)      -> Success: no issues found in 60 source files
-pytest                          -> 346 collected, all passing
+mypy src/scorpion (strict)      -> Success: no issues found in 33 source files
+pytest                          -> 126 collected, all passing
 ```
 
 ## What this does not prove
