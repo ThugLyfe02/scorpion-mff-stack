@@ -38,7 +38,7 @@ honest state of the stack, and it is the only target worth organising around.
 
 | PR | Branch | Ahead / behind `main` | Gate | Tests | Verdict |
 |---|---|---|---|---|---|
-| **#8** | `hardening/correlated-book-guard` | 11 / 0 | green | 655 | **merge first** — linear, current, fail-closed |
+| **#8** | `hardening/correlated-book-guard` | 11 / 0 | green | 702 | **merge first** — linear, current, fail-closed |
 | **#1** | `hardening/deterministic-control-plane` | 81 / 0 | green | 824 | **merge second** — current, but docs lie about a closed defect |
 | **#3** | `hardening/calibrated-semantic-acceleration` | 7 / **51** | green | 126 | **converge before anything else** |
 | #2 | `hardening/precision-intelligence-layer` | 21 / 7 | — | — | **retire** — #3 already contains every commit |
@@ -147,7 +147,7 @@ destroy it; an LLM beside the path (review triage, digest, ops) strengthens it.
 **From:** an offline-proven hot path. **To:** the execution authority, with one
 credentialed round trip and a scheduled reconciliation.
 
-It merges first because it is linear (0 behind), green (655 tests), fail-closed
+It merges first because it is linear (0 behind), green (702 tests), fail-closed
 (`arm --live` refuses without quote feed and policy), and the only lane whose value
 decays with time. Merging it does not place an order; it makes `main` the live path and
 resets every other lane's drift.
@@ -163,6 +163,10 @@ Then, in order:
    sync / export`. Proven offline (66 tests); the venue's ack shape is still unconfirmed.
 2. **Scheduled venue reconciliation** — build the snapshot adapter against a recorded
    fixture; drift halts buys and pages; exit codes 0/1/2 as specified.
+   **Built** (`venue.py`, G18): file and HTTP feeds behind one stamped snapshot, a
+   staleness limit, one page per distinct drift, no halt on a dead adapter, and
+   `arm --venue-every` wiring it into the tick. The endpoint's field names remain the
+   credentialed unknown.
 3. **Shadow-live parity, then one real ack** — same code over a recorded session; TCA
    refuses to suggest a multiple under ten priced fills.
 

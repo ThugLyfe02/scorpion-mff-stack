@@ -92,6 +92,13 @@ def _parser() -> argparse.ArgumentParser:
     arm.add_argument("--allow-unresolved", action="store_true",
                      help="arm even when the confirmed book has an order with no venue "
                           "answer (default: refuse until `recover` settles it)")
+    arm.add_argument("--venue-snapshot", type=Path, default=None,
+                     help="reconcile against this venue positions file every --venue-every "
+                          "seconds (overrides MFF_VENUE_SNAPSHOT/MFF_VENUE_URL)")
+    arm.add_argument("--venue-every", type=float, default=300.0, metavar="SECONDS",
+                     help="scheduled reconcile cadence (default 300s)")
+    arm.add_argument("--venue-max-age", type=float, default=120.0, metavar="SECONDS",
+                     help="refuse a venue snapshot older than this (default 120s)")
 
     sub.add_parser("status", help="kill-switch state + tail of the fill log")
 
@@ -217,6 +224,12 @@ def _parser() -> argparse.ArgumentParser:
                     help="JSON array of {contract_key, contracts}")
     rc.add_argument("--fills", type=Path, default=None,
                     help="fill log (default live/fills.jsonl)")
+    rc.add_argument("--source", choices=("auto", "confirmed", "fills"), default="auto",
+                    help="which local book to compare: the confirmed execution log, "
+                         "the optimistic fill log, or auto (confirmed when it has orders)")
+    rc.add_argument("--max-age", type=float, default=None, metavar="SECONDS",
+                    help="refuse a snapshot older than this (default: no age check; "
+                         "the scheduled path in `arm` defaults to 120s)")
     rc.add_argument("--json", action="store_true")
 
     bk = sub.add_parser("book",
@@ -469,6 +482,7 @@ def cmd_arm(args: argparse.Namespace) -> int:
     # so a restart resumes holding what it holds instead of an empty book - and it
     # cannot forget a realised drawdown, because the book carries the baseline.
     from .execution_book import ExecutionBook, ExecutionBookError
+    from .venue import FileVenueFeed, feed_from_env
 
     execution_path = EXECUTION_LOG
     try:
@@ -496,6 +510,13 @@ def cmd_arm(args: argparse.Namespace) -> int:
                   f"{order.filled_qty}/{order.intent.qty} {order.client_id}", file=sys.stderr)
         return 1
 
+    # Scheduled venue reconciliation. A snapshot the venue published is evidence; the
+    # engine halts NEW buys on drift and keeps exits legal. A feed that cannot be read is
+    # a page, never a halt - a broken adapter must not become a stopped desk.
+    venue_feed = (FileVenueFeed(path=args.venue_snapshot, max_age_s=args.venue_max_age)
+                  if args.venue_snapshot is not None
+                  else feed_from_env(max_age_s=args.venue_max_age))
+
     listener = Listener(
         transport=gateway,
         engine=engine,
@@ -506,6 +527,8 @@ def cmd_arm(args: argparse.Namespace) -> int:
         kill=kill,
         execution=execution,
         tick_s=float(args.tick_s),
+        venue_feed=venue_feed,
+        venue_every_s=float(args.venue_every),
     )
 
     def record_gateway_alert(reason: str, note: str) -> None:
@@ -538,6 +561,12 @@ def cmd_arm(args: argparse.Namespace) -> int:
     if restored.unresolved:
         print(f"       armed with {restored.unresolved} unresolved order(s) "
               f"(--allow-unresolved): the venue state for them is still unknown")
+    if venue_feed is None:
+        print("venue | reconcile feed NOT configured - drift detection is OFF "
+              "(set MFF_VENUE_URL or pass --venue-snapshot)")
+    else:
+        print(f"venue | reconcile every {args.venue_every:g}s against {venue_feed.source} | "
+              f"snapshot age limit {args.venue_max_age:g}s | drift halts buys, exits stay legal")
     if risk_budget is None:
         print("budget | OFF (no live/risk-budget.json; worst-case day is unbounded)")
     else:
@@ -1347,37 +1376,91 @@ def cmd_risk(args: argparse.Namespace) -> int:
 
 
 def cmd_reconcile(args: argparse.Namespace) -> int:
-    """The book the engine holds vs the book the venue holds. Drift is a page, not a guess."""
-    from . import exposure as exposure_mod
-    from .reconcile import ReconcileError, load_snapshot, reconcile
+    """The book we hold vs the book the venue holds. Drift is a page, not a guess.
 
+    The **source** of the local book matters as much as the comparison. Two exist:
+
+    * `confirmed` - the execution book (`live/execution.jsonl`), the venue's own answers;
+    * `fills` - the optimistic reconstruction from the fill log, which books a buy at
+      decision time and drops a position at sell-INTENT time, so it can believe it is
+      flat while the venue still holds the contracts.
+
+    `auto` (the default) uses the confirmed book when it has recorded at least one order
+    and falls back to the fill log otherwise, because a fresh install has an empty
+    execution log and comparing an empty book against a real one is a false drift.
+    The source used is printed, so a reviewer never has to infer it.
+
+    Exit codes are the contract: 0 clean, 1 drift, 2 malformed/stale/unreadable. A
+    snapshot with no timestamp is refused when `--max-age` is set: an undatable book is
+    not evidence, and a stale one is worse than none.
+    """
+    from . import exposure as exposure_mod
+    from .execution_book import ExecutionBook, ExecutionBookError
+    from .reconcile import ReconcileError, reconcile
+    from .venue import FileVenueFeed, VenueError
+
+    feed = FileVenueFeed(path=args.snapshot, max_age_s=args.max_age)
     try:
-        venue = load_snapshot(args.snapshot)
-    except ReconcileError as exc:
+        snapshot = feed.snapshot()
+    except (VenueError, ReconcileError) as exc:
         print(f"cannot use venue snapshot: {exc}", file=sys.stderr)
         return 2
-    fills_path = args.fills or FILL_LOG
-    fills = FillLog().replay_file(fills_path) if fills_path.exists() else []
-    local = exposure_mod.positions_from_fills(fills)
+
+    confirmed: ExecutionBook | None = None
+    if EXECUTION_LOG.exists():
+        try:
+            confirmed = ExecutionBook.load(EXECUTION_LOG)
+        except ExecutionBookError as exc:
+            print(f"cannot read the confirmed book at {EXECUTION_LOG}: {exc}",
+                  file=sys.stderr)
+            return 2
+
+    if args.source == "confirmed" and (confirmed is None or not confirmed.orders):
+        print(f"no confirmed execution book at {EXECUTION_LOG} "
+              f"(use --source fills to compare the optimistic book)", file=sys.stderr)
+        return 2
+    if args.source == "fills":
+        source = "fills"
+    elif args.source == "confirmed":
+        source = "confirmed"
+    else:
+        source = "confirmed" if confirmed is not None and confirmed.orders else "fills"
+
+    if source == "confirmed":
+        assert confirmed is not None
+        local = confirmed.open_positions()
+    else:
+        fills_path = args.fills or FILL_LOG
+        fills = FillLog().replay_file(fills_path) if fills_path.exists() else []
+        local = exposure_mod.positions_from_fills(fills)
+
     try:
-        report = reconcile(local, venue)
+        report = reconcile(local, snapshot.positions)
     except ReconcileError as exc:
         print(f"cannot reconcile: {exc}", file=sys.stderr)
         return 2
+
+    age = snapshot.age_s()
     if args.json:
         print(json.dumps({"snapshot": str(args.snapshot),
+                          "venue": snapshot.to_dict(),
+                          "local_source": source,
                           "report": report.to_dict()}, indent=2))
     else:
+        taken = "unknown" if snapshot.taken_at is None else f"{age:.0f}s ago"
         print(f"reconcile | local {report.local_positions} position(s) / "
-              f"{report.local_contracts} contract(s) | venue "
-              f"{report.venue_positions} / {report.venue_contracts}")
+              f"{report.local_contracts} contract(s) [{source}] | venue "
+              f"{report.venue_positions} / {report.venue_contracts} "
+              f"({snapshot.source}, {taken})")
         if report.clean:
             print("  CLEAN - the two books agree")
         else:
-            print(f"  DRIFT - {len(report.drifts)} disagreement(s); halt new buys:")
+            print(f"  DRIFT - {len(report.drifts)} disagreement(s):")
             for drift in report.drifts:
                 print(f"    {drift.kind:<18} {drift.contract_key:<28} "
                       f"local={drift.local:<4} venue={drift.venue}")
+            print("  next: halt new buys now (touch live/NO_TRADE), resolve the "
+                  "disagreement, then re-arm")
     return 0 if report.clean else 1
 
 

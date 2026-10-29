@@ -10,7 +10,7 @@ armed but nothing read back (`stops.py`, opt-in via `--enforce-breakeven`), a
 mark-to-market view whose total withholds itself when the book cannot be priced
 (`marks --check`), fill-log integrity verification (`verify`), and the confirmed-execution book
 (`execution_book.py`): cumulative acks, partials, a restart replay and an `arm` that
-refuses on an unresolved order. 655 tests green,
+refuses on an unresolved order. 702 tests green,
 `ruff` clean, `mypy --strict` clean.
 
 **Gate:** `scripts/gate.sh` — ruff → mypy `--strict` → pytest, all green.

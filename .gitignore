@@ -14,6 +14,8 @@ live/heartbeat.json
 # confirmed execution is runtime state too: the event log and its TCA export
 live/execution.jsonl
 live/executions.jsonl
+# the venue's own positions export: evidence, so it is dated by its writer
+live/venue-snapshot.json
 
 # risk state is machine state: a persisted drawdown must not be committed
 live/governor.json

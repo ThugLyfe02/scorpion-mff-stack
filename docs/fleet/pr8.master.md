@@ -7,7 +7,7 @@ Measured baseline on 2026-10-29:
 
 ```text
 drift vs main     11 ahead, 0 behind
-gate               ruff clean · mypy --strict clean (31 files) · 655 passed
+gate               ruff clean · mypy --strict clean (32 files) · 702 passed
 live wiring        RH order endpoint unconfirmed · quote feed unconfigured · Gateway token absent
 ```
 
@@ -104,6 +104,16 @@ python -m pytest -q tests/test_ledger.py     # cumulative ack, oversell clamp, r
 and halts buys on drift. The missing piece is the snapshot source. Build the adapter
 against a **recorded fixture** first (the same discipline that made the HTTP adapter
 provable against a local server), and wire it into the ops loop.
+
+**Status: BUILT.** `scorpion_mff/venue.py` (G18, 47 tests): `FileVenueFeed` and
+`HttpVenueFeed` behind one `VenueSnapshot` (positions + `taken_at` + source), with a
+staleness limit, a refused duplicate key, and a token-free error taxonomy that separates
+"not evidence" (page, no halt) from "two readable books that disagree" (halt + one
+page). `Listener.tick` reconciles every `--venue-every` seconds against the **confirmed**
+book, `Engine.reconcile_positions` deduplicates the page by drift signature, and a clean
+re-check records `clean_after_drift` without lifting a halt a human never lifted. The
+remaining integration is the real endpoint's field names (`MFF_VENUE_URL`), which is a
+credentialed decision, not a code one.
 
 Acceptance:
 

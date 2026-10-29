@@ -40,6 +40,7 @@ from .ledger import TRANSPORT_UNKNOWN
 from .parser import CHANNEL_IDS, parse
 from .reconcile import ReconcileReport, VenuePosition
 from .types import OrderIntent, RawMessage
+from .venue import VenueError, VenueFeed
 
 
 class GatewayTransport(Protocol):
@@ -85,6 +86,14 @@ class Listener:
     # this stack has is the one it schedules itself. 15s is shorter than the 15-minute
     # expiry window by two orders of magnitude, so the cutoff cannot be missed by traffic.
     tick_s: float = 15.0
+    # Scheduled venue reconciliation. Off unless a feed is attached; when it is, the
+    # tick asks the venue for its book every `venue_every_s` and the engine halts new
+    # buys on drift. 300s is five ticks: often enough to catch a manual trade before a
+    # new entry, cheap enough that a positions endpoint is not hammered.
+    venue_feed: VenueFeed | None = None
+    venue_every_s: float = 300.0
+    venue_checks: int = 0
+    last_venue_check: float = 0.0
 
     def __post_init__(self) -> None:
         if self.fills is None:
@@ -342,6 +351,8 @@ class Listener:
 
         Three things happen here, in this order and for this reason:
 
+          0. the scheduled venue reconcile runs FIRST when a feed is attached, so a book
+             that already disagrees with the venue cannot add risk in the same tick;
           1. quotes for the OPEN book are polled fresh (fail closed: a position whose
              quote cannot be read is simply absent from the map, which the guard reads
              as SILENCE and pages, never as a fill);
@@ -355,6 +366,7 @@ class Listener:
         you want when the question is "did it actually flatten?".
         """
         ts = self.clock() if now is None else now
+        self.reconcile_from_feed(ts)
         placed: list[OrderIntent] = []
         for intent in self.engine.expiry_intents(ts, self._bids_for_book(), underlying):
             self._place(intent)
@@ -373,6 +385,56 @@ class Listener:
         consequence (halt buys, keep exits).
         """
         return self.engine.reconcile_positions(venue, now)
+
+    def reconcile_from_feed(self, now: float | None = None,
+                            force: bool = False) -> ReconcileReport | None:
+        """Ask the venue for its book, on a cadence, and apply the consequence.
+
+        Returns the report when a snapshot was compared, `None` when no feed is attached,
+        when the cadence is not due, or when the venue could not be read. This is the
+        only place the live process learns the venue's side, so the three failure classes
+        are kept apart on purpose (`venue.py` documents the taxonomy):
+
+        * **unreadable / stale / malformed** - no evidence. An `alert` row names the
+          cause so `watch` pages, and buys are **not** halted. Halting on a broken
+          adapter would turn an ops bug into a stopped desk, and the human is already
+          being told the feed is broken;
+        * **drift** - both books read and they disagree. The engine halts new buys and
+          pages (deduped by drift signature); exits stay legal.
+
+        The local side is the **confirmed** book when one is attached: the engine deletes
+        a position at sell-intent time, so comparing the venue against decisions would
+        hide a sell that never arrived.
+        """
+        feed = self.venue_feed
+        if feed is None or not feed.configured:
+            return None
+        ts = self.clock() if now is None else now
+        if not force and self.last_venue_check and ts - self.last_venue_check < self.venue_every_s:
+            return None
+        self.last_venue_check = ts
+        try:
+            snapshot = feed.snapshot(ts)
+        except (VenueError, ValueError) as exc:
+            self._venue_alert(f"reconcile_feed:{exc}", ts,
+                              note="no venue evidence this pass; buys are NOT halted - "
+                                   "a dead adapter is not a disagreement")
+            return None
+        self.venue_checks += 1
+        local = self.execution.open_positions() if self.execution is not None else None
+        try:
+            return self.engine.reconcile_positions(snapshot.positions, ts, local=local)
+        except ValueError as exc:       # ReconcileError: evidence that is not a book
+            self._venue_alert(f"reconcile_rejected:{exc}", ts,
+                              note="the snapshot passed the feed and failed the "
+                                   "comparator; buys are NOT halted on unusable evidence")
+            return None
+
+    def _venue_alert(self, reason: str, ts: float, note: str) -> None:
+        """An unreadable venue is a page, never a halt and never a silence."""
+        if self.fills is not None:
+            self.fills.record(event="alert", contract_key="", qty=0, price=0.0,
+                              reason=reason, accepted=False, ts=ts, note=note)
 
     def _bids_for_book(self) -> dict[str, float]:
         """A bid per open contract, or no entry at all. Never a guessed price."""

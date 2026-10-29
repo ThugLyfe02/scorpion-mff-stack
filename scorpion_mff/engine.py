@@ -167,6 +167,10 @@ class Engine:
     # not turn a real page into a stream a human learns to ignore. Cleared on the roll.
     expiry_paged: set[str] = field(default_factory=set)
     calendar_warning: str = ""          # last unusable-clock fallback (never silent)
+    # The drift signature that was already paged this session. A scheduled reconcile runs
+    # every few minutes; repeating an alert for an unchanged disagreement trains a human
+    # to ignore the page, which is the failure mode a page exists to avoid.
+    reconcile_drift: str = ""
 
     # ── the book ─────────────────────────────────────────────────────────────
     @property
@@ -194,23 +198,52 @@ class Engine:
                                   reason=f"risk_state_unwritable:{exc}", ts=ts)
 
     def reconcile_positions(self, venue: Iterable[VenuePosition],
-                            now: float | None = None) -> ReconcileReport:
-        """Compare the engine's book with the venue, and halt NEW BUYS on drift.
+                            now: float | None = None,
+                            local: Iterable[Position] | None = None
+                            ) -> ReconcileReport:
+        """Compare the book with the venue, and halt NEW BUYS on drift.
 
         The comparator is pure (`reconcile.py`); this method is the live consequence.
         A clean snapshot writes one `reconcile` row and changes nothing. Any drift
         sets `halted` with reason `reconcile-drift` and writes an alert that `watch`
         already pages on. Exits stay legal: a desk that cannot reconcile must still be
         able to leave a position it is in, and trapping it would be the worse failure.
+
+        `local` is the book to compare. Left unset it is the engine's positions - the
+        decisions it has taken. The live path passes the **confirmed** book once an
+        execution log is attached, because the engine deletes a position at sell-intent
+        time: a sell that never reached the venue would look flat locally while the
+        venue still holds it, which is precisely the drift that costs money.
+
+        Two consequences of running this on a schedule rather than by hand:
+
+        * **An unchanged drift is recorded once.** The first snapshot that disagrees
+          pages; every later snapshot with the same signature writes a quiet
+          `drift_unchanged` row, so a five-minute cadence is one page, not twelve.
+        * **A clean snapshot does not un-halt.** Drift is a session decision with a
+          human in it; `halted` is shared with STOP/stand-down, and clearing it from a
+          reconciliation would clear a stand-down nobody lifted. Recovery is an
+          operator act (`delete live/governor.json` after a review, then re-arm), and
+          the `clean_after_drift` row is the evidence that the books agree again.
         """
         ts = self.clock() if now is None else now
-        report = reconcile(self.open_positions, venue)
+        book = list(local) if local is not None else self.open_positions
+        report = reconcile(book, venue)
         if report.clean:
+            after_drift = bool(self.reconcile_drift)
+            self.reconcile_drift = ""
             self.fills.record(event="reconcile", contract_key="", qty=0, price=0.0,
-                              reason="clean", ts=ts,
+                              reason="clean_after_drift" if after_drift else "clean",
+                              ts=ts,
                               note=f"local={report.local_positions} "
                                    f"venue={report.venue_positions}")
             return report
+        if self.reconcile_drift == report.reason_text:
+            self.fills.record(event="reconcile", contract_key="", qty=0, price=0.0,
+                              reason="drift_unchanged", ts=ts, accepted=False,
+                              note=f"already paged: {report.reason_text}")
+            return report
+        self.reconcile_drift = report.reason_text
         self.halted = True
         self.halt_reason = "reconcile-drift"
         self.fills.record(event="alert", contract_key="", qty=0, price=0.0,

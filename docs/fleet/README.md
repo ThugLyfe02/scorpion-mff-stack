@@ -78,7 +78,7 @@ answering three different questions:
 - **Main** — *does the hot path that will place money hold its invariants?* The
   deterministic parser → engine → broker with the reduce-only governor, the
   correlated-book cap, the fill log, the confirmed-execution book, and the kill switch.
-  655 tests, strict types.
+  702 tests, strict types.
   Owns **execution truth**: the only lane that can place an order.
 - **Semantic** — *is the parse evidence or opinion?* Calibration, novelty, review
   queue, and a certificate a parser promotion must pass. Owns **interpretation truth**:

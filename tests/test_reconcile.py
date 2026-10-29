@@ -163,7 +163,12 @@ def test_cli_reconcile_exits_1_and_names_the_drift(tmp_path, capsys):
 
 
 def test_cli_reconcile_exits_2_on_a_bad_snapshot(tmp_path, capsys):
+    # NOTE: the wording changed when `venue.py` widened the accepted shapes to
+    # `[{...}]` OR `{"positions": [...]}` with a timestamp. The invariant this test
+    # pins is unchanged: a payload that is not a book exits 2 and names the problem.
     snapshot = tmp_path / "venue.json"
-    snapshot.write_text('{"not": "an array"}', encoding="utf-8")
+    snapshot.write_text('{"not": "a book"}', encoding="utf-8")
     assert main(["reconcile", "--snapshot", str(snapshot)]) == 2
-    assert "must be a JSON array" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "cannot use venue snapshot" in err
+    assert "position list" in err

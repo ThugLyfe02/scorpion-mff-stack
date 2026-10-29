@@ -25,6 +25,7 @@ Layering, all stdlib:
     risk      - pre-trade worst-case-loss budget; shrinks size, never grows it
     reconcile - engine book vs venue book; drift halts buys, never exits
     execution_book - confirmed execution state: cumulative acks, partials, restart replay
+    venue     - the venue positions feed: a stamped snapshot, refused when it is not evidence
 
 Everything except the live Gateway transport and the RH HTTP call is pure and
 unit-tested offline. `listener.WebsocketGateway` needs the optional `websockets`

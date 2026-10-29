@@ -194,7 +194,7 @@ the HTTP order shape (against a real local server: idempotency key, retry ladder
 PR#1 ports, the ET calendar, the 0DTE cutoff matrix, the one-probe breaker, the tri-state
 ledger, and `recover` are also proven offline. Since the confirmed-execution book, the
 cumulative ack, the split fill, the oversell clamp, the restart replay and the
-`sync_engine` drawdown restore are proven offline too - 655 tests, `docs/GEMS.md` is the
+`sync_engine` drawdown restore are proven offline too - 702 tests, `docs/GEMS.md` is the
 one-command index.
 
 **Not yet proven — needs your credentials or a decision:**
@@ -221,10 +221,14 @@ one-command index.
    unknown **exit** pages immediately (`exit_unknown:transport`), `verify` names the
    ambiguity, and `recover` settles it from a venue lookup. The confirmed book adds the
    durable side of the same story: an order with no venue answer stays `PENDING`,
-   `arm` refuses to start on it, and `book verify --strict` fails on it. What still does
-   not exist is the venue **positions feed** and a scheduled drift halt - `reconcile`
-   compares a snapshot a human or an adapter supplies. That is unported, not hidden; do
-   not "fix" it by making `recover` retry.
+   `arm` refuses to start on it, and `book verify --strict` fails on it. The **feed
+   adapter** and the **scheduled drift halt** now exist too (`venue.py`,
+   `arm --venue-snapshot ... --venue-every 300`): a stamped snapshot the venue published,
+   refused when it is stale or undatable, with drift halting new buys. What remains is the
+   credentialed part - the real positions endpoint's path and field names
+   (`MFF_VENUE_URL`, `MFF_VENUE_POSITIONS_PATH`) are yours to confirm, because this stack
+   does not invent a vendor schema. Until then the file feed and the fixture path are
+   proven offline.
 
 ## Defects found and fixed (why the replay harness and a second opinion exist)
 
@@ -523,6 +527,60 @@ What this does **not** claim: no real venue fill has been booked yet, so the boo
 proven offline (66 tests) and unproven against Robinhood's ack shape. The `tca.Execution`
 export exists so that the first real ack prices itself through `tca fills` instead of
 being entered by hand.
+
+## Scheduled venue reconciliation: the feed (`venue.py`)
+
+`reconcile.py` compares two books and `execution_book.py` owns one of them. Neither
+answers "where does the *other* book come from, and can we believe it?" - which is why the
+drift halt was manual. `scorpion_mff/venue.py` is the source, and its job is to refuse:
+
+| Payload | Verdict | Why |
+|---|---|---|
+| `[{"contract_key": "...", "contracts": 3}]` | a book | the shape `reconcile` already speaks |
+| `{"as_of": "...", "positions": [...]}` | a book, stamped | the venue's own time travels with the data |
+| a duplicate contract key | **refused** | two answers to one question is not evidence |
+| `positions: "lots"` / no list at all | **refused**, naming the keys it saw | "your path is wrong" must not read as "flat" |
+| older than `--venue-max-age` (default 120s) | **refused** | an old book compared with a current one invents or hides drift |
+| no timestamp, with an age limit set | **refused** | an undatable book is not evidence |
+| 5xx, timeout, unconfigured | `VenueError` | no evidence - and never a flat book |
+
+Two adapters: `FileVenueFeed` (an operator export or a fixture; the file's mtime is the
+stamp when the payload has none) and `HttpVenueFeed` (a `GET` template plus a dotted
+positions path, bearer token from `MFF_RH_TOKEN`, host-only labels so a token in a query
+string cannot reach a log). `feed_from_env()` builds whichever the environment names, and
+`arm` says out loud when neither is set.
+
+The consequence lives where the halt already lives - `Engine.reconcile_positions`:
+
+| Situation | What happens |
+|---|---|
+| drift | `halted`, `halt_reason=reconcile-drift`, one `alert` row (a page) |
+| the same drift again on the next tick | a quiet `drift_unchanged` row, **no second page** |
+| a *different* drift | a second page (it is new information) |
+| clean, first check | one `reconcile:clean` row |
+| clean after drift | `clean_after_drift` row, halt **stays** (recovery is an operator act) |
+| feed unavailable / malformed / stale | `alert` row naming the cause, **no halt** |
+
+That last row is a deliberate asymmetry. Drift is a disagreement between two readable
+books, and it halts new buys. A broken adapter is not a disagreement, and halting on it
+would turn an ops bug into a stopped desk - the human is already being paged. Exits remain
+legal in every one of these states.
+
+The local side is the **confirmed** book when one is attached. The engine deletes a
+position at sell-*intent* time, so comparing the venue with the engine's decisions would
+hide exactly the failure that matters: a sell that never arrived looks flat locally while
+the venue still holds it. `reconcile --source auto` uses the confirmed log once it has
+orders, falls back to the fill log before that, and prints which it used.
+
+```bash
+python -m scorpion_mff.cli reconcile --snapshot tests/fixtures/venue-positions.json
+# exit 0 clean · 1 drift (with the next step printed) · 2 malformed, stale or unreadable
+python -m scorpion_mff.cli arm --venue-snapshot live/venue-snapshot.json --venue-every 300
+```
+
+47 tests (`tests/test_venue_feed.py`) cover the taxonomy, the cadence, the de-duplicated
+page, the no-halt-on-a-dead-feed rule, the confirmed-book comparison, and the HTTP adapter
+against a real local server.
 
 ## Adversarial hardening (`fuzz`)
 

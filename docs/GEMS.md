@@ -15,7 +15,7 @@ python -m pytest --version         # if this fails, use .venv/Scripts/python.exe
 
 If the venv is not active, replace `python` with `.venv/Scripts/python.exe` (Windows)
 or `.venv/bin/python` (POSIX). `scripts/gate.sh` resolves the venv itself and is the
-single top-level check: `ruff -> mypy --strict -> pytest`, currently **655 passed**
+single top-level check: `ruff -> mypy --strict -> pytest`, currently **702 passed**
 (513 at the 3.a red-team, plus the three transport-quarantine tests added by final
 integration that close O1, plus the offline Gateway lifecycle suite).
 
@@ -40,6 +40,7 @@ integration that close O1, plus the offline Gateway lifecycle suite).
 | G15 | an add that bypasses the stand-down or the governor | `python -m pytest tests/test_add_safety.py -q` |
 | G16 | a book that disagrees with the venue and does not say so | `python -m pytest tests/test_reconcile.py -q` |
 | G17 | a confirmed fill that a restart, a duplicate or a partial can corrupt | `python -m pytest tests/test_execution_book.py -q` |
+| G18 | a venue book that is stale, undatable, or not a book at all | `python -m pytest tests/test_venue_feed.py -q` |
 
 Each gem follows the same shape: **what it is**, **the acceptance command**, **the
 invariant**, **the failure mode it buys down**, and the **3.a red-team record** for it.
@@ -531,6 +532,54 @@ proven offline only. `book export` exists so the first real ack prices itself th
 
 ---
 
+## G18. A venue book that is stale, undatable, or not a book must be refused
+
+`scorpion_mff/venue.py` + the scheduled reconcile in `Listener.tick`. `reconcile.py`
+compares two books and `execution_book.py` owns one of them; neither answered *where the
+other book comes from and whether it can be believed*. That gap is why the drift halt was
+manual, and it is the difference between "the venue says X" and "a file someone left on
+disk says X".
+
+**Acceptance (one command):** `python -m pytest tests/test_venue_feed.py -q` -> 47 passed.
+
+**Invariant:** a snapshot is evidence only if it is (a) a book, (b) dated, and (c) not too
+old. A bare array or `{"as_of": ..., "positions": [...]}` is accepted; a duplicate contract
+key, a non-array position list, a payload with no recognisable list, a negative/boolean/float
+count, a missing key, an unreadable file, a non-2xx answer and a transport failure are all
+**refused** - never an empty book, because "no positions" would silently stop every exit. A
+snapshot older than the limit, or one that cannot be dated while a limit is set, is refused
+with its age. The HTTP adapter's error strings and `source` label never carry the token.
+
+**The consequence is separate from the evidence.** Drift between two readable books halts
+**new buys** and pages **once** (a repeated identical drift writes a quiet
+`drift_unchanged` row, not a second page; a changed drift pages again). A clean re-check
+after drift is recorded as `clean_after_drift` and does **not** clear the halt: `halted` is
+shared with STOP/stand-down and lifting it is an operator act. A feed that is dead,
+malformed or stale pages and halts **nothing** - a broken adapter must not become a stopped
+desk - and exits stay legal in every state.
+
+**Failure mode it buys down:** a book that disagrees with the venue and does not say so
+(`phantom_local` / `missing_local` / `quantity_mismatch`), and its mirror image: a *healthy*
+desk halted because an adapter returned 503 or an operator compared a snapshot from
+yesterday. Both are silent in opposite directions; the taxonomy makes each one a named row.
+
+**Operator surface:**
+
+```bash
+python -m scorpion_mff.cli reconcile --snapshot tests/fixtures/venue-positions.json
+python -m scorpion_mff.cli reconcile --snapshot SNAP --source confirmed --max-age 120
+python -m scorpion_mff.cli arm --venue-snapshot live/venue-snapshot.json --venue-every 300
+```
+
+`reconcile` exits 0 clean / 1 drift / 2 malformed-stale-unreadable, and prints the *source*
+of the local book it used (`confirmed` when the execution log has orders, else `fills`).
+
+**What is not built:** the real endpoint. `MFF_VENUE_URL` + `MFF_VENUE_POSITIONS_PATH` +
+`MFF_VENUE_TIME_PATH` are yours to confirm; this stack does not invent a vendor schema, and
+the file feed plus the fixture path are what is proven offline.
+
+---
+
 ## What we deliberately do not build
 
 These are not backlog items with an ETA. They are gates that would have to open before the
@@ -641,7 +690,7 @@ place. The corpus backtest and the 9/8 replay are unchanged (they have no transp
 The short version, in the order that fails fastest:
 
 ```bash
-./scripts/gate.sh                                            # ruff -> mypy -> pytest, 655
+./scripts/gate.sh                                            # ruff -> mypy -> pytest, 702
 python -m scorpion_mff.cli backtest                          # 93/91/405/$57,951.00
 python -m scorpion_mff.cli replay tapes/sep8.json            # 4/2/6/$211.00, 0 breaches
 python -m scorpion_mff.cli expiry audit                      # 40/93, 65/93, 0/40, 10/40, REFUSED
@@ -662,6 +711,7 @@ python -m pytest tests/test_ledger.py -q -k recover                         # 3
 python -m pytest tests/test_gateway.py -q                                   # 20
 python -m pytest tests/test_risk_budget.py -q                               # 24
 python -m pytest tests/test_execution_book.py -q                            # 66
+python -m pytest tests/test_venue_feed.py -q                               # 47
 ```
 
 A failure in any of these is a gem failing, not a flaky test: every command is offline,
