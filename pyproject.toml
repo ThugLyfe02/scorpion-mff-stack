@@ -47,7 +47,13 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 [tool.mypy]
 python_version = "3.13"
 strict = true
-packages = ["scorpion"]
+packages = ["scorpion", "scorpion_mff"]
+
+[[tool.mypy.overrides]]
+# The live Gateway import is lazy and the dependency is optional; the type checker
+# must not require an environment that the offline path never needs.
+module = "websockets"
+ignore_missing_imports = true
 
 [tool.ruff.lint.per-file-ignores]
 # Tests legitimately carry long assertion lines (fixtures, expectations on one line).

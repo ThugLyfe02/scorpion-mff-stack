@@ -15,10 +15,10 @@ PY=".venv/Scripts/python.exe"
 [ -x "$PY" ] || PY="python"
 
 echo "== ruff =="
-"$PY" -m ruff check src tests
+"$PY" -m ruff check src tests scorpion_mff
 
 echo "== mypy (strict) =="
-"$PY" -m mypy src/scorpion
+"$PY" -m mypy src/scorpion scorpion_mff
 
 if [ "${1:-}" = "--fast" ]; then
   echo "gates: lint and types clean"
