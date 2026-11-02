@@ -1,0 +1,10 @@
+[Unit]
+Description=Start the Scorpion paper session before the open (XNYS calendar decided in-process)
+
+[Timer]
+OnCalendar=Mon..Fri 09:10 America/New_York
+Persistent=false
+Unit=scorpion-paper.service
+
+[Install]
+WantedBy=timers.target

@@ -14,3 +14,17 @@ logs/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# exec-core-v1: runtime state, caches, raw ticks and Discord exports never enter git
+var/
+cache/
+bars_cache/
+*.sqlite3
+*.dbn
+*.dbn.zst
+*.parquet
+raw_ticks/
+discord-history/
+discord_export*/
+*discord_export*.json
+journal/

@@ -1,0 +1,9 @@
+/var/lib/scorpion/reports/*.csv /var/lib/scorpion/latency/*.json /var/lib/scorpion/journal/*.jsonl {
+    weekly
+    rotate 30
+    maxage 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+}

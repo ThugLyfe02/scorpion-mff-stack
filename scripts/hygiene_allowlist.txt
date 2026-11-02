@@ -1,0 +1,15 @@
+# Pre-existing tracked paths under a cache/ directory (scripts + instruments.json, no ticks).
+# Grandfathered by exec-core-v1 so the guard blocks NEW artifacts; owner to review/remove.
+mff-backtest/charts_1m/cache/check_245.py
+mff-backtest/charts_1m/cache/check_min.py
+mff-backtest/charts_1m/cache/check_prior.py
+mff-backtest/charts_1m/cache/check_prior2.py
+mff-backtest/charts_1m/cache/check_px.py
+mff-backtest/charts_1m/cache/count_bars.py
+mff-backtest/charts_1m/cache/instruments.json
+mff-backtest/charts_1m/cache/render_charts.py
+mff-backtest/charts_1m/cache/render_part1.py
+mff-backtest/charts_1m/cache/render_part2.py
+mff-backtest/charts_1m/cache/render_part3.py
+mff-backtest/charts_1m/cache/render_part4.py
+mff-backtest/charts_1m/cache/render_part5.py
