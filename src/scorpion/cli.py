@@ -475,3 +475,11 @@ def replay_main() -> None:
             sort_keys=True,
         )
     )
+
+
+def scorpion_main() -> None:
+    """``scorpion`` console entry point for the paper execution core (see exec_cli)."""
+
+    from .exec_cli import main
+
+    raise SystemExit(main())

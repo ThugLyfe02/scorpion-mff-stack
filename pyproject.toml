@@ -12,6 +12,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+databento = [
+  "databento>=0.60",
+]
 dev = [
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.24,<1",
@@ -21,6 +24,7 @@ dev = [
 ]
 
 [project.scripts]
+scorpion = "scorpion.cli:scorpion_main"
 scorpion-replay = "scorpion.cli:replay_main"
 scorpion-health = "scorpion.cli:health_main"
 scorpion-accuracy = "scorpion.cli:accuracy_main"
@@ -77,3 +81,8 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 python_version = "3.13"
 strict = true
 packages = ["scorpion"]
+
+[[tool.mypy.overrides]]
+# Optional runtime dependencies of the paper session; imported lazily, never in CI.
+module = ["databento", "databento.*", "exchange_calendars"]
+ignore_missing_imports = true

@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol
 
-from .broker import ExecutionMode, ExecutionResult, PaperBroker, Quote, ReviewOnlyBroker
+from .broker import (
+    ExecutionMode,
+    ExecutionResult,
+    PaperBroker,
+    Quote,
+    ReviewOnlyBroker,
+    StaleQuote,
+)
 from .decision_packet import DecisionDisposition, OperatorDecisionPacket
 from .domain import Effect, EffectKind, SignalEvent
 from .pricing import entry_is_stale, entry_limit
@@ -74,11 +82,23 @@ class QuoteSource(Protocol):
 
 
 class QuoteCache:
-    """Tiny thread-safe quote cache intended to be fed by a separate market-data stream."""
+    """Per-symbol quote cache fed by the market-data task.
 
-    def __init__(self) -> None:
+    One dict entry per symbol; a lookup never falls back to another symbol. Two read paths:
+
+    * :meth:`lookup`/:meth:`get` — legacy wall-clock API used by :class:`FastPathPreparer`.
+    * :meth:`fresh` — the exec-core decision path: monotonic-clock age, millisecond guard, and a
+      typed :class:`StaleQuote` instead of ``None``.
+
+    The writer and the decision loop share one asyncio thread in the paper session; the lock only
+    matters for legacy threaded callers and is uncontended there.
+    """
+
+    def __init__(self, *, mono_ns: Callable[[], int] = time.monotonic_ns) -> None:
         self._lock = threading.RLock()
         self._quotes: dict[str, Quote] = {}
+        self._mono_ns = mono_ns
+        self._last_message_mono_ns: int | None = None
 
     def update(
         self,
@@ -87,14 +107,65 @@ class QuoteCache:
         bid: Decimal,
         ask: Decimal,
         observed_ts_utc: datetime,
+        last: Decimal | None = None,
+        ts_event_ns: int | None = None,
+        recv_mono_ns: int | None = None,
     ) -> None:
         if not contract_key:
             raise ValueError("contract_key is required")
         if bid <= 0 or ask <= 0 or ask < bid:
             raise ValueError("invalid quote")
-        quote = Quote(bid, ask, observed_ts_utc.astimezone(UTC))
+        received = self._mono_ns() if recv_mono_ns is None else recv_mono_ns
+        quote = Quote(
+            bid,
+            ask,
+            observed_ts_utc.astimezone(UTC),
+            last=last,
+            ts_event_ns=ts_event_ns,
+            recv_mono_ns=received,
+        )
         with self._lock:
             self._quotes[contract_key] = quote
+            self._last_message_mono_ns = received
+
+    def note_message(self, recv_mono_ns: int | None = None) -> None:
+        """Record subscription liveness for a message that carried no usable quote."""
+
+        with self._lock:
+            self._last_message_mono_ns = self._mono_ns() if recv_mono_ns is None else recv_mono_ns
+
+    @property
+    def last_message_mono_ns(self) -> int | None:
+        return self._last_message_mono_ns
+
+    def symbols(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(self._quotes)
+
+    def age_ms(self, symbol: str, *, now_mono_ns: int | None = None) -> float | None:
+        quote = self._quotes.get(symbol)
+        if quote is None or quote.recv_mono_ns is None:
+            return None
+        now = self._mono_ns() if now_mono_ns is None else now_mono_ns
+        return (now - quote.recv_mono_ns) / 1_000_000.0
+
+    def fresh(
+        self,
+        symbol: str,
+        *,
+        max_age_ms: int,
+        now_mono_ns: int | None = None,
+    ) -> Quote | StaleQuote:
+        quote = self._quotes.get(symbol)
+        if quote is None:
+            return StaleQuote(symbol, None, "unknown_symbol")
+        if quote.recv_mono_ns is None:
+            return StaleQuote(symbol, None, "no_monotonic_receive_time")
+        now = self._mono_ns() if now_mono_ns is None else now_mono_ns
+        age_ms = (now - quote.recv_mono_ns) / 1_000_000.0
+        if age_ms < 0 or age_ms > max_age_ms:
+            return StaleQuote(symbol, age_ms, f"stale_age_ms={age_ms:.1f}>{max_age_ms}")
+        return quote
 
     def lookup(
         self,

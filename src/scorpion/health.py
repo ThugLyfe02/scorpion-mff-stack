@@ -1,8 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
+
+from .config import StalePolicy
+
+
+class QuoteAges(Protocol):
+    @property
+    def last_message_mono_ns(self) -> int | None: ...
+
+    def age_ms(self, symbol: str, *, now_mono_ns: int | None = None) -> float | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,3 +82,73 @@ def evaluate_decision_health(
         if value > maximum:
             failures.append(f"{key}:{value:.6f}>{maximum:.6f}")
     return HealthStatus(ok=not failures, failures=tuple(failures))
+
+
+# --------------------------------------------------------------------------------------------
+# exec-core feed health (monotonic clock, milliseconds, session-scoped). Thresholds live only in
+# scorpion.config.StalePolicy.
+# --------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class FeedHealth:
+    latch_reasons: tuple[str, ...]
+    warnings: tuple[str, ...]
+    feed_age_ms: float | None
+
+    @property
+    def ok(self) -> bool:
+        return not self.latch_reasons
+
+
+class FeedHealthMonitor:
+    """Turns quote-cache ages into latch reasons (feed silence, persistent skew) and warnings.
+
+    Only symbols with an open paper position or a pending call are checked for per-symbol silence;
+    a quiet small-cap with nothing working is normal and is not an alarm.
+    """
+
+    def __init__(self, cache: QuoteAges, policy: StalePolicy, *, started_mono_ns: int) -> None:
+        self._cache = cache
+        self._policy = policy
+        self._started_mono_ns = started_mono_ns
+        self._skew_since_mono_ns: int | None = None
+        self._last_skew_ms = 0.0
+
+    def observe_skew(self, skew_ms: float, now_mono_ns: int) -> None:
+        self._last_skew_ms = skew_ms
+        if abs(skew_ms) > self._policy.clock_skew_ms:
+            if self._skew_since_mono_ns is None:
+                self._skew_since_mono_ns = now_mono_ns
+        else:
+            self._skew_since_mono_ns = None
+
+    def evaluate(
+        self,
+        *,
+        now_mono_ns: int,
+        session_open: bool,
+        watched: Iterable[str] = (),
+    ) -> FeedHealth:
+        last = self._cache.last_message_mono_ns
+        baseline = last if last is not None else self._started_mono_ns
+        feed_age_ms = (now_mono_ns - baseline) / 1_000_000.0
+        if not session_open:
+            return FeedHealth((), (), feed_age_ms)
+        latch: list[str] = []
+        warn: list[str] = []
+        if feed_age_ms > self._policy.feed_silence_ms:
+            latch.append(f"feed_silence_ms={feed_age_ms:.0f}>{self._policy.feed_silence_ms}")
+        for symbol in sorted(set(watched)):
+            age = self._cache.age_ms(symbol, now_mono_ns=now_mono_ns)
+            if age is None or age > self._policy.symbol_silence_ms:
+                shown = "none" if age is None else f"{age:.0f}"
+                warn.append(f"symbol_silence:{symbol}:age_ms={shown}")
+        if self._skew_since_mono_ns is not None:
+            persisted = (now_mono_ns - self._skew_since_mono_ns) / 1_000_000.0
+            message = f"clock_skew_ms={self._last_skew_ms:.0f} for {persisted:.0f}ms"
+            if persisted >= self._policy.clock_skew_persist_ms:
+                latch.append(message)
+            else:
+                warn.append(message)
+        return FeedHealth(tuple(latch), tuple(warn), feed_age_ms)
