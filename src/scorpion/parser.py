@@ -13,7 +13,7 @@ from .accuracy import DecisionEvidence
 from .config import ALLOWED_CHANNEL_IDS, EXCLUDED_TICKERS, GUILD_ID, MARKET_TZ
 from .domain import EventKind, RawDiscordMessage, SignalEvent
 
-PARSER_VERSION = "v3"
+PARSER_VERSION = "v4"
 
 ENTRY_RE = re.compile(
     r"\b(?P<ticker>[A-Z]{1,6})\b\s+\$?"
@@ -23,6 +23,19 @@ ENTRY_RE = re.compile(
 ENTRY_ALT_RE = re.compile(
     r"\b(?P<cp>CALL|PUT)\b\s+\b(?P<ticker>[A-Z]{1,6})\b\s+"
     r"\$?(?P<strike>\d+(?:\.\d+)?)\b",
+    re.IGNORECASE,
+)
+# Options King structured callout, e.g. "CALL / TICKER ABC / STRIKE $12.5 / Exp Nov 6 /
+# Current BID Price $.85 / SL at 25%" (2022-2026 variants: "Buy to open PUT TICKER ...",
+# "CALL/ swing TICKER ...", "Premium Price $715"). The template is an explicit entry, so trailing
+# commentary ("could pay great", "add more later") does not demote it to AMBIGUOUS.
+OK_TEMPLATE_RE = re.compile(
+    r"\b(?P<cp>CALL|PUT)\b[^\n]{0,200}?\bTICKER\b\s*[:/|-]?\s*\$?(?P<ticker>[A-Z]{1,6})\b"
+    r"[\s/|,:-]*\bSTRIKE\b\s*[:/|-]?\s*\$?(?P<strike>\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+OK_PRICE_RE = re.compile(
+    r"\b(?:price|premium)\b[\s:/|!-]*\$?\s*(?P<price>\d*\.?\d+)",
     re.IGNORECASE,
 )
 PRICE_ANCHOR_RE = re.compile(
@@ -240,8 +253,16 @@ def parse_message_with_evidence(
             1.0,
         )
 
-    entry_match = ENTRY_RE.search(normalized) or ENTRY_ALT_RE.search(normalized)
-    negated_action = _NEGATED_ACTION_RE.search(normalized)
+    template_match = OK_TEMPLATE_RE.search(normalized)
+    entry_match = (
+        template_match or ENTRY_RE.search(normalized) or ENTRY_ALT_RE.search(normalized)
+    )
+    # For a structured callout only the text before the template can negate it.
+    negated_action = (
+        _NEGATED_ACTION_RE.search(normalized[: template_match.start()])
+        if template_match is not None
+        else _NEGATED_ACTION_RE.search(normalized)
+    )
     negated_entry_prefix = (
         _NEGATION_TOKEN_RE.search(normalized[: entry_match.start()])
         if entry_match is not None
@@ -261,7 +282,12 @@ def parse_message_with_evidence(
     )
     historical_context = _HISTORICAL_CONTEXT_RE.search(normalized)
     historical_action = entry_match is not None or bool(contextual_hits)
-    if historical_context is not None and historical_action and len(contextual_families) <= 1:
+    if (
+        template_match is None
+        and historical_context is not None
+        and historical_action
+        and len(contextual_families) <= 1
+    ):
         return finish(
             _base(raw, EventKind.AMBIGUOUS, "historical_action_context"),
             "action.historical_context",
@@ -270,7 +296,12 @@ def parse_message_with_evidence(
         )
     conditional_context = _CONDITIONAL_RE.search(normalized)
     conditional_action = entry_match is not None or bool(contextual_hits)
-    if conditional_context is not None and conditional_action and len(contextual_families) <= 1:
+    if (
+        template_match is None
+        and conditional_context is not None
+        and conditional_action
+        and len(contextual_families) <= 1
+    ):
         return finish(
             _base(raw, EventKind.AMBIGUOUS, "conditional_action_context"),
             "action.conditional_context",
@@ -284,7 +315,12 @@ def parse_message_with_evidence(
             event = replace(_base(raw, EventKind.IGNORE, "excluded_ticker"), ticker=ticker)
             return finish(event, "entry.excluded_ticker", 1.0, matched_terms=(ticker,))
         tail = normalized[entry_match.end():]
-        price_match = PRICE_ANCHOR_RE.search(tail)
+        # A template's "SL at 25%" must never be read as the entry price, so the generic
+        # "@/at/bid" anchor is only used for free-form entries.
+        if template_match is not None:
+            price_match = OK_PRICE_RE.search(tail)
+        else:
+            price_match = PRICE_ANCHOR_RE.search(tail)
         anchored_price = price_match is not None
         if price_match is None:
             fallback_matches = list(FALLBACK_PRICE_RE.finditer(tail))
