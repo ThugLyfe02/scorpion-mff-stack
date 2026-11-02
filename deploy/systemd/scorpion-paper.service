@@ -1,0 +1,29 @@
+[Unit]
+Description=Scorpion paper execution session (PAPER only; no live order path exists)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=scorpion
+WorkingDirectory=/opt/scorpion/scorpion-mff-stack
+Environment=TZ=America/New_York
+Environment=SCORPION_STATE_DIR=/var/lib/scorpion
+Environment=SCORPION_BROKER_MODE=PAPER
+# 0600, owned by root: DATABENTO_API_KEY, SCORPION_DISCORD_TOKEN, SCORPION_SIGNAL_AUTHOR_IDS,
+# SCORPION_PAGERDUTY_ROUTING_KEY. Never commit this file.
+EnvironmentFile=/etc/scorpion/env
+ExecStartPre=/opt/scorpion/venv/bin/python -m scorpion preflight
+ExecStart=/opt/scorpion/venv/bin/python -m scorpion run-session
+Restart=on-failure
+RestartSec=5
+WatchdogSec=30
+TimeoutStopSec=20
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/scorpion
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -19,6 +19,23 @@ class Quote:
     bid: Decimal
     ask: Decimal
     observed_ts_utc: datetime
+    last: Decimal | None = None
+    # Provider event time (ns since epoch, wall clock) and local receive time on the monotonic
+    # clock. Ages are computed only from recv_mono_ns; wall clocks are never compared for age.
+    ts_event_ns: int | None = None
+    recv_mono_ns: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StaleQuote:
+    """Returned instead of a quote when the symbol is unknown or its quote is too old.
+
+    It deliberately carries no price, so nothing downstream can price an order from it.
+    """
+
+    symbol: str
+    age_ms: float | None
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)
