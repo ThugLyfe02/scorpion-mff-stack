@@ -40,8 +40,11 @@ def calls() -> list[dict[str, str]]:
 def request_for(row: dict[str, str]) -> PullRequest:
     start = pd.Timestamp(row["entry_minute"]).tz_convert("UTC")
     return PullRequest(
-        "XNAS.ITCH", "trades", (row["ticker"],),
-        (start - pd.Timedelta(minutes=2)).isoformat(), (start + pd.Timedelta(minutes=16)).isoformat(),
+        "XNAS.ITCH",
+        "trades",
+        (row["ticker"],),
+        (start - pd.Timedelta(minutes=2)).isoformat(),
+        (start + pd.Timedelta(minutes=16)).isoformat(),
     )
 
 
@@ -63,7 +66,19 @@ def main() -> None:
     for row in rows:
         path = TAPE / f"{row['call_id']}.dbn.zst"
         if not path.exists():
-            guarded_pull(client, request_for(row), sink=lambda data, p=path: data.to_file(str(p)))
+            err = None
+            for _attempt in range(2):  # one retry on a transient network error
+                try:
+                    guarded_pull(
+                        client, request_for(row), sink=lambda data, p=path: data.to_file(str(p))
+                    )
+                    err = None
+                    break
+                except RuntimeError as exc:  # already redacted by guarded_pull
+                    err = str(exc)
+            if err is not None:
+                results.append({"call_id": row["call_id"], "tape": "pull_failed", "error": err})
+                continue
         import databento
 
         trades = databento.DBNStore.from_file(str(path)).to_df()
@@ -82,15 +97,20 @@ def main() -> None:
         before = ts < entry
         shares_needed = int(1000 // limit)
         res = {
-            "call_id": row["call_id"], "ticker": row["ticker"], "tier": row["tier"],
-            "bar_fill": row["fill_type"] == "limit", "tape_fill": tape_fill,
+            "call_id": row["call_id"],
+            "ticker": row["ticker"],
+            "tier": row["tier"],
+            "bar_fill": row["fill_type"] == "limit",
+            "tape_fill": tape_fill,
             "shares_below_limit": float(sz[window & (px < limit)].sum()),
             "shares_needed_1000usd": shares_needed,
             "first_through_s": float((ts[hit][0] - entry).total_seconds()) if tape_fill else None,
             "bar_open_vs_tape_first_bps": (
-                (limit / px[ts >= entry][0] - 1) * 1e4 if (ts >= entry).any() else None),
+                (limit / px[ts >= entry][0] - 1) * 1e4 if (ts >= entry).any() else None
+            ),
             "last_print_before_entry_vs_bar_open_bps": (
-                (px[before][-1] / limit - 1) * 1e4 if before.any() else None),
+                (px[before][-1] / limit - 1) * 1e4 if before.any() else None
+            ),
         }
         if row["fill_type"] != "limit":
             chase_t = entry + pd.Timedelta(minutes=3)
@@ -110,20 +130,28 @@ def main() -> None:
     chases = [r for r in ok if "chase_model_minus_tape_bps" in r]
     summary = {
         "calls_with_tape": len(ok),
+        "pull_failed": sum(r.get("tape") == "pull_failed" for r in results),
+        "tape_empty": sum(r.get("tape") == "empty" for r in results),
         "estimated_total_usd": str(total),
         "fill_agreement": sum(r["bar_fill"] == r["tape_fill"] for r in ok),
         "bar_fill_tape_nofill": sum(r["bar_fill"] and not r["tape_fill"] for r in ok),
         "bar_nofill_tape_fill": sum((not r["bar_fill"]) and r["tape_fill"] for r in ok),
         "filled_with_size_strictly_below_limit_ge_order": sum(
-            r["shares_below_limit"] >= r["shares_needed_1000usd"] for r in filled),
+            r["shares_below_limit"] >= r["shares_needed_1000usd"] for r in filled
+        ),
         "filled_n": len(filled),
         "median_first_through_s": med("first_through_s", filled),
         "median_bar_open_vs_first_print_bps": med("bar_open_vs_tape_first_bps"),
-        "median_last_print_before_entry_vs_bar_open_bps": med("last_print_before_entry_vs_bar_open_bps"),
+        "median_last_print_before_entry_vs_bar_open_bps": med(
+            "last_print_before_entry_vs_bar_open_bps"
+        ),
         "chase_n": len(chases),
         "median_chase_model_minus_tape_bps": med("chase_model_minus_tape_bps", chases),
         "mean_chase_model_minus_tape_bps": (
-            round(statistics.fmean(r["chase_model_minus_tape_bps"] for r in chases), 3) if chases else None),
+            round(statistics.fmean(r["chase_model_minus_tape_bps"] for r in chases), 3)
+            if chases
+            else None
+        ),
     }
     a.out.write_text(json.dumps({"summary": summary, "rows": results}, indent=1, default=str))
     print(json.dumps(summary, indent=1))

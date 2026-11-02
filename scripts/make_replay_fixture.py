@@ -26,7 +26,7 @@ def bars_for(symbol: str, start: float, rng: random.Random) -> list[list[object]
         end = datetime(y, m, d, 16, 30, tzinfo=ET)
         drift = rng.choice((-1, 1)) * 0.0004
         while t < end:
-            if symbol == "THIN" and not (t.minute % 3 == 0):
+            if symbol == "THIN" and t.minute % 3 != 0:
                 t += timedelta(minutes=1)
                 continue
             if t.minute % 37 == 0:

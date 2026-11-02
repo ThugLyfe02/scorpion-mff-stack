@@ -30,7 +30,8 @@ def dec(value: str) -> Decimal | None:
 
 
 def main(path: str, since: str = "") -> None:
-    rows = [r for r in csv.DictReader(open(path)) if r["outcome"] == "callout" and r["date"] >= since]
+    with open(path, newline="") as fh:
+        rows = [r for r in csv.DictReader(fh) if r["outcome"] == "callout" and r["date"] >= since]
     tally: Counter[str] = Counter()
     by_year: dict[str, Counter[str]] = {}
     for r in rows:
