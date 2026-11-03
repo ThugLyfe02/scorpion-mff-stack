@@ -20,3 +20,7 @@ live/venue-snapshot.json
 # risk state is machine state: a persisted drawdown must not be committed
 live/governor.json
 live/governor.json.tmp
+
+# working-order registry and provenance journal are runtime evidence, not source
+live/orders.jsonl
+live/provenance.jsonl

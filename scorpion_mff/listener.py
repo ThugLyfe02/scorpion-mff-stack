@@ -19,8 +19,10 @@ import time
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Protocol
 
+from .account import BuyingPowerGuard
 from .broker import Ack, BrokerError, QuoteProvider, TransportError, intent_key
 from .engine import Engine
 from .execution import BreakerState, CircuitBreaker
@@ -37,15 +39,40 @@ from .gateway import (
 from .health import Heartbeat, LatencyBudget
 from .killswitch import KillSwitch
 from .ledger import TRANSPORT_UNKNOWN
+from .orders import OrderError, OrderLifecycle, SweepKind, WorkingOrder, tif_from_value
 from .parity import Trace
 from .parser import CHANNEL_IDS, parse
+from .provenance import Admission, FilterAction, MessageEnvelope, ProvenanceFilter
 from .reconcile import ReconcileReport, VenuePosition
+from .runtime import (
+    QUEUE_FULL,
+    RUNTIME_CLOSED,
+    BoundedRuntime,
+    RuntimeBroker,
+    RuntimeQuoteProvider,
+    run_in_worker,
+)
 from .types import OrderIntent, RawMessage
 from .venue import VenueError, VenueFeed
 
 
 class GatewayTransport(Protocol):
     def messages(self) -> AsyncIterator[RawMessage]: ...
+
+
+def _parse_iso_epoch(value: object) -> float | None:
+    """Discord timestamps are ISO-8601 strings; convert to epoch seconds or None."""
+    if not isinstance(value, str) or not value:
+        return None
+    from datetime import datetime
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.timestamp()
 
 
 def _elapsed_ms(start: float, end: float) -> int:
@@ -114,11 +141,40 @@ class Listener:
     # real session can be diffed against the offline replay event by event. Off by
     # default: tracing is an evidence act, not a side effect of running.
     trace: Trace | None = None
+    # Optional bounded runtime for the blocking parts of the path (quote HTTP, broker
+    # HTTP). Disabled by default: every callable then runs inline on the caller thread
+    # and the live path is byte-for-byte the path the offline tests pin. When enabled,
+    # a slow venue can no longer stall the Gateway heartbeat or later alerts; see
+    # `runtime.py` and `MFF_RUNTIME=1`.
+    runtime: BoundedRuntime = field(default_factory=BoundedRuntime)
+    # Optional pre-trade buying-power guard. Off by default; when attached, an ENTRY
+    # that the venue account cannot fund is refused before it reaches the broker and
+    # the refusal is a named row in the fill log. Exits are never blocked: a desk that
+    # cannot sell because cash is short has the safety inverted.
+    bp_guard: BuyingPowerGuard | None = None
+    # Optional provenance/authority filter. Off by default; when attached, a message
+    # from an author the desk has not authorised is refused before the parser sees it,
+    # and an edit or delete that arrives before an order is sent aborts that order
+    # instead of executing a stale instruction.
+    provenance: ProvenanceFilter | None = None
+    # Optional working-order lifecycle. Off by default; when attached, every placed
+    # order is tracked from intent through ack/partial/reject, a stale entry can be
+    # cancelled and an unfilled exit is paged rather than silently forgotten - and the
+    # registry replays across a restart so an in-flight order is not lost with the
+    # process.
+    order_lifecycle: OrderLifecycle | None = None
 
     def __post_init__(self) -> None:
         if self.fills is None:
             self.fills = self.engine.fills
         self.engine.blocked = self.kill.blocked     # one switch, checked per buy
+        # The blocking quote fetch and the broker call are the only two pieces moved
+        # off the event loop when the runtime is on. While it is off the objects are
+        # NOT wrapped: the default wiring must be the exact object the caller passed,
+        # because the offline paths inspect their broker and quote provider directly.
+        if self.runtime.enabled:
+            self.quotes = RuntimeQuoteProvider(self.quotes, self.runtime)
+            self.broker = RuntimeBroker(self.broker, self.runtime)
         self.engine.quotes = self.quotes            # the engine prices its own
                                                     # decisions, incl. exits that
                                                     # do not restate the contract
@@ -127,7 +183,21 @@ class Listener:
         async for message in self.transport.messages():
             if limit is not None and self.processed >= limit:
                 break
-            self.handle(message)
+            if not self.runtime.enabled:
+                self.handle(message)
+                continue
+            outcome = await run_in_worker(
+                partial(self.handle, message),
+                runtime=self.runtime,
+                timeout_ms=self.runtime.default_deadline_ms,
+                label=f"handle:{message.message_id or '-'}",
+            )
+            if not outcome.ok:
+                self.heartbeat.beat(note=f"runtime:{outcome.reason}")
+                if outcome.reason in (QUEUE_FULL, RUNTIME_CLOSED):
+                    # A saturated pool must not drop an alert: run it on the loop
+                    # thread, which is slower but never silently loses a signal.
+                    self.handle(message)
         return self.processed
 
     def handle(self, message: RawMessage) -> list[OrderIntent]:
@@ -149,6 +219,23 @@ class Listener:
             while len(self.seen) > self.seen_max:
                 self.seen.pop(next(iter(self.seen)))
 
+        envelope: MessageEnvelope | None = None
+        admission: Admission | None = None
+        if self.provenance is not None:
+            envelope = self._envelope(message)
+            verdict = self.provenance.observe(message.event_type, envelope, self.clock())
+            if verdict.action in {FilterAction.DROP, FilterAction.REVOKE}:
+                reason = verdict.admission.log_reason
+                if self.fills is not None:
+                    self.fills.record(
+                        event="reject", contract_key="", qty=0, price=0.0,
+                        reason=reason, accepted=False, ts=self.clock(),
+                        latency_ms=0, note=f"{mid} {verdict.admission.detail}".strip())
+                if verdict.action is FilterAction.REVOKE:
+                    self._book_alert("provenance_revoked", RuntimeError(reason))
+                return []
+            admission = verdict.admission
+
         signal = parse(message)
         # No pre-fetch here: the engine resolves the target position first and
         # prices THAT, so an exit post which does not restate the contract is
@@ -156,7 +243,23 @@ class Listener:
         intents = self.engine.on_signal(signal)
 
         for intent in intents:
+            if self.provenance is not None and envelope is not None and admission is not None:
+                # Re-check the content hash immediately before the send: an edit that
+                # landed between admission and placement must abort the order, because
+                # the instruction the engine decided on is no longer the one on screen.
+                verified = self.provenance.verify_before_send(
+                    envelope, admission, self.clock())
+                if not verified.ok:
+                    if self.fills is not None:
+                        self.fills.record(
+                            event="alert", contract_key=intent.contract_key,
+                            qty=intent.qty, price=intent.limit,
+                            reason=verified.log_reason, accepted=False,
+                            ts=self.clock(), latency_ms=0, note=mid)
+                    continue
             self._place(intent)
+        if self.provenance is not None and envelope is not None and admission is not None:
+            self.provenance.record_decision(envelope, self.clock())
 
         latency_ms = int((self.clock() - started) * 1000)
         self.budget.record(latency_ms)
@@ -174,6 +277,22 @@ class Listener:
                               engine=self.engine, rows=self.fills.records)
         self.processed += 1
         return intents
+
+    def _envelope(self, message: RawMessage) -> MessageEnvelope:
+        """The provenance view of one dispatch. A tape has no author, so a guard
+        attached to a replay is a configuration error and refuses as `author_unknown`
+        rather than trusting the tape."""
+        return MessageEnvelope(
+            message_id=message.message_id,
+            channel_id=message.channel_id,
+            author_id=message.author_id,
+            author_name=message.author_name,
+            content=message.text,
+            edited_at=message.edited_at,
+            deleted=message.event_type == "MESSAGE_DELETE",
+            reference_message_id=message.reference_id,
+            event_type=message.event_type,
+        )
 
     def _place(self, intent: OrderIntent) -> None:
         """Record the intent, place it, then record the terminal ack or reject.
@@ -203,6 +322,19 @@ class Listener:
                 event="intent", contract_key=intent.contract_key, qty=intent.qty,
                 price=intent.limit, reason=intent.reason, accepted=True,
                 ts=sent, note=key)
+        if self.bp_guard is not None and intent.action != "sell":
+            # The pre-trade budget (`risk.py`) caps premium against a POLICY limit; this
+            # checks the account it would actually be funded from. A missing or stale
+            # account feed is a refusal, never an assumed balance.
+            decision = self.bp_guard.precheck_intent(intent, sent)
+            if not decision.ok:
+                if self.fills is not None:
+                    self.fills.record(
+                        event="reject", contract_key=intent.contract_key,
+                        qty=intent.qty, price=intent.limit,
+                        reason=decision.log_reason, accepted=False, ts=sent,
+                        latency_ms=0, note=f"{key} {decision.detail}".strip())
+                return
         if intent.action == "buy" and not self.breaker.allow(sent):
             if self.fills is not None:
                 # A breaker refusal never reaches a venue, so its round trip is zero
@@ -217,10 +349,28 @@ class Listener:
         # breaker refusal above never reaches a venue, so it has no place in a book
         # of confirmed execution. From here on, every outcome is folded in.
         booked = self._book_intent(intent, key, sent)
+        if self.order_lifecycle is not None:
+            try:
+                self.order_lifecycle.track(
+                    WorkingOrder(
+                        client_order_id=key,
+                        contract=intent.contract_key,
+                        side=intent.action,
+                        qty=intent.qty,
+                        limit=intent.limit,
+                        tif=tif_from_value(intent.time_in_force),
+                        created_at=sent,
+                        updated_at=sent,
+                    ),
+                    ts=sent,
+                )
+            except OrderError as exc:
+                self._orders_alert("track", exc)
         try:
             ack = self.broker.place(intent)
         except TransportError as exc:
             answered = self.clock()
+            self._orders_event(key, "timeout", answered, reason="transport_unknown")
             self._on_transport_failure(intent, key, answered, exc, booked,
                                        sent=sent)
             return
@@ -230,6 +380,7 @@ class Listener:
             # tripping the breaker.
             answered = self.clock()
             self.breaker.record_success()
+            self._orders_event(key, "reject", answered, reason=f"broker:{exc}")
             if self.fills is not None:
                 self.fills.record(
                     event="reject", contract_key=intent.contract_key, qty=intent.qty,
@@ -244,7 +395,31 @@ class Listener:
                 event="ack", contract_key=ack.contract_key, qty=ack.qty,
                 price=ack.price, reason=intent.reason, ts=answered,
                 latency_ms=_elapsed_ms(sent, answered), note=key)
+        if self.order_lifecycle is not None:
+            venue_id = str(getattr(ack, "broker_order_id", "") or "")
+            self._orders_event(key, "ack", answered, venue_order_id=venue_id)
+            if ack.qty >= intent.qty:
+                self._orders_event(key, "fill", answered, filled_qty=ack.qty)
+            else:
+                self._orders_event(key, "partial", answered, filled_qty=ack.qty)
         self._book_ack(intent, booked, ack, answered)
+
+    def _orders_event(self, client_order_id: str, event: str, now: float,
+                      **kwargs: object) -> None:
+        """Record one lifecycle event; a lifecycle failure is an alert, never a crash."""
+        if self.order_lifecycle is None:
+            return
+        try:
+            self.order_lifecycle.apply(client_order_id, event, ts=now, **kwargs)  # type: ignore[arg-type]
+        except OrderError as exc:
+            self._orders_alert(event, exc)
+
+    def _orders_alert(self, action: str, exc: Exception) -> None:
+        if self.fills is not None:
+            self.fills.record(
+                event="alert", contract_key="", qty=0, price=0.0,
+                reason=f"orders:{action}:{exc}", accepted=False, ts=self.clock(),
+                note="the working-order registry and the intent log disagree")
 
     def _on_transport_failure(self, intent: OrderIntent, key: str, now: float,
                               exc: TransportError, booked: str = "",
@@ -543,6 +718,15 @@ class Listener:
             self._place(intent)
             placed.append(intent)
         placed.extend(self.refresh_stops())
+        if self.order_lifecycle is not None:
+            # A stale ENTRY is cancellable; a stale EXIT is paged, never cancelled into
+            # nothing. The guard owns that asymmetry; this loop only surfaces it.
+            for action in self.order_lifecycle.sweep(ts):
+                if action.kind is SweepKind.PAGE and self.fills is not None:
+                    self.fills.record(
+                        event="alert", contract_key="", qty=0, price=0.0,
+                        reason=f"orders:{action.reason}", accepted=False, ts=ts,
+                        note=f"{action.client_order_id} {action.venue_order_id}".strip())
         self.heartbeat.beat(note="tick:expiry")
         return placed
 
@@ -725,18 +909,31 @@ class WebsocketGateway:
                     continue
                 if dispatch.event_type in {"READY", "RESUMED"}:
                     continue
-                if dispatch.event_type != "MESSAGE_CREATE":
+                if dispatch.event_type not in {
+                    "MESSAGE_CREATE", "MESSAGE_UPDATE", "MESSAGE_DELETE",
+                }:
                     continue
                 payload = dispatch.payload
                 channel_id = str(payload.get("channel_id", ""))
                 if channel_id not in allowed:
                     continue
+                author = payload.get("author")
+                author = author if isinstance(author, dict) else {}
+                reference = payload.get("message_reference")
+                reference = reference if isinstance(reference, dict) else {}
+                edited_raw = payload.get("edited_timestamp")
                 yield RawMessage(
                     channel=self._name_for(channel_id),
                     channel_id=channel_id,
                     text=str(payload.get("content", "")),
                     message_id=str(payload.get("id", "")),
                     ts=time.time(),
+                    event_type=dispatch.event_type,
+                    author_id=str(author.get("id", "")),
+                    author_name=str(author.get("global_name") or author.get("username") or ""),
+                    edited_at=_parse_iso_epoch(edited_raw),
+                    reference_id=str(reference.get("message_id") or ""),
+                    payload=payload,
                 )
         finally:
             if heartbeat is not None:
