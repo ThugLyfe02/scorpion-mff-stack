@@ -25,6 +25,16 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .account import (
+    BuyingPowerGuard,
+    FeeModel,
+    FileAccountFeed,
+    account_feed_from_env,
+    fee_model_from_env,
+    render_decision,
+    render_fee_model,
+    render_snapshot,
+)
 from .broker import (
     HttpQuoteProvider,
     OrderLookup,
@@ -38,11 +48,41 @@ from .engine import Engine, EngineConfig
 from .fills import FillLog
 from .gateway import GatewayFatalError
 from .health import Heartbeat, LatencyBudget
+from .instruments import (
+    InstrumentError,
+    StaticContractResolver,
+    parse_cli_contract_key,
+)
 from .killswitch import KillSwitch
 from .ledger import Ledger
 from .listener import Listener, TapeTransport, WebsocketGateway
+from .orders import (
+    DEFAULT_PATH as ORDERS_LOG,
+)
+from .orders import (
+    OrderError,
+    OrderLifecycle,
+    OrderRegistry,
+    OrderState,
+    StaleLimitGuard,
+    SweepKind,
+    render_registry,
+    render_registry_verify,
+)
 from .parser import CHANNEL_IDS, EXCLUDED_CHANNEL_IDS, EXCLUDED_TICKERS
+from .provenance import (
+    AuthorityError,
+    AuthorPolicy,
+    ErrorReason,
+    MessageJournal,
+    ProvenanceFilter,
+    ProvenanceGuard,
+    authority_path_from_env,
+    render_journal,
+    render_policy,
+)
 from .replay import load_quotes, load_tape, replay
+from .runtime import BoundedRuntime
 from .types import Fill, RawMessage
 
 if TYPE_CHECKING:                       # `parity` imports the listener; keep it out of
@@ -110,6 +150,22 @@ def _parser() -> argparse.ArgumentParser:
     arm.add_argument("--trace", type=Path, default=None,
                      help="record one decision trace per event (JSON) so the live session "
                           "can be diffed against the offline replay with `shadow --diff`")
+    arm.add_argument("--runtime", action="store_true",
+                     help="run the blocking quote/broker I/O on the bounded worker pool "
+                          "(default: inline, identical to every offline path)")
+    arm.add_argument("--account-snapshot", type=Path, default=None,
+                     help="stamped venue account snapshot for the buying-power precheck "
+                          "(overrides MFF_ACCOUNT_SNAPSHOT/MFF_ACCOUNT_URL)")
+    arm.add_argument("--fee-model", type=Path, default=None,
+                     help="declared fee model JSON; entries require a declared model")
+    arm.add_argument("--authority", type=Path, default=None,
+                     help="author allowlist JSON (default live/authority.json); absent "
+                          "means every author is refused when provenance is armed")
+    arm.add_argument("--chain", type=Path, default=None,
+                     help="static option-chain JSON: resolves each contract to its "
+                          "OSI symbol / instrument id before a live order is sent")
+    arm.add_argument("--orders-log", type=Path, default=None,
+                     help="working-order registry (default live/orders.jsonl)")
 
     sub.add_parser("status", help="kill-switch state + tail of the fill log")
 
@@ -320,6 +376,86 @@ def _parser() -> argparse.ArgumentParser:
                     help=f"minimum timed/priced orders before any suggestion "
                          f"(default {MIN_SAMPLES})")
     dr.add_argument("--json", action="store_true", help="machine-readable drift report")
+
+    ct = sub.add_parser(
+        "contracts",
+        help="option contract identity: OSI/OPRA symbol, parsing, static-chain resolution")
+    ct_sub = ct.add_subparsers(dest="contracts_cmd", required=True)
+    for name, helptext in (("parse", "parse one contract key into its validated identity"),
+                           ("osi", "print the OSI/OPRA symbol for one contract key")):
+        ct_cmd = ct_sub.add_parser(name, help=helptext)
+        ct_cmd.add_argument("key", help="e.g. 'QQQ|CALL|719|0DTE' or 'NVDA|PUT|227.5|2026-09-11'")
+        ct_cmd.add_argument("--session-date", default=None,
+                            help="YYYY-MM-DD session date; required to resolve 0DTE")
+        ct_cmd.add_argument("--json", action="store_true", help="machine-readable identity")
+    ct_res = ct_sub.add_parser(
+        "resolve", help="resolve contract keys against a declared static chain file")
+    ct_res.add_argument("chain", type=Path, help="chain JSON (list of chain rows or refs)")
+    ct_res.add_argument("key", nargs="+", help="one or more contract keys")
+    ct_res.add_argument("--session-date", default=None, help="YYYY-MM-DD session date")
+    ct_res.add_argument("--json", action="store_true", help="machine-readable resolutions")
+
+    od = sub.add_parser(
+        "orders", help="working-order lifecycle: registry, sweep, cancel, replace")
+    od_sub = od.add_subparsers(dest="orders_cmd", required=True)
+    for name, helptext in (
+        ("show", "show the working-order registry, replayed from its log"),
+        ("verify", "verify the order registry (sequence, schema, transitions)"),
+        ("sweep", "list stale working orders: cancellable entries, pageable exits"),
+    ):
+        od_cmd = od_sub.add_parser(name, help=helptext)
+        od_cmd.add_argument("--registry", type=Path, default=None,
+                            help=f"order registry (default {ORDERS_LOG})")
+        od_cmd.add_argument("--stale-after", type=float, default=300.0, metavar="SECONDS",
+                            help="an entry working longer than this is stale (default 300s)")
+        od_cmd.add_argument("--json", action="store_true", help="machine-readable output")
+    od_cancel = od_sub.add_parser(
+        "cancel", help="cancel one working order (dry-run unless --live)")
+    od_cancel.add_argument("--order-id", required=True, help="client order id (intent key)")
+    od_cancel.add_argument("--registry", type=Path, default=None)
+    od_cancel.add_argument("--live", action="store_true", help="actually send the cancel")
+    od_cancel.add_argument("--yes", action="store_true",
+                           help="required to cancel a working SELL order")
+    od_replace = od_sub.add_parser(
+        "replace", help="replace one working order's limit/qty (dry-run unless --live)")
+    od_replace.add_argument("--order-id", required=True, help="client order id (intent key)")
+    od_replace.add_argument("--limit", type=float, default=None, help="new limit price")
+    od_replace.add_argument("--qty", type=int, default=None, help="new quantity")
+    od_replace.add_argument("--registry", type=Path, default=None)
+    od_replace.add_argument("--live", action="store_true", help="actually send the replace")
+    od_replace.add_argument("--yes", action="store_true",
+                            help="required to replace a working SELL order")
+
+    ac = sub.add_parser(
+        "account", help="venue account: buying power, fees, and the pre-trade check")
+    ac_sub = ac.add_subparsers(dest="account_cmd", required=True)
+    ac_show = ac_sub.add_parser("show", help="show the stamped account snapshot and fees")
+    ac_show.add_argument("--snapshot", type=Path, default=None,
+                         help="account snapshot JSON (overrides MFF_ACCOUNT_SNAPSHOT/URL)")
+    ac_show.add_argument("--fee-model", type=Path, default=None, help="declared fee model JSON")
+    ac_show.add_argument("--json", action="store_true", help="machine-readable output")
+    ac_check = ac_sub.add_parser("check", help="precheck one entry against buying power")
+    ac_check.add_argument("--contract", required=True, help="contract key")
+    ac_check.add_argument("--side", default="buy", choices=("buy", "sell"))
+    ac_check.add_argument("--qty", type=int, required=True)
+    ac_check.add_argument("--limit", type=float, required=True)
+    ac_check.add_argument("--snapshot", type=Path, default=None)
+    ac_check.add_argument("--fee-model", type=Path, default=None)
+    ac_check.add_argument("--json", action="store_true", help="machine-readable decision")
+
+    pv = sub.add_parser(
+        "provenance", help="input authority: author allowlist, admissions, journal")
+    pv_sub = pv.add_subparsers(dest="provenance_cmd", required=True)
+    pv_show = pv_sub.add_parser("show", help="show the authority policy and journal state")
+    pv_show.add_argument("--authority", type=Path, default=None,
+                         help="author allowlist JSON (default live/authority.json)")
+    pv_show.add_argument("--journal", type=Path, default=None,
+                         help="provenance journal (default live/provenance.jsonl)")
+    pv_show.add_argument("--json", action="store_true", help="machine-readable output")
+    pv_verify = pv_sub.add_parser("verify", help="verify the provenance journal integrity")
+    pv_verify.add_argument("--journal", type=Path, default=None)
+    pv_verify.add_argument("--authority", type=Path, default=None,
+                           help="author allowlist JSON (default live/authority.json)")
     return p
 
 
@@ -524,6 +660,21 @@ def cmd_arm(args: argparse.Namespace) -> int:
         exposure_limits=exposure_limits,
         risk_state=risk_state, risk_state_path=state_path)
 
+    # Contract identity: a live order carries a venue instrument, not the engine's
+    # internal key. A declared static chain resolves each contract before the send and
+    # refuses an unresolved contract instead of posting a guessed symbol.
+    if args.chain is not None:
+        try:
+            chain_payload = json.loads(args.chain.read_text(encoding="utf-8"))
+            from datetime import date as _date
+            session = _date.fromisoformat(engine.trading_day(time.time()))
+            broker.resolver = StaticContractResolver.from_payload(
+                chain_payload, session_date=session)
+        except (OSError, json.JSONDecodeError, InstrumentError, ValueError) as exc:
+            print(f"refusing to arm: unreadable option chain at {args.chain}: {exc}",
+                  file=sys.stderr)
+            return 1
+
     # The confirmed book is restored BEFORE the first message is handled. The engine's
     # positions are a decision cache; this is the state the venue actually confirmed,
     # so a restart resumes holding what it holds instead of an empty book - and it
@@ -564,6 +715,59 @@ def cmd_arm(args: argparse.Namespace) -> int:
                   if args.venue_snapshot is not None
                   else feed_from_env(max_age_s=args.venue_max_age))
 
+    # Buying-power precheck: the account the order would be funded from, and the fee
+    # model that prices the debit. Entries refuse on a missing/stale/insufficient
+    # account; exits are never blocked. A fee model must be declared explicitly - a
+    # silent zero fee is a guess about the venue.
+    account_feed = (account_feed_from_env()
+                    if args.account_snapshot is None
+                    else FileAccountFeed(path=args.account_snapshot,
+                                        max_age_seconds=120.0))
+    fee_model = (fee_model_from_env()
+                 if args.fee_model is None
+                 else FeeModel.load(args.fee_model, missing_ok=False))
+    if fee_model is None and account_feed is not None:
+        print("refusing to arm: an account feed is configured but no fee model is "
+              "declared - set --fee-model or MFF_ACCOUNT_FEES (partial fee env is "
+              "refused, so zero fees must be explicit)", file=sys.stderr)
+        return 1
+    bp_guard = (BuyingPowerGuard(feed=account_feed, fee_model=fee_model)
+                if account_feed is not None and fee_model is not None else None)
+
+    # Input authority: who may move money, and whether the instruction is still the one
+    # that was admitted. Armed only when an authority file exists; an unreadable policy
+    # refuses the arm rather than silently trusting the channel.
+    provenance = None
+    authority_path = args.authority or authority_path_from_env()
+    if args.authority is not None or authority_path.exists():
+        try:
+            policy = AuthorPolicy.load(authority_path, missing_ok=False)
+            journal_path = ROOT / "live" / "provenance.jsonl"
+            journal = MessageJournal.load(journal_path)
+            if policy is None:
+                raise AuthorityError("no author is trusted by the configured authority",
+                                     reason=ErrorReason.AUTHORITY_MISSING)
+            provenance = ProvenanceFilter(ProvenanceGuard(policy=policy, journal=journal))
+        except (AuthorityError, OSError) as exc:
+            print(f"refusing to arm: the author authority at {authority_path} cannot be "
+                  f"trusted: {exc}", file=sys.stderr)
+            return 1
+
+    # Working-order lifecycle: a durable registry of what the venue has not finished.
+    try:
+        order_registry = OrderRegistry.load(args.orders_log or ORDERS_LOG)
+    except OrderError as exc:
+        print(f"refusing to arm: the working-order registry cannot be replayed: {exc}",
+              file=sys.stderr)
+        return 1
+    order_lifecycle = OrderLifecycle(
+        registry=order_registry,
+        guard=StaleLimitGuard(max_working_seconds=300.0, cancel_stale=False),
+        cancel_order=broker.cancel_order,
+    )
+
+    runtime = BoundedRuntime.from_env() if args.runtime else BoundedRuntime()
+
     listener = Listener(
         transport=gateway,
         engine=engine,
@@ -576,6 +780,10 @@ def cmd_arm(args: argparse.Namespace) -> int:
         tick_s=float(args.tick_s),
         venue_feed=venue_feed,
         venue_every_s=float(args.venue_every),
+        runtime=runtime,
+        bp_guard=bp_guard,
+        provenance=provenance,
+        order_lifecycle=order_lifecycle,
     )
     if args.trace is not None:
         # A live session's decisions become an artefact. The recorder is attached to the
@@ -628,6 +836,40 @@ def cmd_arm(args: argparse.Namespace) -> int:
               f"underlying ${risk_budget.max_underlying_premium_usd or 0:,.0f} | "
               f"cluster ${risk_budget.max_cluster_premium_usd or 0:,.0f} | "
               f"daily worst case ${risk_budget.daily_loss_limit_usd or 0:,.0f}")
+    print(f"io     | runtime {'ON' if runtime.enabled else 'OFF (inline)'} | "
+          f"workers {getattr(runtime, 'workers', 0)} | "
+          f"queue {getattr(runtime, 'queue_capacity', 0)} | "
+          f"entry I/O {'off' if runtime.enabled else 'on'} the event loop")
+    if bp_guard is None:
+        print("account | buying-power precheck OFF (no account feed / fee model)")
+    else:
+        try:
+            snap = account_feed.snapshot(time.time()) if account_feed is not None else None
+        except Exception as exc:            # noqa: BLE001 - a status line, not a gate
+            snap = None
+            print(f"account | feed {account_feed.source if account_feed else '?'} "
+                  f"UNREADABLE: {exc} (entries will refuse)")
+        else:
+            if snap is not None:
+                print(f"account | cash ${snap.cash / 100:,.2f} | buying power "
+                      f"${snap.buying_power / 100:,.2f} | {snap.source} | "
+                      f"stale limit "
+                      f"{getattr(account_feed, 'max_age_seconds', 0) or 0:g}s")
+            print(f"account | fees {fee_model.to_dict() if fee_model else 'MISSING'} "
+                  f"| entries refuse on stale/insufficient account, exits never blocked")
+    print(f"orders | registry {order_registry.path} | "
+          f"{len(order_registry.open_orders())} open | stale entry "
+          f"{300:g}s (cancellable) / unfilled exit pages")
+    if provenance is None:
+        print("auth   | provenance OFF (no live/authority.json; every author is trusted)")
+    else:
+        print(f"auth   | provenance ON | policy {authority_path} | unknown/edited/deleted "
+              f"instructions are refused before the order path")
+    if args.chain is None:
+        print("contract | static chain NOT configured (orders carry the internal key)")
+    else:
+        print(f"contract | static chain {args.chain} | OSI + instrument id resolved and "
+              f"refused when unresolved")
 
     try:
         asyncio.run(pump_listener(listener, args.limit))
@@ -1847,6 +2089,248 @@ def cmd_book(args: argparse.Namespace) -> int:
     return 0
 
 
+def _session_date(value: str | None) -> object:
+    """Parse an optional YYYY-MM-DD session date, or None. Refuses a bad date loudly."""
+    if not value:
+        return None
+    from datetime import date as _date
+
+    return _date.fromisoformat(value)
+
+
+def cmd_contracts(args: argparse.Namespace) -> int:
+    """Contract identity: OSI symbol, key parsing, and static-chain resolution."""
+    try:
+        session = _session_date(args.session_date)
+    except ValueError:
+        print(f"--session-date must be YYYY-MM-DD, got {args.session_date!r}",
+              file=sys.stderr)
+        return 2
+    if args.contracts_cmd in {"parse", "osi"}:
+        parsed = parse_cli_contract_key(args.key, session)  # type: ignore[arg-type]
+        if not parsed.ok:
+            print(f"REFUSED {args.key}: {parsed.reason}: {parsed.detail}",
+                  file=sys.stderr)
+            return 2
+        contract = parsed.contract
+        assert contract is not None
+        if args.contracts_cmd == "osi":
+            print(parsed.osi_symbol)
+        elif args.json:
+            print(json.dumps(parsed.to_dict(), indent=2))
+        else:
+            print(f"{args.key} -> {parsed.osi_symbol}")
+            print(f"  ticker={contract.ticker} side={contract.side.value} "
+                  f"strike=${contract.strike:g} expiry={contract.expiry.isoformat()}")
+            print(f"  contract_key={contract.contract_key}")
+        return 0
+    # resolve: declared static chain -> instrument identity
+    try:
+        payload = json.loads(args.chain.read_text(encoding="utf-8"))
+        resolver = StaticContractResolver.from_payload(payload, session_date=session)  # type: ignore[arg-type]
+    except (OSError, json.JSONDecodeError, InstrumentError, ValueError) as exc:
+        print(f"cannot load chain {args.chain}: {exc}", file=sys.stderr)
+        return 2
+    failures = 0
+    rows = []
+    for key in args.key:
+        parsed = parse_cli_contract_key(key, session)  # type: ignore[arg-type]
+        if not parsed.ok or parsed.contract is None:
+            rows.append({"key": key, "ok": False, "reason": parsed.reason,
+                         "detail": parsed.detail})
+            failures += 1
+            continue
+        try:
+            ref = resolver.resolve(parsed.contract)
+        except InstrumentError as exc:
+            rows.append({"key": key, "ok": False, "reason": exc.reason,
+                         "detail": exc.detail})
+            failures += 1
+            continue
+        rows.append({"key": key, "ok": True, "osi_symbol": ref.osi_symbol,
+                     "instrument_id": ref.instrument_id,
+                     "multiplier": ref.multiplier})
+    if args.json:
+        print(json.dumps(rows, indent=2))
+    else:
+        for row in rows:
+            if row["ok"]:
+                print(f"OK   {row['key']} -> {row['osi_symbol']} "
+                      f"instrument={row['instrument_id']} x{row['multiplier']}")
+            else:
+                print(f"FAIL {row['key']} -> {row['reason']}: {row['detail']}")
+    return 1 if failures else 0
+
+
+def cmd_orders(args: argparse.Namespace) -> int:
+    """Working-order lifecycle: registry replay, stale sweep, cancel and replace."""
+    try:
+        registry = OrderRegistry.load(args.registry or ORDERS_LOG)
+    except OrderError as exc:
+        print(f"REFUSED: the order registry cannot be replayed: {exc}", file=sys.stderr)
+        return 2
+    now = time.time()
+    if args.orders_cmd == "show":
+        if args.json:
+            print(json.dumps([order.to_dict() for order in registry.orders.values()],
+                             indent=2))
+        else:
+            print(render_registry(registry, now=now))
+        return 0
+    if args.orders_cmd == "verify":
+        if registry.path is None or not registry.path.exists():
+            print(f"no order registry yet at {registry.path}")
+            return 0
+        problems = registry.problems()
+        if args.json:
+            print(json.dumps({"ok": not problems, "problems": problems,
+                              "summary": registry.summary()}, indent=2))
+        else:
+            print(render_registry_verify(registry))
+            for problem in problems:
+                print(f"  PROBLEM {problem}")
+        return 1 if problems else 0
+    if args.orders_cmd == "sweep":
+        guard = StaleLimitGuard(max_working_seconds=float(args.stale_after),
+                                cancel_stale=False)
+        actions = guard.sweep(registry.open_orders(), now)
+        if args.json:
+            print(json.dumps([action.to_dict() for action in actions], indent=2))
+        else:
+            if not actions:
+                print(f"no stale working orders ({len(registry.open_orders())} open)")
+            for action in actions:
+                print(f"{action.kind.value:<5} {action.client_order_id} "
+                      f"{action.reason}")
+        return 1 if any(action.kind is SweepKind.PAGE for action in actions) else 0
+    # cancel / replace
+    order = registry.get(args.order_id)
+    if order is None:
+        print(f"no working order {args.order_id!r} in {registry.path}", file=sys.stderr)
+        return 2
+    if order.is_exit and not args.yes:
+        print(f"refusing to {args.orders_cmd} a working SELL without --yes: "
+              f"an exit that disappears is worse than an exit that sits unfilled",
+              file=sys.stderr)
+        return 2
+    if args.orders_cmd == "cancel":
+        if not args.live:
+            print(f"plan: cancel {order.client_order_id} "
+                  f"({order.side} {order.qty}x {order.contract} @ {order.limit:g}, "
+                  f"venue {order.venue_order_id or 'no id yet'})")
+            print("dry run: pass --live to send the cancel")
+            return 0
+        broker = RobinhoodAgenticBroker(dry_run=False)
+        lifecycle = OrderLifecycle(registry=registry)
+        lifecycle.cancel_requested(order.client_order_id, ts=now)
+        try:
+            result = broker.cancel_order(order.venue_order_id)
+        except Exception as exc:            # noqa: BLE001 - broker error taxonomy
+            print(f"cancel failed: {exc}", file=sys.stderr)
+            return 2
+        if result.state is OrderState.CANCELLED:
+            lifecycle.cancel_confirmed(order.client_order_id, ts=time.time())
+            print(f"cancelled {order.client_order_id} (venue {result.venue_order_id})")
+            return 0
+        print(f"cancel not confirmed: venue state {result.state.value} "
+              f"({result.reason or 'no reason'}); the order stays working")
+        return 1
+    # replace
+    if args.limit is None and args.qty is None:
+        print("replace needs --limit and/or --qty", file=sys.stderr)
+        return 2
+    limit = args.limit if args.limit is not None else order.limit
+    qty = args.qty if args.qty is not None else order.qty
+    if not args.live:
+        print(f"plan: replace {order.client_order_id} "
+              f"{order.qty}x @ {order.limit:g} -> {qty}x @ {limit:g}")
+        print("dry run: pass --live to send the replace")
+        return 0
+    broker = RobinhoodAgenticBroker(dry_run=False)
+    lifecycle = OrderLifecycle(registry=registry)
+    lifecycle.replace_requested(order.client_order_id, ts=now,
+                                limit=limit, qty=qty)
+    try:
+        result = broker.replace_order(order.venue_order_id, limit=limit, qty=qty)
+    except Exception as exc:                # noqa: BLE001 - broker error taxonomy
+        print(f"replace failed: {exc}", file=sys.stderr)
+        return 2
+    if result.state in {OrderState.WORKING, OrderState.PARTIAL}:
+        lifecycle.replace_confirmed(order.client_order_id, ts=time.time())
+        print(f"replaced {order.client_order_id} -> {qty}x @ {limit:g}")
+        return 0
+    print(f"replace not confirmed: venue state {result.state.value}")
+    return 1
+
+
+def cmd_account(args: argparse.Namespace) -> int:
+    """Venue account evidence and the exact pre-trade buying-power decision."""
+    feed = (FileAccountFeed(path=args.snapshot, max_age_seconds=120.0)
+            if args.snapshot is not None else account_feed_from_env())
+    fee_model = (FeeModel.load(args.fee_model, missing_ok=False)
+                 if args.fee_model is not None else fee_model_from_env())
+    now = time.time()
+    if feed is None:
+        print("account | no account feed configured (MFF_ACCOUNT_SNAPSHOT / "
+              "MFF_ACCOUNT_URL / --snapshot)", file=sys.stderr)
+        return 2
+    if args.account_cmd == "show":
+        try:
+            snapshot = feed.snapshot(now)
+        except Exception as exc:            # noqa: BLE001 - feed taxonomy
+            print(f"account feed unreadable: {exc}", file=sys.stderr)
+            return 2
+        if args.json:
+            print(json.dumps({"snapshot": snapshot.to_dict(),
+                              "fees": fee_model.to_dict() if fee_model else None},
+                             indent=2))
+        else:
+            print(render_snapshot(snapshot, now))
+            print(render_fee_model(fee_model) if fee_model is not None
+                  else "fees | MISSING (entries refuse until a model is declared)")
+        return 0
+    guard = BuyingPowerGuard(feed=feed, fee_model=fee_model)
+    decision = guard.precheck(args.contract, args.side, args.qty, args.limit, now)
+    if args.json:
+        print(json.dumps(decision.to_dict(), indent=2))
+    else:
+        print(render_decision(decision, contract=args.contract))
+    return 0 if decision.ok else 1
+
+
+def cmd_provenance(args: argparse.Namespace) -> int:
+    """Who may move money, and what the journal says was admitted or revoked."""
+    authority_path = args.authority or authority_path_from_env()
+    journal_path = args.journal or (ROOT / "live" / "provenance.jsonl")
+    try:
+        policy = AuthorPolicy.load(authority_path, missing_ok=True)
+        journal = MessageJournal.load(journal_path)
+    except (AuthorityError, OSError) as exc:
+        print(f"REFUSED: provenance state cannot be trusted: {exc}", file=sys.stderr)
+        return 2
+    if args.provenance_cmd == "verify":
+        problems = journal.verify_file(journal_path)
+        if args.json:
+            print(json.dumps({"ok": not problems, "problems": problems,
+                              "entries": len(journal.entries)}, indent=2))
+        else:
+            print(f"journal: {len(journal.entries)} entr(ies) at {journal_path}")
+            for problem in problems:
+                print(f"  PROBLEM {problem}")
+        return 1 if problems else 0
+    if args.json:
+        print(json.dumps({
+            "authority_path": str(authority_path),
+            "authority": policy.to_dict() if policy is not None else None,
+            "journal": {"path": str(journal_path), "entries": len(journal.entries),
+                        "torn_lines": journal.torn_lines},
+        }, indent=2))
+    else:
+        print(render_policy(policy))
+        print(render_journal(journal))
+    return 0
+
+
 def _money(value: float | None) -> str:
     return "n/a" if value is None else f"${value:,.2f}"
 
@@ -1875,6 +2359,10 @@ def main(argv: list[str] | None = None) -> int:
         "expiry": cmd_expiry,
         "shadow": cmd_shadow,
         "drift": cmd_drift,
+        "contracts": cmd_contracts,
+        "orders": cmd_orders,
+        "account": cmd_account,
+        "provenance": cmd_provenance,
     }
     return handlers[args.cmd](args)
 

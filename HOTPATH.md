@@ -839,3 +839,69 @@ phantom-profit class as the `19%` bug, one wording further out. Harvested here a
 wider lookahead (`STRIKE|CALLS|PUTS|EXP…|CONTRACT`), a skip when the dollar amount equals
 the parsed strike, and four tests (`tests/test_parser.py`). The orphan is otherwise an
 archive; the harvest map is `docs/fleet/ORPHAN.md`.
+
+## The live gates: identity, orders, cash, provenance, I/O (2026-11-03)
+
+Five gaps sat between "the ladder is proven offline" and "the ladder is true against a
+venue". Each is additive and off by default; none changes the 9/8 replay, the 93-alert
+backtest, or the parity digest.
+
+**G23 — the order carries an instrument, not an internal key.** The engine's identity is
+`TICKER|SIDE|STRIKE|EXPIRY`; a venue executes an OSI/OPRA symbol and an instrument id.
+`instruments.py` validates an `OptionContract`, derives/parses the 21-character OSI
+symbol, and resolves it against a *declared* static chain: exactly one match for
+strike+expiry+side, a declared multiplier (default 100), an instrument id, and a refusal
+for anything else (`contract_missing`, `contract_ambiguous`, `contract_strike_mismatch`,
+`contract_multiplier_invalid`, `contract_expired_same_day`, `contract_chain_malformed`).
+`RobinhoodAgenticBroker(resolver=…)` adds the three venue fields and refuses **before
+any send**; without a resolver the body is unchanged. `arm --chain chain.json`.
+
+**G24 — a working order is durable and cancellable.** `orders.py` is a replayable
+`live/orders.jsonl` over a pure transition table (`ack`, `partial`, `fill`,
+`cancel_requested/confirmed`, `replace_requested/confirmed`, `reject`, `expire`,
+`timeout`) with named refusals for illegal edges, `TimeInForce` in the order body, and a
+`StaleLimitGuard` whose asymmetry is the point: a stale **entry** may be cancelled, an
+unfilled **exit** is paged (`EXIT_UNFILLED_PAGE`) rather than vanishing. The live adapter
+gains `cancel_order` / `replace_order` / `order_status` / `open_orders`; the Listener
+tracks every placement and sweeps on its tick. `orders show|verify|sweep|cancel|replace`
+(dry-run unless `--live`; `--yes` required to touch a working sell).
+
+**G25 — an entry is funded by an account the desk read.** `account.py` reads a stamped
+venue snapshot (file or HTTP template) and a declared fee model, prices the debit in
+integer cents, and refuses with a named reason (`no_account`, `stale_account`,
+`malformed_account`, `insufficient_cash`, `insufficient_buying_power`,
+`fee_model_missing`). Exits are structurally never blocked. `arm` refuses an account feed
+with no declared fee model: zero fees must be an explicit act, not a default.
+
+**G26 — the instruction sent is the instruction admitted.** `provenance.py` holds an
+author allowlist (`live/authority.json`), a content fingerprint, an append-only
+`live/provenance.jsonl`, and a filter over create/update/delete. A message from an
+unknown author, a duplicate, an edited or deleted instruction is a named fill-log refusal;
+the pre-send hash re-check aborts an order whose content changed between decision and
+send. The Gateway now forwards `MESSAGE_UPDATE`/`MESSAGE_DELETE` plus author/edited/
+reference metadata; a tape has no author, so a provenance filter attached to a replay
+fails closed rather than trusting it.
+
+**G27 — one slow venue cannot silence the next alert.** `runtime.py` moves the blocking
+quote fetch and broker call onto a bounded worker pool: `queue_full` is a refusal (never
+an unbounded queue), deadlines are non-terminal, per-contract quote single-flight means a
+slow contract cannot block another, and `StageTimer` records quote/decision/order latency
+against the existing budget. Disabled, the adapters are not even installed: the listener
+keeps the exact objects the offline paths inspect.
+
+```bash
+python -m pytest tests/test_instruments.py tests/test_orders.py -q          # 69 + 100
+python -m pytest tests/test_account.py tests/test_provenance.py -q          # 68 + 64
+python -m pytest tests/test_runtime.py -q                                   # 35
+python -m scorpion_mff.cli contracts osi 'QQQ|CALL|719|0DTE' --session-date 2026-09-11
+python -m scorpion_mff.cli orders verify
+python -m scorpion_mff.cli account show
+python -m scorpion_mff.cli provenance show
+```
+
+**What is still unproven (credential-shaped, not code-shaped).** The working-order HTTP
+paths (`/orders/{id}/cancel`, `/orders/{id}/replace`, `GET /orders/{id}`) are declared
+adapter defaults like `POST /orders`; the account feed's field names and the chain feed
+are unconfirmed vendor surfaces; no real venue ack has been booked, so TCA still refuses
+its suggestion. The gates are ready for the day credentials clear, and refuse by name
+until then - which is the same discipline as the rest of the lane.

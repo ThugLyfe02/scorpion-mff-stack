@@ -47,6 +47,11 @@ parity harness added by G21 and the alert-to-fill drift measurement added by G22
 | G20 | an operator with no way to get flat that does not invent a price or sell twice | `python -m pytest tests/test_flatten.py -q` |
 | G21 | a live wiring that changes the decision it is carrying | `python -m scorpion_mff.cli shadow tapes/sep8.json` |
 | G22 | a latency threshold chosen before the alert-to-fill distribution exists | `python -m scorpion_mff.cli drift` |
+| G23 | a live order that posts an internal key where the venue expects an instrument | `python -m pytest tests/test_instruments.py -q` |
+| G24 | a working order that the venue has not finished, and nothing durable knows about | `python -m pytest tests/test_orders.py -q` |
+| G25 | an entry funded by an account snapshot nobody checked | `python -m pytest tests/test_account.py -q` |
+| G26 | an instruction that was edited or sent by someone the desk never authorised | `python -m pytest tests/test_provenance.py -q` |
+| G27 | one slow venue that silences every later alert | `python -m pytest tests/test_runtime.py -q` |
 
 Each gem follows the same shape: **what it is**, **the acceptance command**, **the
 invariant**, **the failure mode it buys down**, and the **3.a red-team record** for it.
@@ -926,3 +931,75 @@ python -m pytest tests/test_drift.py -q                                    # 19
 
 A failure in any of these is a gem failing, not a flaky test: every command is offline,
 seeded where stochastic, and independent of credentials. Nothing here places an order.
+
+---
+
+## G23. The order carries an instrument, not an internal key
+
+`scorpion_mff/instruments.py` — `OptionContract` is a validated identity (ticker, side,
+**integer-cent** strike, expiry); the OSI/OPRA symbol is derived (`QQQ   260918C00719000`)
+and parsed back; `0DTE` resolves against exactly one session date. `ChainContractResolver`
+accepts a contract only when **exactly one** declared chain row matches strike + expiry +
+side, its multiplier is in the declared set and it names an instrument id. Two matches is
+`contract_ambiguous`, never a first pick; a malformed chain row refuses the whole
+resolution. `RobinhoodAgenticBroker(resolver=…)` adds `osi_symbol`/`instrument_id`/
+`multiplier` and refuses an unresolved contract **before any send** — the pre-existing
+behaviour without a resolver is unchanged.
+
+Acceptance: `python -m pytest tests/test_instruments.py -q` (69). CLI:
+`python -m scorpion_mff.cli contracts osi 'QQQ|CALL|719|0DTE' --session-date 2026-09-11`.
+
+## G24. A working order is durable, cancellable, and cannot disappear
+
+`scorpion_mff/orders.py` — an append-only `live/orders.jsonl` replayed into an
+`OrderRegistry`; `OrderState` and a pure transition table with named refusals for every
+illegal edge; cumulative partials never exceed qty; a terminal state is terminal;
+`TimeInForce` is validated and carried into the order body. `StaleLimitGuard` is
+deliberately asymmetric: a stale **entry** may be cancelled, a stale **exit** is
+`EXIT_UNFILLED_PAGE` (an exit that vanishes is worse than an exit that sits). Registry
+replay tolerates a torn final line, refuses mid-file corruption/sequence gaps by name.
+The live adapter gains `cancel_order` / `replace_order` / `order_status` / `open_orders`
+with the same taxonomy/retry/redaction ladder; `Listener` tracks every placement and
+sweeps on its tick. `orders cancel|replace` are dry-run unless `--live`, and require
+`--yes` to touch a working sell.
+
+Acceptance: `python -m pytest tests/test_orders.py -q` (100).
+
+## G25. An entry is funded by an account the desk actually read
+
+`scorpion_mff/account.py` — a stamped `AccountSnapshot` (integer cents) from a file or
+HTTP template, with stale/undatable/negative/malformed evidence refused, not repaired;
+a declared `FeeModel` (venue + regulatory + minimum) and exact-cent `PremiumCost`;
+`BuyingPowerGuard.check/precheck_intent` returns a closed reason set
+(`no_account`, `stale_account`, `malformed_account`, `insufficient_cash`,
+`insufficient_buying_power`, `fee_model_missing`). **Exits are never blocked.** The
+refusal is a named fill-log row (`bp_refused:<reason>`) written before any broker call;
+`arm --account-snapshot` without a declared fee model refuses to arm.
+
+Acceptance: `python -m pytest tests/test_account.py -q` (68).
+
+## G26. The instruction that was admitted is the instruction that is sent
+
+`scorpion_mff/provenance.py` — an author allowlist from `live/authority.json` (trust
+tiers; missing/malformed policy fails closed to "no author trusted"), a deterministic
+content fingerprint, and an append-only `live/provenance.jsonl` journal replayed into
+guard state. `ProvenanceFilter.observe` returns ADMIT / DROP / REVOKE for create, update
+and delete; `verify_before_send` re-computes the hash immediately before the send and
+aborts an edited instruction. A duplicate, an unknown author, a deleted post or a
+channel outside the policy is a named refusal in the fill log; the Gateway now forwards
+`MESSAGE_UPDATE`/`MESSAGE_DELETE` plus author/edited/reference metadata.
+
+Acceptance: `python -m pytest tests/test_provenance.py -q` (64).
+
+## G27. One slow venue cannot silence the next alert
+
+`scorpion_mff/runtime.py` — `BoundedRuntime` with a fixed worker pool and a **bounded**
+queue (`queue_full` refuses, never buffers without limit); deadlines are named and
+non-terminal; `QuotePipeline` gives per-contract single flight with a stale-flight
+abandon so one wedged contract cannot become an outage; `StageTimer` records
+quote/decision/order latency against the existing budget; `RuntimeQuoteProvider` /
+`RuntimeBroker` wrap only when enabled, so the default path stays unwrapped and inline.
+`arm --runtime` (`MFF_RUNTIME`, `MFF_RUNTIME_WORKERS`, `MFF_RUNTIME_QUEUE`,
+`MFF_RUNTIME_DEADLINE_MS`) turns it on.
+
+Acceptance: `python -m pytest tests/test_runtime.py -q` (35).

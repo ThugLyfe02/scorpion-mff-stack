@@ -177,6 +177,27 @@ policy decision still needs a real sample.
 If credentials stay blocked, Move 1, Move 2 and the offline half of Move 3 still ship. The
 lane's job is to be ready the day they clear, not to pretend they cleared.
 
+### Move 4 — the five live gates added 2026-11-03 (G23-G27)
+
+Five adapter-shaped gaps remained between "offline-proven" and "venue-true". All five are
+additive, opt-in, and refused-by-name when unconfigured; none changes the 9/8 replay, the
+93-alert backtest, or the parity digest (`$57,951.00`, `$211.00`, `PARITY` unchanged).
+
+| Gem | Capability | Files | Acceptance |
+|---|---|---|---|
+| G23 | OSI/OPRA contract identity resolved against a declared static chain; unresolved refuses before send | `instruments.py`, `broker.py` | `pytest tests/test_instruments.py -q` (69) |
+| G24 | Durable working-order registry, TIF, cancel/replace/status; stale entry cancellable, unfilled exit paged | `orders.py`, `broker.py`, `types.py` | `pytest tests/test_orders.py -q` (100) |
+| G25 | Stamped account snapshot + declared fee model + integer-cent buying-power precheck; exits never blocked | `account.py` | `pytest tests/test_account.py -q` (68) |
+| G26 | Author allowlist, edit/delete handling, content fingerprint, pre-send re-check | `provenance.py`, `listener.py` (Gateway) | `pytest tests/test_provenance.py -q` (64) |
+| G27 | Bounded worker pool for quote/order I/O, queue-full refusal, quote single flight, stage timings | `runtime.py`, `listener.py` | `pytest tests/test_runtime.py -q` (35) |
+
+Acceptance commands: `contracts parse|osi|resolve`, `orders show|verify|sweep|cancel|
+replace`, `account show|check`, `provenance show|verify`; arming flags
+`--chain`, `--orders-log`, `--account-snapshot`, `--fee-model`, `--authority`, `--runtime`.
+Full offline suite: **1,123 passed**. The remaining unknowns are the same credentialed
+surfaces the lane already names: the order/working-order/account HTTP field names and the
+chain feed. `mypy --strict` and `ruff` are clean on the whole package.
+
 ---
 
 ## 4. What this lane refuses
