@@ -13,9 +13,10 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .broker import PaperBroker, QuoteScript
 from .engine import Engine, EngineConfig
@@ -97,8 +98,9 @@ def replay(tape: list[RawMessage], quotes: dict[str, list[list[float]]] | None =
     clock = clock or time.time
     engine = Engine(config=engine_config or EngineConfig(), fills=FillLog(), clock=clock)
     broker = broker or PaperBroker()
-    heartbeat = Heartbeat(path=heartbeat_path or Path(tempfile.gettempdir()) / "mff-replay-heartbeat.json",
-                          clock=clock)
+    heartbeat = Heartbeat(
+        path=heartbeat_path or Path(tempfile.gettempdir()) / "mff-replay-heartbeat.json",
+        clock=clock)
     kill = KillSwitch(path=kill_path or Path(tempfile.gettempdir()) / "mff-replay-NO_TRADE",
                       clock=clock)
     listener = Listener(
@@ -129,7 +131,8 @@ def replay(tape: list[RawMessage], quotes: dict[str, list[list[float]]] | None =
     for fill in fills.records:
         if fill.event in {"buy", "sell"}:
             report.decisions.append(
-                f"{fill.event:<4} {fill.qty:>3}x {fill.contract_key:<28} @ {fill.price:<7.2f} {fill.reason}")
+                f"{fill.event:<4} {fill.qty:>3}x {fill.contract_key:<28} "
+                f"@ {fill.price:<7.2f} {fill.reason}")
         elif fill.event in {"skip", "reject"}:
             report.decisions.append(f"{fill.event:<6} {'':<26} {fill.reason}")
     return report

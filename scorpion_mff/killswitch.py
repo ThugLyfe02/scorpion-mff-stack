@@ -11,10 +11,11 @@ treated as STOPPED - an unreadable kill switch is not a green light.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 
 class KillSwitch:
@@ -57,10 +58,8 @@ class KillSwitch:
         return self.path
 
     def clear(self) -> None:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             self.path.unlink()
-        except FileNotFoundError:
-            pass
         self._last_check = None
 
     def status(self) -> str:

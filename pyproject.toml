@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scorpion-mff-hotpath"
+version = "0.1.0"
+description = "Deterministic Discord -> Robinhood Agentic executor: parser, state machine, risk governor, fill log, kill switch, and offline replay. Standard library only; the live Gateway adds an optional websockets dependency."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+# The live Gateway transport is the only piece that needs a third-party package.
+# Everything else (parser, engine, pricing, sizing, broker, fills, kill switch,
+# health, replay, governor, exposure, TCA) runs on the standard library alone.
+gateway = ["websockets>=13"]
+
+dev = [
+  "pytest>=8.3,<10",
+  "pytest-asyncio>=0.24,<1",
+  "ruff>=0.8,<1",
+  "mypy>=1.13,<2",
+]
+
+[project.scripts]
+scorpion-mff = "scorpion_mff.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["scorpion_mff"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+# Same bar as the deterministic-control-plane lane: the full error group plus
+# import ordering, bugbear, pyupgrade, and simplification rules. A hot path that
+# places real money must not get a softer lint than the research lane.
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately carry long assertion lines and fixtures on one line.
+# The 100-column limit stays enforced on scorpion_mff/, where it shapes the code.
+"tests/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+packages = ["scorpion_mff"]
+
+[[tool.mypy.overrides]]
+# The live Gateway import is lazy and the dependency is optional; the type
+# checker must not require an environment that the offline path never needs.
+module = "websockets"
+ignore_missing_imports = true

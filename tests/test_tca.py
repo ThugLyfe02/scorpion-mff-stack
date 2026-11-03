@@ -8,14 +8,20 @@ median, and the fill report must say "no fills" rather than print a zero.
 from __future__ import annotations
 
 import json
-import time
 
 import pytest
 
-from scorpion_mff import tca
-from scorpion_mff.tca import (Bar, BarSet, Execution, ExecutionLog, FillReport,
-                              analyse_paths, analyse_trade, join_to_trades,
-                              load_barsets)
+from scorpion_mff.tca import (
+    Bar,
+    BarSet,
+    Execution,
+    ExecutionLog,
+    FillReport,
+    analyse_paths,
+    analyse_trade,
+    join_to_trades,
+    load_barsets,
+)
 
 ET = 4 * 3600
 DAY_TS = 1_757_000_000.0
@@ -25,8 +31,8 @@ def barset(*, date="2026-08-25", ticker="QQQ", side="call", strike=700.0,
            start=DAY_TS, closes=((1.00, 1.20, 0.90, 1.10), (1.10, 1.30, 1.00, 1.25)),
            step=300) -> BarSet:
     bars = []
-    for i, (o, h, l, c) in enumerate(closes):
-        bars.append(Bar(ts=start + i * step, open=o, high=h, low=l, close=c))
+    for i, (o, h, low, c) in enumerate(closes):
+        bars.append(Bar(ts=start + i * step, open=o, high=h, low=low, close=c))
     return BarSet(date=date, ticker=ticker, side=side, strike=strike, bars=tuple(bars))
 
 

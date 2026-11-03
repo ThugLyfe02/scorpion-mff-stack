@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 DEFAULT_BUDGET_MS = 10_000          # sub-10s, per the handoff
 DEADMAN_GAP_S = 30.0                # the */5 deadman cadence, tightened

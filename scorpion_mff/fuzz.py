@@ -26,13 +26,11 @@ from __future__ import annotations
 import random
 import string
 from dataclasses import dataclass, field
-from typing import Iterator
 
-from .broker import QuoteScript
 from .engine import Engine, EngineConfig
 from .fills import FillLog
 from .parser import CHANNEL_IDS, parse
-from .types import AlertKind, Quote, RawMessage
+from .types import OrderIntent, Quote, RawMessage, Signal
 
 CHANNELS = list(CHANNEL_IDS)
 TICKERS = ["QQQ", "SPY", "NVDA", "TSLA", "AAPL", "IWM", "AMD", "SPX", "META", "PLTR"]
@@ -101,18 +99,18 @@ def generate_post(rng: random.Random) -> RawMessage:
         # belongs, next to a strike that must not be read as a sale price.
         text = rng.choice([
             f"Close at {_pct(rng)}%", f"Runners {_pct(rng)}%",
-            f"Close remaining for {_pct(rng)}%", f"Sold runners at 25%",
+            f"Close remaining for {_pct(rng)}%", "Sold runners at 25%",
             f"{ticker} {_strike(rng)} strike closed for {_pct(rng)}%",
         ])
     elif kind == "ambiguous":
         text = rng.choice([
-            f"Close at {_price(rng):.2f}", f"All out", f"Closing here",
+            f"Close at {_price(rng):.2f}", "All out", "Closing here",
             f"{rng.choice(TICKERS)} and {rng.choice(TICKERS)} closed at {_price(rng):.2f}",
         ])
     elif kind == "negated":
         text = rng.choice([
-            f"Don't add here, still holding", f"Not closing yet, runners",
-            f"No adds above {_price(rng):.2f}", f"Do not buy this",
+            "Don't add here, still holding", "Not closing yet, runners",
+            f"No adds above {_price(rng):.2f}", "Do not buy this",
         ])
     else:
         text = " ".join(rng.choice([rng.choice(NOISE), "".join(
@@ -172,8 +170,8 @@ def _pct_values(text: str) -> list[float]:
     return out
 
 
-def _check_post(post: RawMessage, signal, intents, engine: Engine,
-                held_before: set[str]) -> list[Violation]:
+def _check_post(post: RawMessage, signal: Signal | None, intents: list[OrderIntent],
+                engine: Engine, held_before: set[str]) -> list[Violation]:
     """Invariants that are decidable from one message's decision."""
     out: list[Violation] = []
     text = post.text
@@ -184,10 +182,11 @@ def _check_post(post: RawMessage, signal, intents, engine: Engine,
         # for $19 produced a limit exactly equal to the stated percentage while the
         # market was far below it - so that is what is checked, not the presence of a %.
         quote = None
-        try:
-            quote = engine.quotes.quote(intent.contract_key)
-        except Exception:                             # noqa: BLE001
-            quote = None
+        if engine.quotes is not None:
+            try:
+                quote = engine.quotes.quote(intent.contract_key)
+            except Exception:                             # noqa: BLE001
+                quote = None
         if quote is not None and pcts:
             for pct in pcts:
                 if abs(intent.limit - pct) < 1e-9 and intent.limit > quote.bid * 6:
@@ -218,9 +217,9 @@ def _check_post(post: RawMessage, signal, intents, engine: Engine,
         out.append(Violation("I4", f"{len(engine.open_positions)} open > "
                                    f"{engine.config.max_concurrent}", text))
     # I9: no same-day re-entry of a closed contract.
-    if signal is not None and signal.contract_key in engine.closed and intents:
-        if intents[0].action == "buy":
-            out.append(Violation("I9", f"re-entered closed {signal.contract_key}", text))
+    if (signal is not None and signal.contract_key in engine.closed
+            and intents and intents[0].action == "buy"):
+        out.append(Violation("I9", f"re-entered closed {signal.contract_key}", text))
     return out
 
 
@@ -239,20 +238,21 @@ def run_campaign(seed: int = 0, iterations: int = 2_000,
         try:
             signal = parse(post)
         except Exception as exc:                     # noqa: BLE001 - that is the assertion
-            campaign.violations.append(Violation("I10", f"parser raised {type(exc).__name__}: {exc}",
-                                                 post.text))
+            campaign.violations.append(
+                Violation("I10", f"parser raised {type(exc).__name__}: {exc}", post.text)
+            )
             continue
         campaign.statuses[signal.kind.value] = campaign.statuses.get(signal.kind.value, 0) + 1
 
-        before_open = len(engine.open_positions)
         held_before = set(engine.positions)
         # I6: a blocked engine produces nothing, regardless of the post.
         engine.blocked = lambda: campaign.posts % 17 == 0
         try:
             intents = engine.on_signal(signal, now=post.ts)
         except Exception as exc:                     # noqa: BLE001
-            campaign.violations.append(Violation("I10", f"engine raised {type(exc).__name__}: {exc}",
-                                                 post.text))
+            campaign.violations.append(
+                Violation("I10", f"engine raised {type(exc).__name__}: {exc}", post.text)
+            )
             continue
         if engine.blocked() and any(i.action == "buy" for i in intents):
             # I6: the kill switch blocks ENTRIES. It must never block an exit - a switch

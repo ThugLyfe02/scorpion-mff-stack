@@ -25,8 +25,9 @@ Nothing here is a forecast. It is the record, measured.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
+from typing import Any
 
 PRIOR_TRADES = 10.0        # pseudo-trades of pooled performance mixed into each channel
 Z95 = 1.959963984540054
@@ -64,7 +65,9 @@ class Stats:
     @property
     def adjusted(self) -> float:
         """Expectancy pulled toward the pooled mean - the number ranking uses."""
-        return self.expectancy_usd if self.adjusted_expectancy_usd is None else self.adjusted_expectancy_usd
+        if self.adjusted_expectancy_usd is None:
+            return self.expectancy_usd
+        return self.adjusted_expectancy_usd
 
     @property
     def expectancy_r(self) -> float:
@@ -84,7 +87,7 @@ class Stats:
         """n >= PRIOR_TRADES and the interval excludes zero win rate."""
         return self.n >= PRIOR_TRADES and self.ci_low > 0.0
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {"n": self.n, "wins": self.wins, "losses": self.losses, "flats": self.flats,
                 "win_rate": round(self.win_rate, 4), "ci_low": round(self.ci_low, 4),
                 "ci_high": round(self.ci_high, 4), "avg_win_usd": round(self.avg_win_usd, 2),
@@ -184,7 +187,7 @@ class Drawdown:
     longest_losing_run: int = 0
     equity_curve: list[float] = field(default_factory=list)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {"max_drawdown_usd": round(self.max_drawdown_usd, 2),
                 "max_drawdown_r": round(self.max_drawdown_r, 4),
                 "peak_usd": round(self.peak_usd, 2),
@@ -219,7 +222,7 @@ def drawdown(pnls: Sequence[float], *, risk_unit_usd: float = 0.0) -> Drawdown:
                     longest_losing_run=worst_run, equity_curve=curve)
 
 
-def runs_test(pnls: Sequence[float]) -> dict:
+def runs_test(pnls: Sequence[float]) -> dict[str, Any]:
     """Wald-Wolfowitz: do wins and losses cluster more than chance would produce?
 
     z < -1.96 means the sequence is streaky (losses arrive in bunches) - a loss-streak
@@ -232,7 +235,7 @@ def runs_test(pnls: Sequence[float]) -> dict:
         return {"runs": 0, "expected": 0.0, "z": 0.0, "streaky": False, "n": n}
     n1 = signs.count(1)
     n2 = signs.count(-1)
-    runs = 1 + sum(1 for a, b in zip(signs, signs[1:]) if a != b)
+    runs = 1 + sum(1 for a, b in zip(signs, signs[1:], strict=False) if a != b)
     expected = 1 + (2 * n1 * n2) / n
     var = (2 * n1 * n2 * (2 * n1 * n2 - n)) / (n * n * (n - 1)) if n > 1 else 0.0
     z = (runs - expected) / math.sqrt(var) if var > 0 else 0.0
@@ -258,11 +261,13 @@ class DeskReport:
     channels: dict[str, Stats]
     ranking: list[tuple[str, float, Stats]]
     dd: Drawdown
-    runs: dict
+    runs: dict[str, Any]
     streak_table: list[tuple[int, float]]
     risk_unit_usd: float
 
     def to_text(self) -> str:
+        streak_verdict = ("streaky: losses cluster" if self.runs["streaky"]
+                          else "consistent with independence")
         lines = [
             f"desk report | {self.overall.n} closed trades | 1R = ${self.risk_unit_usd:,.0f}",
             f"  expectancy ${self.overall.expectancy_usd:,.2f}/trade "
@@ -271,8 +276,7 @@ class DeskReport:
             f"  profit factor {self.overall.profit_factor:.2f} | "
             f"score {self.overall.per_trade_score:+.3f} | max DD ${self.dd.max_drawdown_usd:,.2f} "
             f"({self.dd.max_drawdown_r:.2f}R) | longest losing run {self.dd.longest_losing_run}",
-            f"  runs test z={self.runs['z']:+.2f} "
-            f"({'streaky: losses cluster' if self.runs['streaky'] else 'consistent with independence'})",
+            f"  runs test z={self.runs['z']:+.2f} ({streak_verdict})",
             "",
             "channel                 n    win%  [95% ci]     exp$/trade  adj$/trade  score",
         ]
@@ -293,6 +297,8 @@ class DeskReport:
     def to_markdown(self) -> str:
         """The shareable artefact: what the record says, with its uncertainty shown."""
         o = self.overall
+        streak_verdict = ("losses cluster more than chance" if self.runs["streaky"]
+                          else "consistent with independence")
         lines = [
             "# Desk report — expectancy, drawdown, allocation",
             "",
@@ -308,8 +314,7 @@ class DeskReport:
             f"| average win / loss | ${o.avg_win_usd:,.2f} / ${o.avg_loss_usd:,.2f} |",
             f"| max drawdown | ${self.dd.max_drawdown_usd:,.2f} ({self.dd.max_drawdown_r:.2f}R) |",
             f"| longest losing run | {self.dd.longest_losing_run} |",
-            f"| runs test | z = {self.runs['z']:+.2f} "
-            f"({'losses cluster more than chance' if self.runs['streaky'] else 'consistent with independence'}) |",
+            f"| runs test | z = {self.runs['z']:+.2f} ({streak_verdict}) |",
             "",
             "## Channel allocation",
             "",
@@ -324,7 +329,7 @@ class DeskReport:
         lines += [
             "",
             "Shrunk expectancy pulls each channel toward the pooled mean by sample size "
-            f"(`PRIOR_TRADES` = 10 pseudo-trades), so a 7-trade channel cannot outrank a "
+            "(`PRIOR_TRADES` = 10 pseudo-trades), so a 7-trade channel cannot outrank a "
             "41-trade channel on luck. Score = shrunk expectancy ÷ per-trade dispersion.",
             "",
             "## Expectation of losing runs",

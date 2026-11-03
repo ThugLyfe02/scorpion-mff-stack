@@ -84,12 +84,21 @@ path that is a hone that goes silent mid-month and never says why: the max-2 lim
 missed exit into a permanent shutdown. Fixed by releasing positions whose contract has
 provably expired, at the day roll (`Engine._expire_carried`):
 
-  * `0DTE` in the key → released at the next day's roll;
-  * an ISO expiry earlier than today → released;
+  * `0DTE` in the key → released at the next day's roll (an ET trading date, from
+    `calendar.py`, not the UTC date: at 01:30 UTC a 2026-09-11 contract is still the 11th
+    in New York);
+  * an ISO expiry earlier than the ET trading date → released;
   * anything unparseable (`Dec 5`) → **not** released, and an `expiry_unparsed` alert is
     raised, because freeing a live slot on a guess under-counts risk;
   * the release is recorded with `accepted=False`, so an unmarked expiry never enters
-    realised P&L.
+    realised P&L - and it also writes an `expiry_unresolved` alert carrying the projected
+    assignment shares, or `unknown` when there is no underlying close to project from.
+
+`expiry audit` measures the same corpus for the cutoff guard: **40 of 93 alerts are
+same-day**, **65 of 93 never record an explicit final close** (floor 61 = 57 `win_partial`
++ 4 `unknown`), **0 of 40 same-day exits land after the 15:45 ET cutoff** and 10 carry no
+exit time at all (at the cutoff those page rather than flatten). Assignment is explicitly
+**not** projected: the corpus has no underlying close, and a missing price is not OTM.
 
 **2. An exit could not be attributed unless it was the only position in its channel.** The
 parser only recovered a ticker from the literal `TICKER X` form, so `QQQ puts closed at 2.85`

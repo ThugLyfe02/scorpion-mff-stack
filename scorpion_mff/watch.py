@@ -26,8 +26,9 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .page import PageResult, TelegramPager
 
@@ -57,7 +58,7 @@ class Health:
     def healthy(self) -> bool:
         return self.status == "ok"
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {"status": self.status, "heartbeat_age_s": self.heartbeat_age_s,
                 "beats": self.beats, "fills_today": self.fills_today,
                 "alerts_today": self.alerts_today, "last_alert": self.last_alert,

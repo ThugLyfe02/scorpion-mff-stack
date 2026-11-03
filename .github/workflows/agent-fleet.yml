@@ -1,0 +1,80 @@
+name: agent-fleet
+
+# Three lanes, in tandem: the architect builds the deterministic control plane, the
+# main builder hardens the coded hot path, and the semantic lane certifies parser
+# interpretation. Each lane runs its own model, its own branch, its own gate
+# (ruff -> mypy --strict -> pytest), and then opens its pull request. A lane never
+# ships red: the driver loops agent -> gate -> fix up to `rounds` times and fails the
+# job if the gate stays red.
+#
+# Safety: dispatching defaults to --dry-run (agents run, gate must be green,
+# nothing is pushed). Flip `dry_run` to false to actually open the PRs. The cron
+# schedule is always dry-run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run agents + gate without pushing or opening PRs"
+        type: boolean
+        required: false
+        default: true
+  schedule:
+    - cron: "0 6 * * 1" # Monday 06:00 UTC
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: agent-fleet
+  cancel-in-progress: false
+
+jobs:
+  fleet:
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [architect, main, semantic]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pi
+        run: npm install -g @earendil-works/pi-coding-agent
+
+      - name: Install gh
+        run: |
+          type -p curl >/dev/null || sudo apt-get update && sudo apt-get install -y curl
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update && sudo apt-get install -y gh
+
+      - name: Run lane
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          # The runner is disposable, so the shallow fetch is the right default here
+          # and nowhere else: on a developer clone it would truncate the history the
+          # next `git log` depends on.
+          FLEET_SHALLOW: "1"
+        run: |
+          flags="--dry-run"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.dry_run }}" = "false" ]; then
+            flags=""
+          fi
+          scripts/fleet/run-lane.sh "${{ matrix.lane }}" $flags

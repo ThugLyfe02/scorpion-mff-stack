@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "max_total_premium_usd": 3000.0,
+  "max_underlying_premium_usd": 2000.0,
+  "max_cluster_premium_usd": 2500.0,
+  "daily_loss_limit_usd": 3000.0,
+  "clusters": [
+    ["DIA", "IWM", "QQQ", "RSP", "SPY", "VOO", "VTI"],
+    ["AMD", "ARM", "ASML", "AVGO", "INTC", "MRVL", "MU", "NVDA", "QCOM", "SMCI", "TSM"],
+    ["AAPL", "ADBE", "AMZN", "CRM", "GOOG", "GOOGL", "IBM", "META", "MSFT", "NFLX", "NOW", "ORCL", "TSLA"],
+    ["CLSK", "COIN", "HOOD", "IBIT", "MARA", "MSTR", "RIOT", "SOFI"]
+  ]
+}

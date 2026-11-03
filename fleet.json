@@ -1,0 +1,40 @@
+{
+  "repo": "ThugLyfe02/scorpion-mff-stack",
+  "base_ref": "main",
+  "rounds": 3,
+  "lanes": [
+    {
+      "id": "architect",
+      "branch": "hardening/deterministic-control-plane",
+      "title": "Architect lane: deterministic event-sourced control plane",
+      "model": "claude-opus-5-5",
+      "thinking": "medium",
+      "prompt_file": "docs/fleet/architect.prompt.md",
+      "master_file": "docs/fleet/pr1.master.md",
+      "body_file": "docs/fleet/architect.body.md",
+      "gate": "scripts/gate.sh"
+    },
+    {
+      "id": "main",
+      "branch": "hardening/correlated-book-guard",
+      "title": "Main lane: coded Discord -> Robinhood hot path",
+      "model": "deepseek-v4-pro",
+      "thinking": "low",
+      "prompt_file": "docs/fleet/main.prompt.md",
+      "master_file": "docs/fleet/pr8.master.md",
+      "body_file": "docs/fleet/main.body.md",
+      "gate": "scripts/gate.sh"
+    },
+    {
+      "id": "semantic",
+      "branch": "hardening/calibrated-semantic-acceleration",
+      "title": "Semantic lane: calibrated interpretation and parser certification",
+      "model": "deepseek-v4-pro",
+      "thinking": "medium",
+      "prompt_file": "docs/fleet/pr3.prompt.md",
+      "master_file": "docs/fleet/pr3.master.md",
+      "body_file": "docs/fleet/pr3.body.md",
+      "gate": "scripts/gate.sh"
+    }
+  ]
+}

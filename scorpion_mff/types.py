@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
+from typing import Any
 
 
-class Side(str, Enum):
+class Side(StrEnum):
     CALL = "CALL"
     PUT = "PUT"
 
@@ -16,7 +17,7 @@ class Side(str, Enum):
         return self is Side.CALL
 
 
-class AlertKind(str, Enum):
+class AlertKind(StrEnum):
     """What a Discord post IS. The engine only ever acts on these."""
 
     ENTRY = "entry"          # a new position: side + ticker + strike
@@ -27,7 +28,7 @@ class AlertKind(str, Enum):
     IGNORE = "ignore"        # not actionable (chatter, lotto, excluded channel)
 
 
-class IgnoreReason(str, Enum):
+class IgnoreReason(StrEnum):
     EXCLUDED_CHANNEL = "excluded_channel"
     TICKER_EXCLUDED = "ticker_excluded"
     LOTTO_FLAG = "lotto_flag"
@@ -37,13 +38,27 @@ class IgnoreReason(str, Enum):
 
 @dataclass(frozen=True)
 class RawMessage:
-    """One Discord MESSAGE_CREATE, already through the Gateway."""
+    """One Discord dispatch, already through the Gateway.
+
+    The first five fields are what the offline tapes and the parser need. The
+    provenance fields are optional and default to "unknown" so every recorded tape
+    keeps parsing exactly as before; the live Gateway fills them from the dispatch
+    payload so `provenance.py` can refuse an unknown author, a deleted post or an
+    edited one before an order leaves the process.
+    """
 
     channel: str                 # human channel name, e.g. "etf-options"
     channel_id: str
     text: str
     message_id: str = ""
     ts: float = field(default_factory=time.time)   # epoch seconds, receive time
+    # Provenance (live only; empty on a tape).
+    event_type: str = "MESSAGE_CREATE"   # MESSAGE_CREATE | MESSAGE_UPDATE | MESSAGE_DELETE
+    author_id: str = ""
+    author_name: str = ""
+    edited_at: float | None = None        # epoch seconds, when Discord says it was edited
+    reference_id: str = ""                # the replied-to message id, when present
+    payload: dict[str, Any] | None = None  # raw dispatch payload (live only)
 
 
 @dataclass(frozen=True)
@@ -96,6 +111,9 @@ class OrderIntent:
     contract_key: str
     reason: str
     idempotency_key: str = ""
+    # Carried into the order body; "gtc" keeps every pre-existing call site identical.
+    # `orders.TimeInForce` names the accepted values; the broker refuses anything else.
+    time_in_force: str = "gtc"
 
 
 @dataclass

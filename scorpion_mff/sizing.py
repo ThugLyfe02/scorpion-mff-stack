@@ -10,7 +10,7 @@ live/RULES.lock.md + config/trader-profile.json:
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 from .parser import channel_name
 
@@ -26,7 +26,7 @@ ADD_ALLOWED_PER_POSITION = 1
 PIPE_TEST_CONTRACTS = 1
 
 
-class Tier(str, Enum):
+class Tier(StrEnum):
     PIPE = "pipe"                        # first trade of the day: 1 contract
     STANDARD = "standard"                # king / etf / platinum: $1500 / $2250
     HIGH_CONFIDENCE = "high_confidence"  # $3000 / $4500
@@ -36,7 +36,9 @@ def tier_for_channel(channel: str, is_first_of_day: bool) -> Tier:
     """Channel -> tier. The pipe test outranks the channel tier for trade #1."""
     if is_first_of_day:
         return Tier.PIPE
-    return Tier.HIGH_CONFIDENCE if channel_name(channel) == HIGH_CONFIDENCE_CHANNEL else Tier.STANDARD
+    if channel_name(channel) == HIGH_CONFIDENCE_CHANNEL:
+        return Tier.HIGH_CONFIDENCE
+    return Tier.STANDARD
 
 
 def clip_budget(tier: Tier, is_add: bool = False) -> float:

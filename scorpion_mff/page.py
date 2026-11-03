@@ -22,8 +22,9 @@ import os
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 API = "https://api.telegram.org"
 MAX_CHUNK = 4000            # Telegram's hard limit is 4096; leave room for the split
@@ -35,7 +36,8 @@ class PagerError(Exception):
 
 
 class Transport(Protocol):
-    def __call__(self, url: str, payload: dict, timeout: float) -> tuple[int, dict]:
+    def __call__(self, url: str, payload: dict[str, Any], timeout: float) -> tuple[
+            int, dict[str, Any]]:
         """-> (http_status, parsed_body)."""
 
 
@@ -48,7 +50,7 @@ class PageResult:
     dry_run: bool = False
     attempts: int = 0
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {"ok": self.ok, "chunks": self.chunks, "message_ids": list(self.message_ids),
                 "error": self.error, "dry_run": self.dry_run, "attempts": self.attempts}
 
@@ -85,7 +87,8 @@ def chunk_text(text: str, limit: int = MAX_CHUNK) -> list[str]:
     return chunks
 
 
-def _urllib_transport(url: str, payload: dict, timeout: float) -> tuple[int, dict]:
+def _urllib_transport(url: str, payload: dict[str, Any], timeout: float) -> tuple[
+        int, dict[str, Any]]:
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST",
                                  headers={"Content-Type": "application/json"})
@@ -111,7 +114,7 @@ class TelegramPager:
     sleep: Callable[[float], None] = time.sleep
 
     @classmethod
-    def from_env(cls, env: dict | None = None, **kwargs) -> "TelegramPager":
+    def from_env(cls, env: dict[str, Any] | None = None, **kwargs: Any) -> TelegramPager:
         e = os.environ if env is None else env
         return cls(token=e.get("MFF_TELEGRAM_TOKEN", e.get("TELEGRAM_BOT_TOKEN", "")),
                    chat_id=e.get("MFF_TELEGRAM_CHAT", e.get("TELEGRAM_CHAT_ID", "")), **kwargs)

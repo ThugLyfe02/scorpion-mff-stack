@@ -53,7 +53,9 @@ def test_one_event_end_to_end_records_intent_ack_and_latency(tmp_path):
                                          text="CALL TICKER QQQ STRIKE $719 Exp Today Current BID Price $1.01"))
     assert len(intents) == 1 and intents[0].qty == 1
     events = [f.event for f in listener.engine.fills.records]
-    assert events == ["buy", "ack", "latency"]
+    assert events == ["buy", "intent", "ack", "latency"]
+    # the placement-agnostic buy/sell/ack subsequence is unchanged
+    assert [e for e in events if e in {"buy", "sell", "ack"}] == ["buy", "ack"]
     assert listener.processed == 1
     assert listener.breached_budget is False
 
