@@ -559,9 +559,16 @@ def test_post_after_1100_is_shadow_only_and_late_is_skipped(tmp_path: Path) -> N
     assert main.action == "schedule_entry"
     result = session.on_entry_due(main.call_id)
     assert result is not None and result.mode is ExecutionMode.PAPER
-    assert result.fill_price == Decimal("7.41")  # first limit rests at the current price
+    assert result.status == "PAPER_INTENT_ONLY" and result.fill_price is None
+    assert result.requested_limit == Decimal("7.41")
     chase = session.on_entry_due(main.call_id, chase=True)
-    assert chase is not None and chase.fill_price == Decimal("7.42")  # chase to the ask, capped
+    assert chase is not None and chase.fill_price is None
+    assert chase.requested_limit == Decimal("7.42")
+    assert session.on_entry_due(main.call_id, chase=True) is None
+    assert session.on_entry_due(main.call_id) is None
+    exit_intent = session.on_exit_due(main.call_id)
+    assert exit_intent is not None and exit_intent.fill_price is None
+    assert session.on_exit_due(main.call_id) is None
 
 
 def test_alert_payload_schema() -> None:

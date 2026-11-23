@@ -177,7 +177,14 @@ async def _run_session(args: argparse.Namespace) -> int:
     from .fastpath import QuoteCache
     from .health import FeedHealthMonitor
     from .session_calendar import session_hours
-    from .session_service import Journal, LatchMirror, PaperExecutionSession, stop_time_utc, supervise
+    from .session_service import (
+        Journal,
+        JournalError,
+        LatchMirror,
+        PaperExecutionSession,
+        stop_time_utc,
+        supervise,
+    )
 
     for handler in logging.getLogger().handlers:
         handler.addFilter(SecretRedactingFilter())
@@ -193,8 +200,19 @@ async def _run_session(args: argparse.Namespace) -> int:
     cache = QuoteCache()
     latch = LatchMirror(open_latch())
     pager = Pager()
-    journal = Journal(state_dir() / "journal" / f"{today.isoformat()}.jsonl")
-    authors = frozenset(a for a in os.environ.get("SCORPION_SIGNAL_AUTHOR_IDS", "").split(",") if a)
+    authors = frozenset(
+        a.strip() for a in os.environ.get("SCORPION_SIGNAL_AUTHOR_IDS", "").split(",") if a.strip()
+    )
+    token = os.environ.get("SCORPION_DISCORD_TOKEN", "").strip()
+    if not args.no_discord and (not token or not authors):
+        LOGGER.error("paper session requires Discord token and explicit author allowlist")
+        return 2
+    try:
+        journal = Journal(state_dir() / "journal" / f"{today.isoformat()}.jsonl")
+    except (OSError, JournalError) as exc:
+        latch.trip(f"journal_start:{type(exc).__name__}")
+        LOGGER.error("paper journal unavailable; no session started")
+        return 2
     session = PaperExecutionSession(
         rules=rules,
         cache=cache,
@@ -215,16 +233,12 @@ async def _run_session(args: argparse.Namespace) -> int:
     async def sink(raw: RawDiscordMessage) -> None:
         queue.put_nowait((raw, time.perf_counter_ns()))
 
-    ingest_task: asyncio.Task[None] | None = None
+    ingest_run: Callable[[], object] | None = None
     if not args.no_discord:
         from .ingest.discord import DiscordSignalClient
 
-        token = os.environ.get("SCORPION_DISCORD_TOKEN", "").strip()
-        if not token:
-            LOGGER.error("SCORPION_DISCORD_TOKEN is required for run-session")
-            return 2
         client = DiscordSignalClient(sink)
-        ingest_task = asyncio.create_task(client.start(token), name="discord-ingest")
+        ingest_run = lambda: client.start(token)  # noqa: E731
     try:
         await supervise(
             session,
@@ -234,11 +248,14 @@ async def _run_session(args: argparse.Namespace) -> int:
             session_open=session_open,
             stop_at_utc=stop_time_utc(close_et),
             on_new_symbol=feed.add_symbol,
+            ingest_run=ingest_run,
         )
     finally:
-        if ingest_task is not None:
-            ingest_task.cancel()
-        journal.close()
+        try:
+            journal.close()
+        except JournalError:
+            latch.trip("journal_close_failed")
+            raise
         (state_dir() / "latency").mkdir(parents=True, exist_ok=True)
         (state_dir() / "latency" / f"{today.isoformat()}.json").write_text(
             json.dumps(session.latency.summary_ms(), indent=2)

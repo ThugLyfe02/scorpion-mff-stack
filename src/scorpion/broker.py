@@ -48,6 +48,7 @@ class ExecutionResult:
     fill_price: Decimal | None
     submitted_ts_utc: datetime
     note: str = ""
+    requested_limit: Decimal | None = None
 
 
 class QuoteProvider(Protocol):
@@ -94,6 +95,26 @@ class PaperBroker:
             fill_price=limit_price,
             submitted_ts_utc=datetime.now(UTC),
             note="shadow execution only",
+        )
+
+
+class PaperIntentBroker:
+    """An intent recorder, not a market fill simulator."""
+
+    def execute(
+        self, effect: Effect, quantity: int, limit_price: Decimal | None
+    ) -> ExecutionResult:
+        if quantity <= 0:
+            raise ValueError("quantity must be positive")
+        return ExecutionResult(
+            effect=effect,
+            mode=ExecutionMode.PAPER,
+            status="PAPER_INTENT_ONLY",
+            quantity=quantity,
+            fill_price=None,
+            submitted_ts_utc=datetime.now(UTC),
+            note="No modeled or venue execution confirmed.",
+            requested_limit=limit_price,
         )
 
 

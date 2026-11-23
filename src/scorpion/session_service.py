@@ -1,12 +1,12 @@
 """One supervised asyncio paper session: Discord post -> decision -> paper order intent.
 
 Hot path (``on_post`` / ``on_entry_due``) is pure in-memory work on the event loop: existing parser,
-frozen forward rules, an O(1) per-symbol quote read, a Decimal limit, and a PaperBroker call. All
+frozen forward rules, an O(1) per-symbol quote read, a Decimal limit, and an intent-only recorder call. All
 disk I/O (journal fsync, latch persistence) is handed to worker threads and never awaited by the
 decision. The latch is mirrored in memory and re-read from disk at 1 Hz; a trip is applied to the
 mirror before it is persisted, so a trip can never be slower than its own write.
 
-Paper only. The only order sinks are PaperBroker and ReviewOnlyBroker.
+Paper only. The only sinks are PaperIntentBroker and ReviewOnlyBroker.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from functools import partial
 from pathlib import Path
 
 from .alerts import Page, Pager
-from .broker import ExecutionMode, ExecutionResult, PaperBroker, ReviewOnlyBroker
+from .broker import ExecutionMode, ExecutionResult, PaperIntentBroker, ReviewOnlyBroker
 from .config import (
     ALLOWED_CHANNEL_IDS,
     CHANNELS,
@@ -56,12 +56,16 @@ _OK_CHANNEL_ID = CHANNELS["options-king"]
 # --------------------------------------------------------------------------- journal (off-path)
 
 
-class Journal:
-    """Append-only JSONL journal written and fsync'd by one dedicated thread.
+class JournalError(RuntimeError):
+    """The paper evidence stream cannot be trusted to persist."""
 
-    ``submit`` is a lock-free enqueue; the decision never waits for the disk. ``on_durable`` (if
-    given) is invoked from the writer thread with the record's ``seq`` after its fsync, which is
-    how the durable-ack latency is measured separately from decision latency.
+
+class Journal:
+    """Bounded asynchronous writer. Refuse backlog, writer failure and silent restart.
+
+    Existing files are never appended to: the session cannot yet restore working calls.
+    Successful close proves that the writer drained its queue and fsync'd the records.
+    This is paper-only; real external effects require a durable admission first.
     """
 
     def __init__(
@@ -70,52 +74,95 @@ class Journal:
         *,
         on_durable: Callable[[int, int], None] | None = None,
         batch: int = 64,
+        max_pending: int = 8192,
     ) -> None:
+        if batch <= 0 or max_pending <= 0:
+            raise ValueError("journal batch and queue bound must be positive")
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._queue: queue.SimpleQueue[dict[str, object] | None] = queue.SimpleQueue()
+        self._queue: queue.Queue[dict[str, object] | None] = queue.Queue(maxsize=max_pending)
         self._on_durable = on_durable
         self._batch = batch
         self._seq = 0
+        self._closed = False
+        self._failure: str | None = None
+        self._ready = threading.Event()
+        self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, name="exec-journal", daemon=True)
         self._thread.start()
+        if not self._ready.wait(5.0):
+            raise JournalError("journal_start_timeout")
+        self.check()
+
+    def check(self) -> None:
+        if self._failure is not None:
+            raise JournalError(self._failure)
 
     def submit(self, record: dict[str, object]) -> int:
-        self._seq += 1
-        record["seq"] = self._seq
-        self._queue.put(record)
-        return self._seq
+        with self._lock:
+            self.check()
+            if self._closed:
+                raise JournalError("journal_closed")
+            next_seq = self._seq + 1
+            row = {**record, "seq": next_seq}
+            try:
+                self._queue.put_nowait(row)
+            except queue.Full as exc:
+                raise JournalError("journal_backpressure") from exc
+            self._seq = next_seq
+            return next_seq
 
     def _run(self) -> None:
-        with self.path.open("a", encoding="utf-8") as handle:
-            while True:
-                item = self._queue.get()
-                pending = [item]
-                while len(pending) < self._batch:
-                    try:
-                        pending.append(self._queue.get_nowait())
-                    except queue.Empty:
-                        break
-                stop = False
-                written: list[int] = []
-                for record in pending:
-                    if record is None:
-                        stop = True
-                        continue
-                    handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
-                    written.append(int(str(record["seq"])))
-                handle.flush()
-                os.fsync(handle.fileno())
-                if self._on_durable is not None:
-                    durable_ns = time.perf_counter_ns()
-                    for seq in written:
-                        self._on_durable(seq, durable_ns)
-                if stop:
-                    return
+        try:
+            with self.path.open("x", encoding="utf-8") as handle:
+                self._ready.set()
+                while True:
+                    pending = [self._queue.get()]
+                    while len(pending) < self._batch:
+                        try:
+                            pending.append(self._queue.get_nowait())
+                        except queue.Empty:
+                            break
+                    stop = False
+                    written: list[int] = []
+                    for record in pending:
+                        if record is None:
+                            stop = True
+                            continue
+                        handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+                        written.append(int(str(record["seq"])))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    if self._on_durable is not None:
+                        durable_ns = time.perf_counter_ns()
+                        for seq in written:
+                            self._on_durable(seq, durable_ns)
+                    if stop:
+                        return
+        except Exception as exc:
+            self._failure = f"journal_writer:{type(exc).__name__}"
+        finally:
+            self._ready.set()
 
     def close(self, timeout_s: float = 5.0) -> None:
-        self._queue.put(None)
-        self._thread.join(timeout_s)
+        if timeout_s <= 0:
+            raise ValueError("journal close timeout must be positive")
+        with self._lock:
+            self.check()
+            if self._closed:
+                if self._thread.is_alive():
+                    raise JournalError("journal_close_incomplete")
+                return
+            self._closed = True
+        deadline = time.monotonic() + timeout_s
+        try:
+            self._queue.put(None, timeout=timeout_s)
+        except queue.Full as exc:
+            raise JournalError("journal_close_backpressure") from exc
+        self._thread.join(max(0.0, deadline - time.monotonic()))
+        self.check()
+        if self._thread.is_alive():
+            raise JournalError("journal_close_timeout")
 
 
 # ------------------------------------------------------------------------------ latch mirror
@@ -170,6 +217,7 @@ class WorkingCall:
     limit: Decimal | None = None
     chase_limit: Decimal | None = None
     status: str = "scheduled"
+    intended_qty: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,7 +287,7 @@ class PaperExecutionSession:
         self.allowed_author_ids = allowed_author_ids
         self._mono_ns = mono_ns
         self._now_utc = now_utc
-        self._broker = PaperBroker() if mode is ExecutionMode.PAPER else ReviewOnlyBroker()
+        self._broker = PaperIntentBroker() if mode is ExecutionMode.PAPER else ReviewOnlyBroker()
         self.working: dict[str, WorkingCall] = {}
         self.orders: list[ExecutionResult] = []
         self.latency = LatencyRecorder()
@@ -312,6 +360,8 @@ class PaperExecutionSession:
         working = self.working.get(call_id)
         if working is None or working.track is not Track.MAIN:
             return None
+        if working.status != ("limit_intent" if chase else "scheduled"):
+            return None
         if not self.latch.armed:
             working.status = "blocked:no_trade_latch"
             self._journal({"kind": "skip", "call_id": call_id, "reason": working.status})
@@ -335,7 +385,11 @@ class PaperExecutionSession:
         if not chase:
             # First limit rests at the current price (R1); it is not lifted to the ask.
             limit = min(limit, anchor) if anchor is not None else limit
-        quantity = max(1, int(self.rules.paper_notional_usd // limit))
+        quantity = int(self.rules.paper_notional_usd // limit)
+        if quantity <= 0:
+            working.status = "skip:below_one_share_budget"
+            self._journal({"kind": "skip", "call_id": call_id, "reason": working.status})
+            return None
         effect = Effect(
             EffectKind.PROPOSE_OPEN,
             working.spec.ticker,
@@ -351,6 +405,7 @@ class PaperExecutionSession:
         else:
             working.limit = limit
             working.status = "limit_intent"
+        working.intended_qty = quantity
         self.orders.append(result)
         elapsed = time.perf_counter_ns() - started
         self.latency.add("entry_to_intent", elapsed)
@@ -360,6 +415,7 @@ class PaperExecutionSession:
                 "call_id": call_id,
                 "ticker": working.spec.ticker,
                 "chase": chase,
+                "conditional_on": "initial_unfilled" if chase else None,
                 "limit": str(limit),
                 "quantity": quantity,
                 "status": result.status,
@@ -371,19 +427,26 @@ class PaperExecutionSession:
 
     def on_exit_due(self, call_id: str) -> ExecutionResult | None:
         working = self.working.get(call_id)
-        if working is None or working.limit is None:
+        if (
+            working is None or working.limit is None or working.intended_qty <= 0
+            or working.status == "exit_intent"
+        ):
             return None
         effect = Effect(EffectKind.PROPOSE_CLOSE, working.spec.ticker, call_id, 1, "fwd-v2 60m exit")
-        result = self._broker.execute(
-            effect, max(1, int(self.rules.paper_notional_usd // working.limit)), None
-        )
+        result = self._broker.execute(effect, working.intended_qty, None)
         working.status = "exit_intent"
         self.orders.append(result)
-        self._journal({"kind": "exit", "call_id": call_id, "status": result.status})
+        self._journal({
+            "kind": "conditional_exit_intent", "call_id": call_id,
+            "status": result.status, "conditional_on": "confirmed_entry_fill",
+            "quantity": working.intended_qty,
+        })
         return result
 
     # -- health -------------------------------------------------------------------------------
     def health_tick(self, monitor: FeedHealthMonitor, *, session_open: bool) -> list[str]:
+        if self.journal is not None:
+            self.journal.check()
         watched = [w.spec.ticker for w in self.working.values() if w.track is Track.MAIN]
         health = monitor.evaluate(
             now_mono_ns=self._mono_ns(), session_open=session_open, watched=watched
@@ -446,8 +509,9 @@ async def supervise(
     session_open: Callable[[], bool],
     stop_at_utc: datetime,
     tick_s: float = 1.0,
+    ingest_run: Callable[[], object] | None = None,
 ) -> None:
-    """Run feed, ingest consumer, health (1 Hz) and pager in one TaskGroup.
+    """Run feed, ingress, consumer, health (1 Hz) and pager in one TaskGroup.
 
     Any task crash latches NO_TRADE, pages once and re-raises so systemd restarts the unit; the
     restart comes back NO_TRADE because only a person clears the latch.
@@ -491,10 +555,16 @@ async def supervise(
                 raise _SessionComplete
             await asyncio.sleep(tick_s)
 
+    async def required_component(factory: Callable[[], object], name: str) -> None:
+        await _as_coroutine(factory)
+        raise RuntimeError(f"required_component_ended:{name}")
+
     try:
         async with asyncio.TaskGroup() as tg:
             if feed_run is not None:
-                tg.create_task(_as_coroutine(feed_run), name="databento-feed")
+                tg.create_task(required_component(feed_run, "feed"), name="databento-feed")
+            if ingest_run is not None:
+                tg.create_task(required_component(ingest_run, "ingress"), name="discord-ingest")
             tg.create_task(consume(), name="call-ingest-decision")
             tg.create_task(health(), name="health-1hz")
             tg.create_task(session.pager.run(), name="pager")
