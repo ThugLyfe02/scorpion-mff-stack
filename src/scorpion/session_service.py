@@ -1,8 +1,8 @@
 """One supervised asyncio paper session: Discord post -> decision -> paper order intent.
 
 Hot path (``on_post`` / ``on_entry_due``) is pure in-memory work on the event loop: existing parser,
-frozen forward rules, an O(1) per-symbol quote read, a Decimal limit, and an intent-only recorder call. All
-disk I/O (journal fsync, latch persistence) is handed to worker threads and never awaited by the
+frozen forward rules, an O(1) per-symbol quote read, a Decimal limit, and an intent-only recorder.
+All disk I/O (journal fsync, latch persistence) is handed to worker threads and never awaited by the
 decision. The latch is mirrored in memory and re-read from disk at 1 Hz; a trip is applied to the
 mirror before it is persisted, so a trip can never be slower than its own write.
 
