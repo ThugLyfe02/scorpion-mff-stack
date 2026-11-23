@@ -372,11 +372,19 @@ class Engine:
         if key and key in self.positions:
             return self.positions[key]
 
-        named_something = bool(signal.ticker or signal.side)
+        # Never downgrade a stated strike or expiry to ticker/side matching.
+        # A different contract in the same underlying is not the requested exit.
+        named_something = bool(
+            signal.ticker or signal.side or signal.strike is not None or signal.expiry
+        )
         if named_something:
             matches = [p for p in self.open_positions
                        if (not signal.ticker or p.ticker == signal.ticker)
-                       and (signal.side is None or p.side is signal.side)]
+                       and (signal.side is None or p.side is signal.side)
+                       and (signal.strike is None
+                            or p.contract_key.split("|")[2] == f"{signal.strike:g}")
+                       and (not signal.expiry or signal.expiry == "?"
+                            or p.contract_key.split("|")[3] == signal.expiry)]
             if len(matches) == 1:
                 return matches[0]
             # Zero matches (a contract we do not hold) or several (ambiguous): never
