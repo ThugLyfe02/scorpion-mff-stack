@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
-from .config import DATABENTO_COST_CAP_USD
+from .config import DATABENTO_COST_CAP_USD, STALE_POLICY
 from .fastpath import QuoteCache
 from .feed_integrity import FeedContinuityMode, FeedIntegrityReport, evaluate_feed_integrity
 
@@ -90,6 +90,9 @@ class FeedStats:
     disconnects: int = 0
     snapshots_requested: int = 0
     messages: int = 0
+    rejected_time: int = 0
+    rejected_order: int = 0
+    rejected_quote: int = 0
     delays_s: list[float] = field(default_factory=list)
 
 
@@ -109,6 +112,7 @@ class DatabentoFeed:
         wall_ns: Callable[[], int] = time.time_ns,
         on_skew: Callable[[float, int], None] | None = None,
         max_disconnects: int | None = None,
+        max_event_age_ms: int = STALE_POLICY.quote_max_age_ms,
     ) -> None:
         import asyncio
 
@@ -122,6 +126,10 @@ class DatabentoFeed:
         self._wall_ns = wall_ns
         self._on_skew = on_skew
         self._max_disconnects = max_disconnects
+        if max_event_age_ms <= 0:
+            raise ValueError("max_event_age_ms must be positive")
+        self._max_event_age_ns = max_event_age_ms * 1_000_000
+        self._event_watermark: dict[str, int] = {}
         self.stats = FeedStats()
 
     def add_symbol(self, symbol: str) -> None:
@@ -135,20 +143,39 @@ class DatabentoFeed:
     def _apply(self, message: FeedMessage) -> None:
         received = self._mono_ns()
         self.stats.messages += 1
+        age_ns = self._wall_ns() - message.ts_event_ns
         if self._on_skew is not None:
-            self._on_skew((self._wall_ns() - message.ts_event_ns) / 1_000_000.0, received)
+            self._on_skew(age_ns / 1_000_000.0, received)
+        # A replayed, delayed or future exchange event cannot refresh an executable quote.
+        if message.ts_event_ns <= 0 or not 0 <= age_ns <= self._max_event_age_ns:
+            self.stats.rejected_time += 1
+            return
+        previous = self._event_watermark.get(message.symbol, -1)
+        if message.ts_event_ns <= previous:
+            self.stats.rejected_order += 1
+            return
+        self._event_watermark[message.symbol] = message.ts_event_ns
         bid, ask = message.bid, message.ask
-        if bid is None or ask is None or bid <= 0 or ask <= 0 or ask < bid:
+        if (
+            bid is None or ask is None or not bid.is_finite() or not ask.is_finite()
+            or bid <= 0 or ask <= 0 or ask < bid
+        ):
+            self.stats.rejected_quote += 1
+            self._cache.invalidate(message.symbol)
             self._cache.note_message(received)
             return
+        last = message.last
+        if last is not None and (not last.is_finite() or last <= 0):
+            last = None
         self._cache.update(
             message.symbol,
             bid=bid,
             ask=ask,
-            last=message.last,
+            last=last,
             observed_ts_utc=datetime.fromtimestamp(message.ts_event_ns / 1e9, tz=UTC),
             ts_event_ns=message.ts_event_ns,
             recv_mono_ns=received,
+            source_age_ns=age_ns,
         )
 
     async def run(self) -> None:
@@ -165,6 +192,8 @@ class DatabentoFeed:
                     self._apply(message)
             except Exception as exc:
                 LOGGER.warning("databento feed dropped: %s", redact(type(exc).__name__))
+            finally:
+                self._cache.invalidate_all()
             self.stats.disconnects += 1
             if self._max_disconnects is not None and self.stats.disconnects >= self._max_disconnects:
                 return

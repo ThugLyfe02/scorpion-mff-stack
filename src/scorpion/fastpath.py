@@ -110,11 +110,14 @@ class QuoteCache:
         last: Decimal | None = None,
         ts_event_ns: int | None = None,
         recv_mono_ns: int | None = None,
+        source_age_ns: int = 0,
     ) -> None:
         if not contract_key:
             raise ValueError("contract_key is required")
-        if bid <= 0 or ask <= 0 or ask < bid:
+        if not bid.is_finite() or not ask.is_finite() or bid <= 0 or ask <= 0 or ask < bid:
             raise ValueError("invalid quote")
+        if source_age_ns < 0:
+            raise ValueError("negative source age")
         received = self._mono_ns() if recv_mono_ns is None else recv_mono_ns
         quote = Quote(
             bid,
@@ -123,10 +126,21 @@ class QuoteCache:
             last=last,
             ts_event_ns=ts_event_ns,
             recv_mono_ns=received,
+            source_age_ns=source_age_ns,
         )
         with self._lock:
             self._quotes[contract_key] = quote
             self._last_message_mono_ns = received
+
+    def invalidate(self, symbol: str) -> None:
+        """Remove an unpriceable or withdrawn quote without refreshing its age."""
+        with self._lock:
+            self._quotes.pop(symbol, None)
+
+    def invalidate_all(self) -> None:
+        """A disconnected subscription has no executable quote state."""
+        with self._lock:
+            self._quotes.clear()
 
     def note_message(self, recv_mono_ns: int | None = None) -> None:
         """Record subscription liveness for a message that carried no usable quote."""
@@ -147,7 +161,7 @@ class QuoteCache:
         if quote is None or quote.recv_mono_ns is None:
             return None
         now = self._mono_ns() if now_mono_ns is None else now_mono_ns
-        return (now - quote.recv_mono_ns) / 1_000_000.0
+        return (now - quote.recv_mono_ns + quote.source_age_ns) / 1_000_000.0
 
     def fresh(
         self,
@@ -162,8 +176,9 @@ class QuoteCache:
         if quote.recv_mono_ns is None:
             return StaleQuote(symbol, None, "no_monotonic_receive_time")
         now = self._mono_ns() if now_mono_ns is None else now_mono_ns
-        age_ms = (now - quote.recv_mono_ns) / 1_000_000.0
-        if age_ms < 0 or age_ms > max_age_ms:
+        local_age_ns = now - quote.recv_mono_ns
+        age_ms = (local_age_ns + quote.source_age_ns) / 1_000_000.0
+        if local_age_ns < 0 or age_ms > max_age_ms:
             return StaleQuote(symbol, age_ms, f"stale_age_ms={age_ms:.1f}>{max_age_ms}")
         return quote
 

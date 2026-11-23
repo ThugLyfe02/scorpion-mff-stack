@@ -1,0 +1,99 @@
+"""The receive clock cannot make an old exchange quote fresh."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
+from decimal import Decimal
+
+from scorpion.broker import Quote, StaleQuote
+from scorpion.databento_feed import DatabentoFeed, FeedMessage
+from scorpion.fastpath import QuoteCache
+
+WALL = 1_790_000_000_000_000_000
+MS = 1_000_000
+
+
+@dataclass
+class Clock:
+    wall: int = WALL
+    mono: int = 100 * MS
+
+
+class Client:
+    def add_symbols(self, symbols: Sequence[str]) -> None:
+        pass
+
+    async def stream(self, symbols: Sequence[str], *, snapshot: bool) -> AsyncIterator[FeedMessage]:
+        yield message(WALL)
+
+
+def message(ts: int, bid: str = "10.00", ask: str = "10.02") -> FeedMessage:
+    return FeedMessage("XYZ", Decimal(bid), Decimal(ask), None, ts)
+
+
+def build() -> tuple[Clock, QuoteCache, DatabentoFeed]:
+    clock = Clock()
+    cache = QuoteCache(mono_ns=lambda: clock.mono)
+    feed = DatabentoFeed(
+        Client(), cache, ["XYZ"], wall_ns=lambda: clock.wall, mono_ns=lambda: clock.mono,
+        max_disconnects=1,
+    )
+    return clock, cache, feed
+
+
+def test_exchange_delay_counts_against_total_quote_age() -> None:
+    clock, cache, feed = build()
+    feed._apply(message(WALL - 2_900 * MS))
+    assert isinstance(cache.fresh("XYZ", max_age_ms=3000), Quote)
+    clock.mono += 101 * MS
+    assert isinstance(cache.fresh("XYZ", max_age_ms=3000), StaleQuote)
+
+
+def test_delayed_and_future_quotes_never_price() -> None:
+    _, cache, feed = build()
+    feed._apply(message(WALL - 3_001 * MS))
+    feed._apply(message(WALL + 1))
+    assert isinstance(cache.fresh("XYZ", max_age_ms=3000), StaleQuote)
+    assert feed.stats.rejected_time == 2
+    assert cache.last_message_mono_ns is None
+
+
+def test_duplicate_and_reordered_quote_cannot_refresh_or_replace() -> None:
+    clock, cache, feed = build()
+    feed._apply(message(WALL))
+    clock.wall += 100 * MS
+    clock.mono += 100 * MS
+    feed._apply(message(WALL, "99", "100"))
+    feed._apply(message(WALL - 1, "90", "91"))
+    quote = cache.fresh("XYZ", max_age_ms=3000)
+    assert isinstance(quote, Quote)
+    assert quote.bid == Decimal("10")
+    assert cache.age_ms("XYZ") == 100
+    assert feed.stats.rejected_order == 2
+
+
+def test_withdrawn_or_nonfinite_quote_invalidates_previous_price() -> None:
+    clock, cache, feed = build()
+    feed._apply(message(WALL))
+    clock.wall += MS
+    feed._apply(message(clock.wall, "NaN", "10.02"))
+    assert isinstance(cache.fresh("XYZ", max_age_ms=3000), StaleQuote)
+    assert feed.stats.rejected_quote == 1
+
+
+def test_disconnect_invalidates_snapshot_and_cannot_be_replayed() -> None:
+    _, cache, feed = build()
+    asyncio.run(feed.run())
+    assert isinstance(cache.fresh("XYZ", max_age_ms=3000), StaleQuote)
+    feed._apply(message(WALL))
+    assert isinstance(cache.fresh("XYZ", max_age_ms=3000), StaleQuote)
+    assert feed.stats.rejected_order == 1
+
+
+def test_monotonic_clock_regression_is_not_hidden_by_source_age() -> None:
+    clock, cache, feed = build()
+    feed._apply(message(WALL - 100 * MS))
+    clock.mono -= MS
+    assert isinstance(cache.fresh("XYZ", max_age_ms=3000), StaleQuote)
