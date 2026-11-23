@@ -161,3 +161,17 @@ def test_explicit_wrong_expiry_cannot_close_another_contract() -> None:
     signal = Signal(kind=AlertKind.CLOSE, ticker="QQQ", side=Side.CALL,
                     strike=719, expiry="2026-11-24", price=1.20)
     assert engine._resolve(signal) is None
+
+
+def test_partial_exit_identity_emits_the_resolved_held_key() -> None:
+    from scorpion_mff.engine import Engine
+    from scorpion_mff.types import AlertKind, Position, Side, Signal
+
+    engine = Engine(clock=lambda: T)
+    engine.day = engine.trading_day(T)
+    engine.positions[KEY] = Position(KEY, "QQQ", Side.CALL, 1, 1.05, T)
+    signal = Signal(kind=AlertKind.CLOSE, ticker="QQQ", side=Side.CALL,
+                    strike=719, price=1.20)
+    intents = engine.on_signal(signal)
+    assert len(intents) == 1
+    assert intents[0].contract_key == KEY

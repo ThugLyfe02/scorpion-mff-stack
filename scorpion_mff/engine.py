@@ -647,7 +647,7 @@ class Engine:
     def _on_add(self, signal: Signal, quote: Quote | None, ts: float,
                 latency_ms: int | None) -> list[OrderIntent]:
         position = self._resolve(signal)
-        key = signal.contract_key or (position.contract_key if position else "")
+        key = position.contract_key if position is not None else signal.contract_key
         if position is None:
             return self._skip(signal, ts, "add_without_position", latency_ms, key)
         if position.contract_key in self.exit_in_flight:
@@ -716,7 +716,7 @@ class Engine:
     def _on_trim(self, signal: Signal, quote: Quote | None, ts: float,
                  latency_ms: int | None) -> list[OrderIntent]:
         position = self._resolve(signal)
-        key = signal.contract_key or (position.contract_key if position else "")
+        key = position.contract_key if position is not None else signal.contract_key
         if position is None:
             if self._ambiguous_exit(signal):
                 return self._alert(signal, ts, "ambiguous_exit:named_no_contract", latency_ms)
@@ -751,7 +751,7 @@ class Engine:
     def _on_close(self, signal: Signal, quote: Quote | None, ts: float,
                   latency_ms: int | None) -> list[OrderIntent]:
         position = self._resolve(signal)
-        key = signal.contract_key or (position.contract_key if position else "")
+        key = position.contract_key if position is not None else signal.contract_key
         if position is None:
             if self._ambiguous_exit(signal):
                 return self._alert(signal, ts, "ambiguous_exit:named_no_contract", latency_ms)
