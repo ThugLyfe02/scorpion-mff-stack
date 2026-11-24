@@ -603,12 +603,12 @@ def admit_paper_outcome_labels(
     order_ids: set[str] = set()
     fill_ids: set[str] = set()
     for value in data["orders"]:
-        order = _parse_order(value)
-        if order.feature_hash in orders or order.order_id in order_ids:
+        parsed_order = _parse_order(value)
+        if parsed_order.feature_hash in orders or parsed_order.order_id in order_ids:
             raise PaperOutcomeError("duplicate_venue_order_identity")
-        orders[order.feature_hash] = order
-        order_ids.add(order.order_id)
-        for fill_id, *_ in order.fills:
+        orders[parsed_order.feature_hash] = parsed_order
+        order_ids.add(parsed_order.order_id)
+        for fill_id, *_ in parsed_order.fills:
             if fill_id in fill_ids:
                 raise PaperOutcomeError("duplicate_venue_fill_identity")
             fill_ids.add(fill_id)

@@ -349,7 +349,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 collector_signature = handle.read(256).strip()
             with args.reviewer_signature.open(encoding="utf-8") as handle:
                 reviewer_signature = handle.read(256).strip()
-            report = admit_paper_outcome_labels(
+            outcome_report = admit_paper_outcome_labels(
                 args.journal, trust_path=args.trust, expected_trust_sha256=args.trust_sha256,
                 export_path=args.export, source_artifact_path=args.source_artifact,
                 collector_signature=collector_signature, reviewer_signature=reviewer_signature,
@@ -358,7 +358,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (OSError, JournalError, ValueError, ImportError) as exc:
             _print({"ok": False, "reason": type(exc).__name__})
             return 1
-        _print(asdict(report))
+        _print(asdict(outcome_report))
         return 0
     if args.command in ("paper-intent-features", "paper-intent-alternatives"):
         from dataclasses import asdict
