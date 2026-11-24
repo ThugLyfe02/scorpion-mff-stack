@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import time
+from datetime import datetime, time
 from decimal import Decimal
 from enum import StrEnum
 from zoneinfo import ZoneInfo
@@ -107,7 +107,13 @@ def _decision_latency_ms(leg: MicroForensicLeg) -> float | None:
 
 
 def _session_bucket(leg: MicroForensicLeg) -> str:
-    local = leg.source_ts_utc.astimezone(_MARKET_TZ).time()
+    return session_time_bucket(leg.source_ts_utc)
+
+
+def session_time_bucket(timestamp: datetime) -> str:
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("regime timestamp must be timezone-aware")
+    local = timestamp.astimezone(_MARKET_TZ).time()
     if time(9, 30) <= local < time(10, 30):
         return "OPEN"
     if time(10, 30) <= local < time(15, 0):
@@ -258,3 +264,17 @@ def evaluate_regime_stability(
     )
     status = RegimeStabilityStatus.PASS if not failures else RegimeStabilityStatus.FAIL
     return RegimeStabilityReport(effective_samples, axes, status, failures)
+
+
+def classify_execution_regimes(
+    *, spread_bps: float | None, quote_age_ms: float | None,
+    decision_latency_ms: float | None, decision_ts: datetime,
+    policy: RegimeStabilityPolicy,
+) -> tuple[tuple[str, str], ...]:
+    """Use the existing bucket definitions for point-in-time equity research."""
+    return (
+        ("spread", _bucket_spread(spread_bps, policy)),
+        ("quote_age", _bucket_quote_age(quote_age_ms, policy)),
+        ("decision_latency", _bucket_latency(decision_latency_ms, policy)),
+        ("session", session_time_bucket(decision_ts)),
+    )

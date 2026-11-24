@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -74,7 +75,22 @@ def evaluate_hierarchical_shrinkage(
     *,
     policy: HierarchicalPolicy | None = None,
 ) -> HierarchicalReport:
+    return evaluate_numeric_group_shrinkage(
+        {name: _values(items) for name, items in groups.items()}, policy=policy,
+    )
+
+
+def evaluate_numeric_group_shrinkage(
+    groups: dict[str, Sequence[float]], *, policy: HierarchicalPolicy | None = None,
+) -> HierarchicalReport:
+    """Shared empirical-Bayes moment estimator for numeric groups.
+
+    For overlapping session-regime groups, use only as descriptive shrinkage;
+    nominal posterior intervals are not calibrated for that dependence.
+    """
     policy = policy or HierarchicalPolicy()
+    if any(not math.isfinite(v) for items in groups.values() for v in items):
+        raise ValueError("nonfinite hierarchical observation")
     usable = {
         name: items
         for name, items in groups.items()
@@ -99,8 +115,7 @@ def evaluate_hierarchical_shrinkage(
     weighted_sum = 0.0
     pooled_within_numerator = 0.0
     pooled_within_denominator = 0
-    for name, items in usable.items():
-        values = _values(items)
+    for name, values in usable.items():
         mean = statistics.fmean(values)
         variance = statistics.variance(values) if len(values) > 1 else 0.0
         group_stats[name] = (len(values), mean, variance)

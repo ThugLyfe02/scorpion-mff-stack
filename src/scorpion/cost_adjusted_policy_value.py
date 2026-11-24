@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 import statistics
 from collections import defaultdict
@@ -145,12 +146,25 @@ def _block_bootstrap_lower(
     values: Sequence[float],
     policy: CostAdjustedPolicyValuePolicy,
 ) -> float:
+    estimates = circular_block_bootstrap_means(
+        values, block_days=policy.block_days, trials=policy.bootstrap_trials,
+        random_seed=policy.random_seed,
+    )
+    return _percentile(estimates, policy.lower_quantile)
+
+
+def circular_block_bootstrap_means(
+    values: Sequence[float], *, block_days: int, trials: int, random_seed: int,
+) -> tuple[float, ...]:
+    """Shared deterministic resampler for chronological session-level means."""
+    if block_days <= 0 or trials <= 0 or any(not math.isfinite(v) for v in values):
+        raise ValueError("invalid block bootstrap inputs")
     if not values:
-        return 0.0
-    rng = random.Random(policy.random_seed)
-    block = min(policy.block_days, len(values))
+        return ()
+    rng = random.Random(random_seed)
+    block = min(block_days, len(values))
     estimates: list[float] = []
-    for _ in range(policy.bootstrap_trials):
+    for _ in range(trials):
         sample: list[float] = []
         while len(sample) < len(values):
             start = rng.randrange(len(values))
@@ -159,7 +173,7 @@ def _block_bootstrap_lower(
                 if len(sample) >= len(values):
                     break
         estimates.append(statistics.fmean(sample))
-    return _percentile(estimates, policy.lower_quantile)
+    return tuple(estimates)
 
 
 def evaluate_cost_adjusted_policy_value(
@@ -290,4 +304,51 @@ def evaluate_cost_adjusted_policy_value(
         turnover_multiple=turnover_multiple,
         status=status,
         failures=tuple(failures),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SessionMeanDiagnostics:
+    sessions: int
+    mean: float | None
+    bootstrap_lower: float | None
+    bootstrap_upper: float | None
+    leave_one_out_min: float | None
+    leave_one_out_max: float | None
+    positive_session_fraction: float | None
+    lag_one_correlation: float | None
+    worst_session: float | None
+    lower_tail_mean: float | None
+
+
+def session_mean_diagnostics(
+    values: Sequence[float], *, block_days: int = 5, trials: int = 2000,
+    alpha: float = 0.05, random_seed: int = 170053,
+    contiguous: bool = True,
+) -> SessionMeanDiagnostics:
+    """Equal-session descriptive diagnostics; bootstrap is not anytime-valid."""
+    if not 0 < alpha < 1 or block_days <= 0 or trials <= 0:
+        raise ValueError("invalid session diagnostic policy")
+    if any(not math.isfinite(v) for v in values):
+        raise ValueError("nonfinite session score")
+    n = len(values)
+    if not n:
+        return SessionMeanDiagnostics(0, None, None, None, None, None, None, None, None, None)
+    mean = statistics.fmean(values)
+    loo = [(math.fsum(values) - value) / (n - 1) for value in values] if n > 1 else []
+    lower = upper = lag = None
+    if contiguous and n >= max(3, 2 * block_days) and min(values) != max(values):
+        estimates = circular_block_bootstrap_means(
+            values, block_days=block_days, trials=trials, random_seed=random_seed,
+        )
+        lower, upper = _percentile(estimates, alpha / 2), _percentile(estimates, 1 - alpha / 2)
+    if contiguous and n >= 3:
+        left, right = values[:-1], values[1:]
+        if min(left) != max(left) and min(right) != max(right):
+            lag = statistics.correlation(left, right)
+    tail_n = max(1, math.ceil(n * 0.10))
+    return SessionMeanDiagnostics(
+        n, mean, lower, upper, min(loo) if loo else None, max(loo) if loo else None,
+        sum(v > 0 for v in values) / n, lag, min(values),
+        statistics.fmean(sorted(values)[:tail_n]),
     )
