@@ -43,6 +43,7 @@ from scorpion.research_hypothesis_memory import (
 )
 from scorpion.session_calendar import session_hours
 from scorpion.session_service import Journal
+from scorpion.walk_forward import FrozenValidationWindow, verify_frozen_validation_windows
 
 DAYS = tuple(date.fromisoformat(v) for v in (
     "2026-11-23", "2026-11-24", "2026-11-25", "2026-11-27",
@@ -689,11 +690,12 @@ def study_fixture(tmp_path: Path, *, paired: bool = False) -> StudyFixture:
         manifest = arm.root / "training.json"
         revision = str(idx + 1) * 40
         manifest_hash = put(manifest, {
-            "schema": "scorpion.frozen-training-lineage.v1", "authority": "RESEARCH_ONLY",
+            "schema": "scorpion.frozen-training-lineage.v2", "authority": "RESEARCH_ONLY",
             "artifact_sha256": artifact_hash, "code_revision": revision, "rules_sha256": arm.rules,
             "trained_through_ts_utc": (frozen - timedelta(days=2)).isoformat(),
             "labels_available_through_ts_utc": (frozen - timedelta(days=1)).isoformat(),
             "frozen_ts_utc": frozen.isoformat(), "training_data_sha256": ["f" * 64],
+            "artifact_kind": "DETERMINISTIC_RULES", "walk_forward_folds": [],
         })
         plan_arms.append({
             "arm": name, "cohort_sha256": arm.pin, "artifact_sha256": artifact_hash,
@@ -892,4 +894,46 @@ def test_training_embargo_rejects_future_label_availability(tmp_path: Path) -> N
     plan["arms"][0]["training_manifest_sha256"] = put(manifest_path, manifest)
     ctx.study_pin = put(ctx.study, plan)
     with pytest.raises(PaperQualificationError, match="embargo"):
+        ctx.reserve()
+
+
+def test_frozen_walk_forward_rejects_future_labels_and_reused_holdout() -> None:
+    t = REGISTERED - timedelta(days=20)
+    embargo = timedelta(days=1)
+    folds = tuple(FrozenValidationWindow(
+        t + timedelta(days=3 * i), t + timedelta(days=3 * i),
+        t + timedelta(days=3 * i + 1), t + timedelta(days=3 * i + 2),
+        t + timedelta(days=3 * i + 2),
+        ("a" * 64,) if i == 0 else ("a" * 64, str(i) * 64),
+        str(i + 1) * 64,
+    ) for i in range(3))
+    data = frozenset({"a" * 64, "1" * 64, "2" * 64, "3" * 64})
+    assert verify_frozen_validation_windows(
+        folds, embargo=embargo, frozen=REGISTERED, declared_data=data,
+    ).valid
+    future = replace(folds[0], training_data_hashes=("a" * 64, "3" * 64))
+    result = verify_frozen_validation_windows(
+        (future, *folds[1:]), embargo=embargo, frozen=REGISTERED, declared_data=data,
+    )
+    assert "fold_future_validation_data_reuse:0" in result.failures
+    late = replace(folds[0], training_labels_available_through=folds[0].validation_start)
+    assert not verify_frozen_validation_windows(
+        (late, *folds[1:]), embargo=embargo, frozen=REGISTERED, declared_data=data,
+    ).valid
+    duplicate = replace(folds[1], validation_data_hash=folds[0].validation_data_hash)
+    assert not verify_frozen_validation_windows(
+        (folds[0], duplicate, folds[2]), embargo=embargo, frozen=REGISTERED, declared_data=data,
+    ).valid
+
+
+def test_trained_model_requires_declared_purged_folds(tmp_path: Path) -> None:
+    ctx = study_fixture(tmp_path)
+    plan = json.loads(ctx.study.read_text())
+    inputs = json.loads(ctx.inputs.read_text())
+    manifest_path = Path(inputs["arms"][0]["training_manifest"])
+    manifest = json.loads(manifest_path.read_text())
+    manifest["artifact_kind"] = "TRAINED_MODEL"
+    plan["arms"][0]["training_manifest_sha256"] = put(manifest_path, manifest)
+    ctx.study_pin = put(ctx.study, plan)
+    with pytest.raises(PaperQualificationError, match="walk_forward_lineage"):
         ctx.reserve()

@@ -377,9 +377,17 @@ arm, cohort, trust, cost_policy, artifact, training_manifest, sessions (paths re
 The arm cohort and trust/fee-policy bytes are reverified. In a pair, account references and
 frozen rules/artifact hashes must be different; source venue, market source, date roster,
 benchmark/observation horizons and evaluation thresholds must agree.
-The training lineage file scorpion.frozen-training-lineage.v1, authority RESEARCH_ONLY,
+The training lineage file scorpion.frozen-training-lineage.v2, authority RESEARCH_ONLY,
 contains artifact_sha256, code_revision, rules_sha256, trained_through_ts_utc,
-labels_available_through_ts_utc, frozen_ts_utc, training_data_sha256 (nonempty digest list).
+labels_available_through_ts_utc, frozen_ts_utc, training_data_sha256 (nonempty digest list),
+artifact_kind (DETERMINISTIC_RULES or TRAINED_MODEL), and walk_forward_folds. Each declared fold
+contains train_through_ts_utc, training_labels_available_through_ts_utc, validation_start_ts_utc,
+validation_end_ts_utc, validation_labels_available_through_ts_utc, training_data_sha256 and
+validation_data_sha256. Trained models require at least three declared folds; deterministic
+rules may use an empty fold list. The existing walk_forward module verifies nonoverlapping
+validation windows, purged label availability and embargo, no future validation data in training,
+no duplicate validation identities, and inclusion in the frozen data inventory. Earlier holdouts
+can be used in later training only after their labels are available.
 Actual artifact bytes and lineage bytes are pinned; label availability and freeze must precede
 the holdout with the embargo. This checks declared lineage, not reconstructing model training.
 No training/holdout data artifact hash overlap is allowed.

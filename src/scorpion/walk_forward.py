@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 import statistics
 from dataclasses import dataclass, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from .execution_forensics import CompletedTrade
 from .sizing_lab import SizingConstraints, score_segment
@@ -276,4 +276,88 @@ def evaluate_walk_forward(
         total_purged_train_samples=total_purged,
         total_stale_train_samples_dropped=total_stale,
         temporal_leakage_detected=leakage_detected,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenValidationWindow:
+    """Declared training/validation boundary; not a substitute for actual sample-level purge."""
+
+    train_through: datetime
+    training_labels_available_through: datetime
+    validation_start: datetime
+    validation_end: datetime
+    validation_labels_available_through: datetime
+    training_data_hashes: tuple[str, ...]
+    validation_data_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenValidationLineageReport:
+    folds: int
+    valid: bool
+    failures: tuple[str, ...]
+
+
+def verify_frozen_validation_windows(
+    windows: tuple[FrozenValidationWindow, ...], *, embargo: timedelta, frozen: datetime,
+    declared_data: frozenset[str], minimum_folds: int = 3,
+) -> FrozenValidationLineageReport:
+    """Reject declared temporal and dataset overlap in a frozen model's development lineage.
+
+    Later training may reuse an earlier validation set only after its outcomes were
+    available. This checks provenance boundaries, not correctness of the declared dataset
+    content or measured held-out performance.
+    """
+    if embargo < timedelta(0) or minimum_folds < 0 or len(windows) > 1000:
+        raise ValueError("invalid frozen lineage policy")
+    if frozen.tzinfo is None or frozen.utcoffset() is None:
+        raise ValueError("naive artifact freeze timestamp")
+    failures: list[str] = []
+    if len(windows) < minimum_folds:
+        failures.append("insufficient_declared_validation_folds")
+    prior_end: datetime | None = None
+    prior_train: datetime | None = None
+    prior_training_labels: datetime | None = None
+    prior_validation_labels: dict[str, datetime] = {}
+    all_validation_ids = {window.validation_data_hash for window in windows}
+    for index, fold in enumerate(windows):
+        stamps = (
+            fold.train_through, fold.training_labels_available_through, fold.validation_start,
+            fold.validation_end, fold.validation_labels_available_through,
+        )
+        if any(stamp.tzinfo is None or stamp.utcoffset() is None for stamp in stamps):
+            failures.append(f"naive_validation_window:{index}")
+            continue
+        if not (
+            fold.train_through <= fold.training_labels_available_through
+            <= fold.validation_start - embargo < fold.validation_start
+            < fold.validation_end <= fold.validation_labels_available_through <= frozen
+        ):
+            failures.append(f"fold_label_availability_or_embargo:{index}")
+        if (
+            (prior_end is not None and fold.validation_start < prior_end)
+            or (prior_train is not None and fold.train_through < prior_train)
+            or (prior_training_labels is not None
+                and fold.training_labels_available_through < prior_training_labels)
+        ):
+            failures.append(f"fold_temporal_order:{index}")
+        if (
+            not fold.training_data_hashes
+            or len(set(fold.training_data_hashes)) != len(fold.training_data_hashes)
+            or fold.validation_data_hash in fold.training_data_hashes
+            or fold.validation_data_hash in prior_validation_labels
+            or not set(fold.training_data_hashes).union({fold.validation_data_hash}) <= declared_data
+        ):
+            failures.append(f"fold_dataset_identity_conflict:{index}")
+        for digest in set(fold.training_data_hashes) & all_validation_ids:
+            available = prior_validation_labels.get(digest)
+            if available is None or available > fold.training_labels_available_through:
+                failures.append(f"fold_future_validation_data_reuse:{index}")
+        prior_end = fold.validation_end
+        prior_train = fold.train_through
+        prior_training_labels = fold.training_labels_available_through
+        prior_validation_labels[fold.validation_data_hash] = fold.validation_labels_available_through
+    return FrozenValidationLineageReport(
+        len(windows), not failures, tuple(dict.fromkeys(failures)),
     )

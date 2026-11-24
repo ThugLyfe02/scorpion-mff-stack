@@ -45,6 +45,7 @@ from .research_hypothesis_memory import (
 )
 from .sequential_evidence import BernoulliEPolicy, BernoulliEProcess, SequentialEvidenceStatus
 from .session_calendar import session_hours
+from .walk_forward import FrozenValidationWindow, verify_frozen_validation_windows
 
 _RESERVE_DOMAIN = b"scorpion.prospective-study-approval.v1:reserve\x00"
 _REVIEW_DOMAIN = b"scorpion.prospective-study-approval.v1:review\x00"
@@ -75,6 +76,8 @@ class StudyArm:
     trained_through: datetime
     labels_through: datetime
     training_data_hashes: tuple[str, ...]
+    artifact_kind: str
+    validation_folds: int
     cohort_path: Path
     trust_path: Path
     cost_policy_path: Path
@@ -266,10 +269,10 @@ def _arm(
     _fields(manifest, {
         "schema", "authority", "artifact_sha256", "code_revision", "rules_sha256",
         "trained_through_ts_utc", "labels_available_through_ts_utc", "frozen_ts_utc",
-        "training_data_sha256",
+        "training_data_sha256", "artifact_kind", "walk_forward_folds",
     })
     if (
-        manifest["schema"] != "scorpion.frozen-training-lineage.v1"
+        manifest["schema"] != "scorpion.frozen-training-lineage.v2"
         or manifest["authority"] != "RESEARCH_ONLY"
         or manifest["artifact_sha256"] != artifact_hash or manifest["code_revision"] != revision
         or manifest["rules_sha256"] != trust.rules_sha256
@@ -291,9 +294,47 @@ def _arm(
     training = tuple(sorted(_hex(value, 32).hex() for value in raw_data))
     if len(set(training)) != len(training):
         raise PaperQualificationError("training_lineage_duplicate_data")
+    artifact_kind = _text(manifest["artifact_kind"])
+    if artifact_kind not in ("DETERMINISTIC_RULES", "TRAINED_MODEL"):
+        raise PaperQualificationError("unknown_frozen_artifact_kind")
+    raw_folds = manifest["walk_forward_folds"]
+    if not isinstance(raw_folds, list) or len(raw_folds) > 1000:
+        raise PaperQualificationError("invalid_declared_walk_forward_folds")
+    windows: list[FrozenValidationWindow] = []
+    for fold in raw_folds:
+        if not isinstance(fold, dict):
+            raise PaperQualificationError("invalid_declared_walk_forward_fold")
+        _fields(fold, {
+            "train_through_ts_utc", "training_labels_available_through_ts_utc",
+            "validation_start_ts_utc", "validation_end_ts_utc",
+            "validation_labels_available_through_ts_utc", "training_data_sha256",
+            "validation_data_sha256",
+        })
+        fold_data = fold["training_data_sha256"]
+        if not isinstance(fold_data, list) or len(fold_data) > 10000:
+            raise PaperQualificationError("invalid_fold_training_data")
+        windows.append(FrozenValidationWindow(
+            _stamp(fold["train_through_ts_utc"]),
+            _stamp(fold["training_labels_available_through_ts_utc"]),
+            _stamp(fold["validation_start_ts_utc"]), _stamp(fold["validation_end_ts_utc"]),
+            _stamp(fold["validation_labels_available_through_ts_utc"]),
+            tuple(_hex(value, 32).hex() for value in fold_data),
+            _hex(fold["validation_data_sha256"], 32).hex(),
+        ))
+    lineage = verify_frozen_validation_windows(
+        tuple(windows), embargo=timedelta(seconds=embargo), frozen=frozen,
+        declared_data=frozenset(training), minimum_folds=3 if artifact_kind == "TRAINED_MODEL" else 0,
+    )
+    if not lineage.valid or any(
+        window.train_through > trained or window.training_labels_available_through > labels
+        or window.validation_labels_available_through > labels
+        for window in windows
+    ):
+        raise PaperQualificationError("walk_forward_lineage_invalid")
     return StudyArm(
         arm, cohort_hash, artifact_hash, revision, manifest_hash, frozen, trained, labels,
-        training, files["cohort"], files["trust"], files["cost_policy"], files["sessions"],
+        training, artifact_kind, lineage.folds,
+        files["cohort"], files["trust"], files["cost_policy"], files["sessions"],
         cohort, trust.account_ref, trust.source_id, trust.rules_sha256,
         cost.market_source_id, cost.horizon_seconds, cost.max_mark_age_ms,
         trust.horizon_seconds,
