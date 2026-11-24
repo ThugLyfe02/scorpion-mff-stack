@@ -306,6 +306,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     feature_report.add_argument("--journal", type=Path, required=True)
     alternative_report = sub.add_parser("paper-intent-alternatives")
     alternative_report.add_argument("--journal", type=Path, required=True)
+    labels = sub.add_parser("paper-outcome-labels")
+    labels.add_argument("--journal", type=Path, required=True)
+    labels.add_argument("--trust", type=Path, required=True)
+    labels.add_argument("--trust-sha256", required=True)
+    labels.add_argument("--export", type=Path, required=True)
+    labels.add_argument("--source-artifact", type=Path, required=True)
+    labels.add_argument("--collector-signature", type=Path, required=True)
+    labels.add_argument("--reviewer-signature", type=Path, required=True)
+    labels.add_argument("--as-of", required=True)
     rp = sub.add_parser("replay")
     rp.add_argument("--date")
     rp.add_argument("--input", type=Path, default=REPLAY_FIXTURE)
@@ -329,6 +338,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     pull.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
 
+    if args.command == "paper-outcome-labels":
+        from dataclasses import asdict
+
+        from .execution_meta_labels import admit_paper_outcome_labels
+        from .session_service import JournalError
+
+        try:
+            with args.collector_signature.open(encoding="utf-8") as handle:
+                collector_signature = handle.read(256).strip()
+            with args.reviewer_signature.open(encoding="utf-8") as handle:
+                reviewer_signature = handle.read(256).strip()
+            report = admit_paper_outcome_labels(
+                args.journal, trust_path=args.trust, expected_trust_sha256=args.trust_sha256,
+                export_path=args.export, source_artifact_path=args.source_artifact,
+                collector_signature=collector_signature, reviewer_signature=reviewer_signature,
+                as_of=datetime.fromisoformat(args.as_of),
+            )
+        except (OSError, JournalError, ValueError, ImportError) as exc:
+            _print({"ok": False, "reason": type(exc).__name__})
+            return 1
+        _print(asdict(report))
+        return 0
     if args.command in ("paper-intent-features", "paper-intent-alternatives"):
         from dataclasses import asdict
 

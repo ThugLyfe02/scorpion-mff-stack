@@ -73,3 +73,49 @@ Missing/noncausal evidence is refused, not imputed. The two alternatives are pai
 only requested-limit, quantity and timing differences are measurable. No execution or P&L delta
 is imputed. No row is a labeled TrainingRow and no optimizer is invoked. Authenticated venue or
 adjudicated outcome evidence and independent qualification remain prerequisites for learning.
+
+
+## P1 — independently attested paper outcome labels
+
+Use the existing execution_meta_labels module with the existing sealed journal feature extractor.
+This new boundary is offline. It has no order submission, automatic training, or promotion authority.
+Install the optional paper-evidence extra for Ed25519 verification.
+
+The operator pins the exact SHA-256 of an independently maintained trust JSON file before
+collection. Schema scorpion.paper-outcome-trust.v1, authority PAPER_ONLY, source_id, account_ref
+(use an opaque paper-account reference), rules_sha256, registered_ts_utc, horizon_seconds,
+collector_id, collector_public_key, reviewer_id, reviewer_public_key. Public keys are 32-byte
+lowercase hex Ed25519 keys. Different IDs and keys are mandatory; separate custody must be
+enforced outside this code. The declared registration timestamp is not a trusted timestamp proof.
+
+The external collector maps an original paper-venue export to scorpion.paper-outcome-export.v1:
+authority PAPER_ONLY, source_id, account_ref, trust_sha256, journal_sha256,
+source_artifact_sha256, complete_order_export=true, observed_through_ts_utc, collected_ts_utc,
+reviewed_ts_utc, orders. Each order contains feature_sha256, venue_order_id, call_id, ticker,
+role (INITIAL or CHASE), intent_seq, requested_quantity, limit (decimal string), state,
+submitted_ts_utc, terminal_ts_utc (null for unresolved), fills (fill_id, quantity, price
+as decimal string, filled_ts_utc). Timestamps must be timezone-aware. The original vendor
+artifact is provided separately and hashed. Both parties sign the exact normalized export bytes,
+collector with prefix b"scorpion.paper-outcome-export.v1:collector\\x00" and reviewer with
+b"scorpion.paper-outcome-export.v1:reviewer\\x00" (actual NUL byte); signatures are detached
+lowercase hex (64 bytes). No private signing key belongs in Scorpion or Git.
+
+```sh
+python -m scorpion paper-outcome-labels --journal /private/session.jsonl \\
+  --trust /private/trust.json --trust-sha256 PREAPPROVED_SHA256 \\
+  --export /private/normalized.json --source-artifact /private/vendor-export.json \\
+  --collector-signature /private/collector.sig --reviewer-signature /private/reviewer.sig \\
+  --as-of 2026-11-24T21:00:00+00:00
+```
+
+Missing orders stay UNOBSERVED, unresolved or horizon-incomplete orders CENSORED, explicit
+terminal cancellations/expiry with zero fill are distinct from rejection. A rejection is not
+a zero-liquidity target. Conflicting identity, limit, quantity or chronology is quarantined.
+Duplicate venue order/fill IDs refuse the export. Chases must be supported by an earlier
+terminal zero-fill initial order, never double counted as a second executed alternative.
+The exact evaluation cutoff limits available evidence. All report labels remain RESEARCH_ONLY;
+no P&L or live fill is inferred. Signatures bind attestation, not vendor truth: authenticated
+provider collection, independently administered keys, external account isolation, preregistered
+horizons, dataset-wide deduplication and independent model qualification remain prerequisites.
+The current legacy forensic labels are unchanged; these are a separate paper evidence class,
+not a replacement for accepted human labels or the existing execution ledger.

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 
+from .causal_features import PaperIntentFeatureRow, load_paper_intent_features
 from .domain import EventKind
 from .execution_attribution import build_execution_attribution_report
 from .microstructure import OptionMicrostructureTape
@@ -14,6 +18,7 @@ from .microstructure_forensics import (
     MicroForensicStatus,
     MicrostructureForensicsReport,
 )
+from .provenance import stable_hash
 
 
 class ExecutionMetaOutcome(StrEnum):
@@ -215,3 +220,450 @@ def load_execution_meta_labels(
             )
         )
     return tuple(result)
+
+
+# The existing forensic labels above describe historical modeled evidence. The following
+# boundary admits independent paper observations without promoting either class to live truth.
+_MAX_EXPORT_BYTES = 32 * 1024 * 1024
+_COLLECTOR_DOMAIN = b"scorpion.paper-outcome-export.v1:collector\x00"
+_REVIEWER_DOMAIN = b"scorpion.paper-outcome-export.v1:reviewer\x00"
+_PRICE_PATTERN = re.compile(r"[0-9]{1,10}(?:\.[0-9]{1,8})?")
+
+
+class PaperOutcomeError(ValueError):
+    """Evidence cannot be used for a paper outcome label."""
+
+
+class PaperOutcome(StrEnum):
+    FULL_FILL = "FULL_FILL"
+    PARTIAL_FILL = "PARTIAL_FILL"
+    CANCELLED_NO_FILL = "CANCELLED_NO_FILL"
+    EXPIRED_NO_FILL = "EXPIRED_NO_FILL"
+    REJECTED = "REJECTED"
+    CENSORED = "CENSORED"
+    UNOBSERVED = "UNOBSERVED"
+    QUARANTINED = "QUARANTINED"
+
+
+@dataclass(frozen=True, slots=True)
+class PaperOutcomeLabel:
+    feature_sha256: str
+    intent_seq: int
+    call_id: str
+    ticker: str
+    role: str
+    outcome: PaperOutcome
+    reason: str
+    requested_quantity: int
+    filled_quantity: int | None
+    average_fill_price: Decimal | None
+    venue_order_id: str | None
+    available_ts_utc: datetime | None
+    label_sha256: str
+    authority: str = "RESEARCH_ONLY"
+    evidence_kind: str = "DUAL_ATTESTED_EXTERNAL_PAPER"
+
+    @property
+    def observed_fill_target(self) -> int | None:
+        """A rejected/unobserved order is not evidence of zero market liquidity."""
+        if self.outcome in (
+            PaperOutcome.FULL_FILL, PaperOutcome.PARTIAL_FILL,
+            PaperOutcome.CANCELLED_NO_FILL, PaperOutcome.EXPIRED_NO_FILL,
+        ):
+            return self.filled_quantity
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class PaperOutcomeReport:
+    journal_sha256: str
+    trust_sha256: str
+    export_sha256: str
+    source_artifact_sha256: str
+    source_id: str
+    account_ref: str
+    collector_id: str
+    reviewer_id: str
+    as_of_ts_utc: datetime
+    labels: tuple[PaperOutcomeLabel, ...]
+    feature_refusals: tuple[tuple[str, int], ...]
+    extra_feature_ids: tuple[str, ...]
+    outcome_counts: tuple[tuple[str, int], ...]
+    observed_fill_targets: int
+    report_sha256: str
+    authority: str = "RESEARCH_ONLY"
+    certifies_live_fills: bool = False
+    authorizes_training: bool = False
+    authorizes_promotion: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _PaperTrust:
+    source_id: str
+    account_ref: str
+    rules_sha256: str
+    registered: datetime
+    horizon_seconds: int
+    collector_id: str
+    collector_key: bytes
+    reviewer_id: str
+    reviewer_key: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class _PaperOrder:
+    feature_hash: str
+    order_id: str
+    call_id: str
+    ticker: str
+    role: str
+    intent_seq: int
+    quantity: int
+    limit: Decimal
+    state: str
+    submitted: datetime
+    terminal: datetime | None
+    fills: tuple[tuple[str, int, Decimal, datetime], ...]
+
+
+def _bounded_bytes(path: str | Path, limit: int = _MAX_EXPORT_BYTES) -> bytes:
+    with Path(path).open("rb") as handle:
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise PaperOutcomeError("evidence_size_bound")
+    return data
+
+
+def _unique_json(raw: bytes) -> dict[str, object]:
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in items:
+            if key in result:
+                raise PaperOutcomeError("duplicate_json_key")
+            result[key] = value
+        return result
+
+    def constant(value: str) -> object:
+        raise PaperOutcomeError("nonfinite_json_constant")
+
+    try:
+        value = json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        if isinstance(exc, PaperOutcomeError):
+            raise
+        raise PaperOutcomeError("invalid_evidence_json") from exc
+    if not isinstance(value, dict):
+        raise PaperOutcomeError("expected_evidence_object")
+    return value
+
+
+def _fields(value: dict[str, object], expected: set[str]) -> None:
+    if value.keys() != expected:
+        raise PaperOutcomeError("evidence_schema_fields")
+
+
+def _text(value: object) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > 256:
+        raise PaperOutcomeError("invalid_evidence_identity")
+    return value
+
+
+def _hex(value: object, length: int) -> bytes:
+    if (
+        not isinstance(value, str) or len(value) != length * 2
+        or any(c not in "0123456789abcdef" for c in value)
+    ):
+        raise PaperOutcomeError("invalid_evidence_hex")
+    return bytes.fromhex(value)
+
+
+def _stamp(value: object) -> datetime:
+    try:
+        stamp = datetime.fromisoformat(_text(value))
+    except ValueError as exc:
+        raise PaperOutcomeError("invalid_evidence_timestamp") from exc
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        raise PaperOutcomeError("naive_evidence_timestamp")
+    return stamp.astimezone(UTC)
+
+
+def _count(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= 1_000_000_000:
+        raise PaperOutcomeError("invalid_evidence_quantity")
+    return value
+
+
+def _price(value: object) -> Decimal:
+    if not isinstance(value, str) or not _PRICE_PATTERN.fullmatch(value):
+        raise PaperOutcomeError("invalid_evidence_price")
+    price = Decimal(value)
+    if price <= 0:
+        raise PaperOutcomeError("invalid_evidence_price")
+    return price
+
+
+def _parse_trust(raw: bytes, expected_hash: str) -> _PaperTrust:
+    _hex(expected_hash, 32)
+    if hashlib.sha256(raw).hexdigest() != expected_hash:
+        raise PaperOutcomeError("trust_pin_mismatch")
+    data = _unique_json(raw)
+    _fields(data, {
+        "schema", "authority", "source_id", "account_ref", "rules_sha256",
+        "registered_ts_utc", "horizon_seconds", "collector_id", "collector_public_key",
+        "reviewer_id", "reviewer_public_key",
+    })
+    if data["schema"] != "scorpion.paper-outcome-trust.v1" or data["authority"] != "PAPER_ONLY":
+        raise PaperOutcomeError("trust_scope_mismatch")
+    collector, reviewer = _text(data["collector_id"]), _text(data["reviewer_id"])
+    collector_key = _hex(data["collector_public_key"], 32)
+    reviewer_key = _hex(data["reviewer_public_key"], 32)
+    if collector == reviewer or collector_key == reviewer_key:
+        raise PaperOutcomeError("independent_signers_required")
+    horizon = _count(data["horizon_seconds"])
+    if horizon > 86400:
+        raise PaperOutcomeError("observation_horizon_bound")
+    return _PaperTrust(
+        _text(data["source_id"]), _text(data["account_ref"]),
+        _hex(data["rules_sha256"], 32).hex(), _stamp(data["registered_ts_utc"]),
+        horizon, collector, collector_key, reviewer, reviewer_key,
+    )
+
+
+def _verify_signatures(
+    trust: _PaperTrust, raw: bytes, collector_signature: str, reviewer_signature: str,
+) -> None:
+    # Research-only optional dependency; never imported by the decision hot path.
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    try:
+        Ed25519PublicKey.from_public_bytes(trust.collector_key).verify(
+            _hex(collector_signature, 64), _COLLECTOR_DOMAIN + raw,
+        )
+        Ed25519PublicKey.from_public_bytes(trust.reviewer_key).verify(
+            _hex(reviewer_signature, 64), _REVIEWER_DOMAIN + raw,
+        )
+    except (InvalidSignature, ValueError) as exc:
+        raise PaperOutcomeError("paper_export_signature_invalid") from exc
+
+
+def _parse_order(value: object) -> _PaperOrder:
+    if not isinstance(value, dict):
+        raise PaperOutcomeError("invalid_paper_order")
+    _fields(value, {
+        "feature_sha256", "venue_order_id", "call_id", "ticker", "role",
+        "intent_seq", "requested_quantity", "limit", "state", "submitted_ts_utc",
+        "terminal_ts_utc", "fills",
+    })
+    if not isinstance(value["fills"], list):
+        raise PaperOutcomeError("invalid_fill_list")
+    fills: list[tuple[str, int, Decimal, datetime]] = []
+    for fill in value["fills"]:
+        if not isinstance(fill, dict):
+            raise PaperOutcomeError("invalid_paper_fill")
+        _fields(fill, {"fill_id", "quantity", "price", "filled_ts_utc"})
+        fills.append((
+            _text(fill["fill_id"]), _count(fill["quantity"]),
+            _price(fill["price"]), _stamp(fill["filled_ts_utc"]),
+        ))
+    order = _PaperOrder(
+        _hex(value["feature_sha256"], 32).hex(), _text(value["venue_order_id"]),
+        _text(value["call_id"]), _text(value["ticker"]), _text(value["role"]),
+        _count(value["intent_seq"]), _count(value["requested_quantity"]),
+        _price(value["limit"]), _text(value["state"]), _stamp(value["submitted_ts_utc"]),
+        None if value["terminal_ts_utc"] is None else _stamp(value["terminal_ts_utc"]),
+        tuple(fills),
+    )
+    if order.role not in ("INITIAL", "CHASE"):
+        raise PaperOutcomeError("invalid_paper_order_role")
+    if order.state not in (
+        "FILLED", "CANCELLED", "EXPIRED", "REJECTED", "WORKING", "PARTIAL", "UNKNOWN",
+    ):
+        raise PaperOutcomeError("invalid_paper_order_state")
+    return order
+
+
+def _observe(
+    feature: PaperIntentFeatureRow, order: _PaperOrder, trust: _PaperTrust,
+    observed_through: datetime,
+) -> tuple[PaperOutcome, str, int | None, Decimal | None]:
+    def abstain(reason: str) -> tuple[PaperOutcome, str, None, None]:
+        return PaperOutcome.QUARANTINED, reason, None, None
+
+    intent_time = _stamp(feature.features["intent_ts_utc"])
+    deadline = intent_time + timedelta(seconds=trust.horizon_seconds)
+    if (
+        feature.rules_sha256 != trust.rules_sha256 or trust.registered > intent_time
+        or (feature.call_id, feature.ticker, feature.role, feature.intent_seq)
+        != (order.call_id, order.ticker, order.role, order.intent_seq)
+        or order.quantity != feature.features["quantity"]
+        or order.limit != _price(feature.features["limit"])
+    ):
+        return abstain("intent_binding_mismatch")
+    if not intent_time <= order.submitted <= observed_through:
+        return abstain("submission_chronology")
+    terminal = order.state in ("FILLED", "CANCELLED", "EXPIRED", "REJECTED")
+    if terminal != (order.terminal is not None):
+        return abstain("terminal_state_conflict")
+    if order.terminal is not None and not order.submitted <= order.terminal <= observed_through:
+        return abstain("terminal_chronology")
+    total = sum(fill[1] for fill in order.fills)
+    if total > order.quantity:
+        return abstain("overfill")
+    for _, _, price, when in order.fills:
+        if not order.submitted <= when <= (order.terminal or observed_through):
+            return abstain("fill_chronology")
+        # Forward equity entries are buys; a buy fill above its bound is a discrepancy.
+        if price > order.limit:
+            return abstain("limit_violation")
+    if (
+        (order.state == "FILLED" and total != order.quantity)
+        or (order.state != "FILLED" and total == order.quantity)
+        or (order.state in ("REJECTED", "WORKING") and total)
+        or (order.state == "PARTIAL" and not total)
+    ):
+        return abstain("fill_state_conflict")
+    if (
+        observed_through < deadline or order.submitted > deadline
+        or order.terminal is None or order.terminal > deadline
+    ):
+        return PaperOutcome.CENSORED, "terminal_horizon_not_observed", None, None
+    average = sum((price * qty for _, qty, price, _ in order.fills), Decimal(0))
+    avg = average / total if total else None
+    if order.state == "REJECTED":
+        return PaperOutcome.REJECTED, "explicit_venue_rejection", 0, None
+    if total == order.quantity:
+        return PaperOutcome.FULL_FILL, "terminal_full_fill", total, avg
+    if total:
+        return PaperOutcome.PARTIAL_FILL, "terminal_partial_fill", total, avg
+    outcome = (
+        PaperOutcome.CANCELLED_NO_FILL if order.state == "CANCELLED"
+        else PaperOutcome.EXPIRED_NO_FILL
+    )
+    return outcome, "explicit_terminal_zero_fill", 0, None
+
+
+def admit_paper_outcome_labels(
+    journal_path: str | Path, *,
+    trust_path: str | Path, expected_trust_sha256: str,
+    export_path: str | Path, source_artifact_path: str | Path,
+    collector_signature: str, reviewer_signature: str, as_of: datetime,
+) -> PaperOutcomeReport:
+    """Bind dual-attested external paper outcomes to sealed point-in-time features.
+
+    Keys and the trust-file hash must be established outside the optimizer and before
+    observation. Signatures establish attestation, not vendor truth or independent custody.
+    This function writes no training labels, money-path state, or brokerage requests.
+    """
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise PaperOutcomeError("naive_as_of")
+    as_of = as_of.astimezone(UTC)
+    trust = _parse_trust(_bounded_bytes(trust_path, 65536), expected_trust_sha256)
+    raw = _bounded_bytes(export_path)
+    _verify_signatures(trust, raw, collector_signature, reviewer_signature)
+    data = _unique_json(raw)
+    _fields(data, {
+        "schema", "authority", "source_id", "account_ref", "trust_sha256",
+        "journal_sha256", "source_artifact_sha256", "complete_order_export",
+        "observed_through_ts_utc", "collected_ts_utc", "reviewed_ts_utc", "orders",
+    })
+    evidence = load_paper_intent_features(journal_path)
+    source_hash = hashlib.sha256(_bounded_bytes(source_artifact_path)).hexdigest()
+    export_hash = hashlib.sha256(raw).hexdigest()
+    if (
+        data["schema"] != "scorpion.paper-outcome-export.v1"
+        or data["authority"] != "PAPER_ONLY"
+        or data["source_id"] != trust.source_id or data["account_ref"] != trust.account_ref
+        or data["trust_sha256"] != expected_trust_sha256
+        or data["journal_sha256"] != evidence.journal_sha256
+        or data["source_artifact_sha256"] != source_hash
+        or data["complete_order_export"] is not True
+    ):
+        raise PaperOutcomeError("paper_export_scope_mismatch")
+    if source_hash in (evidence.journal_sha256, export_hash):
+        raise PaperOutcomeError("self_referential_source_artifact")
+    through = _stamp(data["observed_through_ts_utc"])
+    collected, reviewed = _stamp(data["collected_ts_utc"]), _stamp(data["reviewed_ts_utc"])
+    if not trust.registered <= through <= collected <= reviewed <= as_of:
+        raise PaperOutcomeError("paper_export_availability_mismatch")
+    if not isinstance(data["orders"], list):
+        raise PaperOutcomeError("invalid_paper_orders")
+    orders: dict[str, _PaperOrder] = {}
+    order_ids: set[str] = set()
+    fill_ids: set[str] = set()
+    for value in data["orders"]:
+        order = _parse_order(value)
+        if order.feature_hash in orders or order.order_id in order_ids:
+            raise PaperOutcomeError("duplicate_venue_order_identity")
+        orders[order.feature_hash] = order
+        order_ids.add(order.order_id)
+        for fill_id, *_ in order.fills:
+            if fill_id in fill_ids:
+                raise PaperOutcomeError("duplicate_venue_fill_identity")
+            fill_ids.add(fill_id)
+    features = {row.feature_sha256: row for row in evidence.rows}
+    extras = tuple(sorted(orders.keys() - features.keys()))
+    observed: dict[str, tuple[PaperOutcome, str, int | None, Decimal | None]] = {}
+    for key, feature in features.items():
+        order = orders.get(key)
+        if order is None:
+            observed[key] = PaperOutcome.UNOBSERVED, "missing_venue_order", None, None
+        else:
+            observed[key] = _observe(feature, order, trust, through)
+
+    # A recorded chase is conditional, not an independent second order in the same route.
+    initial_by_call = {f.call_id: key for key, f in features.items() if f.role == "INITIAL"}
+    for key, feature in features.items():
+        if feature.role != "CHASE" or key not in orders:
+            continue
+        prior_key = initial_by_call.get(feature.call_id)
+        prior = orders.get(prior_key or "")
+        prior_outcome = observed.get(prior_key or "")
+        if (
+            prior is None or prior_outcome is None or prior_outcome[0] not in (
+                PaperOutcome.CANCELLED_NO_FILL, PaperOutcome.EXPIRED_NO_FILL,
+            )
+            or prior.terminal is None or prior.terminal > orders[key].submitted
+        ):
+            observed[key] = PaperOutcome.QUARANTINED, "chase_condition_unsubstantiated", None, None
+            # If both were submitted, a known initial fill violates the exclusive route.
+            if prior_key is not None and prior_outcome is not None and prior_outcome[2]:
+                observed[prior_key] = (
+                    PaperOutcome.QUARANTINED, "conflicting_chase_route", None, None,
+                )
+
+    labels: list[PaperOutcomeLabel] = []
+    counts: dict[str, int] = {}
+    for key, feature in sorted(features.items(), key=lambda item: item[1].intent_seq):
+        outcome, reason, quantity, price = observed[key]
+        order = orders.get(key)
+        available = reviewed if quantity is not None else None
+        material = {
+            "version": "paper-outcome-label-v1", "feature_sha256": key,
+            "journal_sha256": evidence.journal_sha256, "trust_sha256": expected_trust_sha256,
+            "export_sha256": export_hash, "source_artifact_sha256": source_hash,
+            "outcome": outcome.value, "reason": reason, "filled_quantity": quantity,
+            "average_fill_price": price, "available_ts_utc": available,
+            "venue_order_id": order.order_id if order else None,
+        }
+        label = PaperOutcomeLabel(
+            key, feature.intent_seq, feature.call_id, feature.ticker, feature.role,
+            outcome, reason, int(feature.features["quantity"]), quantity, price,
+            order.order_id if order else None, available, stable_hash(material),
+        )
+        labels.append(label)
+        counts[outcome.value] = counts.get(outcome.value, 0) + 1
+    target_count = sum(label.observed_fill_target is not None for label in labels)
+    report_hash = stable_hash({
+        "version": "paper-outcome-report-v1", "journal_sha256": evidence.journal_sha256,
+        "trust_sha256": expected_trust_sha256, "export_sha256": export_hash,
+        "source_artifact_sha256": source_hash, "as_of": as_of,
+        "labels": [label.label_sha256 for label in labels],
+        "extra_feature_ids": extras, "feature_refusals": evidence.refusals,
+    })
+    return PaperOutcomeReport(
+        evidence.journal_sha256, expected_trust_sha256, export_hash, source_hash,
+        trust.source_id, trust.account_ref, trust.collector_id, trust.reviewer_id, as_of,
+        tuple(labels), evidence.refusals, extras, tuple(sorted(counts.items())),
+        target_count, report_hash,
+    )
