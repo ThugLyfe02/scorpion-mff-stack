@@ -224,6 +224,7 @@ class SignedCohort:
 def build_bundle(
     ctx: SignedCohort, day: date, *, mode: str, disconnects: int = 0,
     include_markers: bool = True, armed: bool = True, ingress_ready: bool = True,
+    safety_changed: bool = False,
 ) -> SignedBundle:
     root = ctx.root / day.isoformat()
     root.mkdir()
@@ -246,7 +247,8 @@ def build_bundle(
     if include_markers:
         journal.submit({"kind": "session_start", **common,
                         "ts_utc": (open_at - timedelta(seconds=1)).isoformat(),
-                        "signal_ingress_enabled": True, "latch_armed": armed})
+                        "signal_ingress_enabled": True, "latch_armed": armed,
+                        "safety_integrity_valid": True, "safety_event_count": 2})
     if mode != "empty":
         journal.submit({
             "kind": "decision", "action": "schedule_entry", "call_id": call,
@@ -274,6 +276,7 @@ def build_bundle(
             "kind": "session_end", **common, "ts_utc": end.isoformat(),
             "feed_disconnects": disconnects, "feed_messages": 100,
             "ingress_overflow": False, "pending_ingress": 0, "latch_armed": armed,
+            "safety_integrity_valid": True, "safety_event_count": 4 if safety_changed else 2,
             "feed_first_usable_recv_wall_ns": int(open_at.timestamp()) * 1_000_000_000,
             "ingress_scope_ready_ts_utc": open_at.isoformat() if ingress_ready else None,
             "ingress_first_disconnect_ts_utc": None, "ingress_callback_failures": 0,
@@ -547,3 +550,14 @@ def test_interval_contains_every_bounded_missing_completion(missing: int) -> Non
     for completion in itertools.product((-100, 0, 100), repeat=missing):
         latent = (100 + sum(completion)) / len(rows)
         assert lo <= latent <= hi
+
+
+def test_mid_session_latch_transition_cannot_be_hidden_by_rearming(
+    signed_cohort: SignedCohort,
+) -> None:
+    bundle = build_bundle(signed_cohort, DAYS[3], mode="empty", safety_changed=True)
+    signed_cohort.bundles.append(bundle)
+    signed_cohort.index()
+    result = signed_cohort.report()
+    assert result.sessions[-1].status == "COVERAGE_UNVERIFIED"
+    assert "journal_session_safety_history_changed_or_unverified" in result.sessions[-1].reasons

@@ -262,11 +262,13 @@ async def _run_session(args: argparse.Namespace) -> int:
 
         ingest_run = discord_ingress
     try:
+        start_safety = await asyncio.to_thread(latch.latch.verify_integrity, latch.component)
         journal.submit({
             "kind": "session_start", "session_date": today.isoformat(),
             "ts_utc": datetime.now(UTC).isoformat(), "mode": "PAPER",
             "rules_sha256": rules.sha256, "signal_ingress_enabled": not args.no_discord,
-            "latch_armed": latch.armed,
+            "latch_armed": latch.armed, "safety_integrity_valid": start_safety.valid,
+            "safety_event_count": start_safety.events,
         })
         await supervise(
             session,
@@ -278,12 +280,14 @@ async def _run_session(args: argparse.Namespace) -> int:
             on_new_symbol=feed.add_symbol,
             ingest_run=ingest_run,
         )
+        end_safety = await asyncio.to_thread(latch.latch.verify_integrity, latch.component)
         journal.submit({
             "kind": "session_end", "session_date": today.isoformat(),
             "ts_utc": datetime.now(UTC).isoformat(), "mode": "PAPER",
             "rules_sha256": rules.sha256, "feed_disconnects": feed.stats.disconnects,
             "feed_messages": feed.stats.messages, "ingress_overflow": overflow.is_set(),
             "pending_ingress": queue.qsize(), "latch_armed": latch.armed,
+            "safety_integrity_valid": end_safety.valid, "safety_event_count": end_safety.events,
             "feed_first_usable_recv_wall_ns": feed.stats.first_usable_recv_wall_ns,
             "ingress_scope_ready_ts_utc": (
                 client.first_forward_scope_ready_ts_utc.isoformat()

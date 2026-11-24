@@ -697,6 +697,16 @@ def _session_coverage(
             reasons.append("journal_session_lifecycle_conflict")
         if first.get("latch_armed") is not True or last.get("latch_armed") is not True:
             reasons.append("journal_session_latch_not_armed")
+        first_events = first.get("safety_event_count")
+        last_events = last.get("safety_event_count")
+        if (
+            first.get("safety_integrity_valid") is not True
+            or last.get("safety_integrity_valid") is not True
+            or not isinstance(first_events, int) or isinstance(first_events, bool)
+            or first_events <= 0
+            or type(last_events) is not int or last_events != first_events
+        ):
+            reasons.append("journal_session_safety_history_changed_or_unverified")
         ready = last.get("ingress_scope_ready_ts_utc")
         disconnect = last.get("ingress_first_disconnect_ts_utc")
         first_usable = last.get("feed_first_usable_recv_wall_ns")

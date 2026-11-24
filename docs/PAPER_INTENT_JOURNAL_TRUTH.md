@@ -340,3 +340,7 @@ inflate their effective support. Primary and chase raw session-tail checks are i
 The planned-horizon radius and best possible lower bound reveal underpowered cohort designs
 without tuning the support or stopping threshold after seeing data. These are best-case
 mathematical resolution diagnostics, not empirical power forecasts.
+
+Both lifecycle markers include the existing safety ledger's verified event count. A changed
+count or invalid ledger blocks full-session evidence even if the latch was rearmed by close.
+This adds two off-hot-path integrity reads; no latch state is changed by the research logic.
