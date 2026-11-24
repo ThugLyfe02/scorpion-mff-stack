@@ -301,6 +301,7 @@ class PaperOutcomeReport:
     authorizes_promotion: bool = False
     observed_through_ts_utc: datetime | None = None
     reviewed_ts_utc: datetime | None = None
+    rules_sha256: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -698,6 +699,7 @@ def admit_paper_outcome_labels(
         trust.source_id, trust.account_ref, trust.collector_id, trust.reviewer_id, as_of,
         tuple(labels), evidence.refusals, extras, tuple(sorted(counts.items())),
         target_count, report_hash, observed_through_ts_utc=through, reviewed_ts_utc=reviewed,
+        rules_sha256=trust.rules_sha256,
     )
 
 

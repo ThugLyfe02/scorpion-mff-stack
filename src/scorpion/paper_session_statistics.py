@@ -30,7 +30,6 @@ from .execution_attribution import (
 )
 from .execution_meta_labels import (
     PaperOutcomeAdmission,
-    PaperOutcomeError,
     _bounded_bytes,
     _count,
     _fields,
@@ -239,7 +238,8 @@ def _load_cohort(raw: bytes, expected_hash: str) -> PaperCohortPolicy:
         raise PaperCohortError("cohort_pin_mismatch")
     data = _unique_json(raw)
     _fields(data, {
-        "schema", "authority", "family_id", "registered_ts_utc", "start_date", "end_date",
+        "schema", "authority", "analysis_version", "family_id", "registered_ts_utc",
+        "start_date", "end_date",
         "sessions", "trust_sha256", "cost_policy_sha256", "family_alpha", "clip_bps",
         "minimum_sessions", "minimum_routes", "minimum_complete_fraction",
         "minimum_effective_sessions", "maximum_session_share", "maximum_ticker_share",
@@ -247,7 +247,11 @@ def _load_cohort(raw: bytes, expected_hash: str) -> PaperCohortPolicy:
         "maximum_tail_loss_bps", "minimum_group_sessions", "density_ratio_bound",
         "block_days", "bootstrap_trials", "random_seed",
     })
-    if data["schema"] != "scorpion.paper-session-cohort.v1" or data["authority"] != "RESEARCH_ONLY":
+    if (
+        data["schema"] != "scorpion.paper-session-cohort.v1"
+        or data["authority"] != "RESEARCH_ONLY"
+        or data["analysis_version"] != "paper-session-statistics-v1"
+    ):
         raise PaperCohortError("cohort_scope_mismatch")
     start, end = _day(data["start_date"]), _day(data["end_date"])
     sessions = _calendar_days(start, end)
@@ -613,6 +617,7 @@ def _evaluate_days(
     ) for day in days)
     material = {
         "version": "paper-session-statistics-v1", "policy_sha256": policy_hash,
+        "regime_policy": _REGIMES,
         "as_of": as_of, "sessions": session_rows, "primary": primary, "chase": chase,
         "primary_regimes": primary_regimes, "chase_regimes": chase_regimes,
         "concentration": (kish, day_share, ticker_share, abs_share),

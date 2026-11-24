@@ -633,6 +633,7 @@ def _route_cost(
 def _session_coverage(
     raw: object, *, routes: tuple[PaperRouteCost, ...], through: datetime,
     outcome_through: datetime, journal_path: Path, journal_sha256: str,
+    expected_rules_sha256: str,
 ) -> PaperSessionCoverage:
     """Verify a signed coverage declaration against the sealed local journal.
 
@@ -686,10 +687,11 @@ def _session_coverage(
             or last.get("session_date") != day.isoformat()
             or first.get("mode") != "PAPER" or last.get("mode") != "PAPER"
             or first.get("signal_ingress_enabled") is not True
-            or first.get("rules_sha256") != last.get("rules_sha256")
-            or not isinstance(first.get("rules_sha256"), str)
+            or first.get("rules_sha256") != expected_rules_sha256
+            or last.get("rules_sha256") != expected_rules_sha256
             or hours is None
-            or not _stamp(first.get("ts_utc")) <= hours[0] < hours[1] <= _stamp(last.get("ts_utc"))
+            or not _stamp(first.get("ts_utc")) <= start <= hours[0] < hours[1] <= end
+            or not end <= _stamp(last.get("ts_utc")) <= min(through, outcome_through)
         ):
             reasons.append("journal_session_lifecycle_conflict")
         if (
@@ -702,6 +704,8 @@ def _session_coverage(
             reasons.append("journal_session_transport_incomplete")
     if any(row.get("kind") == "latch" for row in records):
         reasons.append("journal_session_safety_latch_observed")
+    if any(_stamp(row.get("ts_utc")).astimezone(MARKET_TZ).date() != day for row in records):
+        reasons.append("journal_record_session_date_conflict")
     initial_records = [
         row for row in records if row.get("kind") == "intent" and row.get("chase") is False
     ]
@@ -838,6 +842,7 @@ def build_paper_execution_cost_report(
                 data["session_coverage"], routes=tuple(routes), through=through,
                 outcome_through=outcome.observed_through_ts_utc,
                 journal_path=admission.journal_path, journal_sha256=outcome.journal_sha256,
+                expected_rules_sha256=outcome.rules_sha256,
             ) if "session_coverage" in data else None
         )
         material = {

@@ -180,3 +180,144 @@ authorizes training/promotion and must not feed signed shortfall into the existi
 nonnegative-cost policy-value evaluator as if it were independent net reward.
 Session clustering, prospective experimental design, dataset-wide deduplication,
 exit/round-trip economics and promotion gates remain separate stages. No real orders.
+
+
+## P1 stage 3 — fixed prospective session cohorts and robust uncertainty
+
+Stage 3 uses the existing Stage 2 signed cost admission, block bootstrap, confidence sequence,
+regime bucketing, empirical-Bayes shrinkage and bounded mixture solver. A new offline
+orchestrator is not an alternative execution engine. No runtime optimizer or approval path
+consumes these outputs.
+
+### Complete-session evidence
+
+The existing paper runtime now journals session_start and session_end (only after successful
+supervision). Both bind session date, mode, rules hash and UTC timestamp. The start records
+whether signal ingress is enabled; the end records feed messages/disconnects, ingress overflow
+and pending queue size. A clean journal receipt without these markers is not a complete session.
+A Stage 2 cost export may optionally carry the following separately signed member (old exports
+remain valid for Stage 2 but cannot support Stage 3):
+
+    "session_coverage": {
+      "session_date": "2026-11-24",
+      "covered_from_ts_utc": "2026-11-24T14:30:00+00:00",
+      "covered_through_ts_utc": "2026-11-24T21:00:00+00:00",
+      "expected_initial_routes": 12,
+      "journal_complete": true,
+      "ingress_complete": true,
+      "no_feed_gaps": true
+    }
+
+Both Stage 1 and Stage 2 observed-through clocks must cover the end marker.
+The declaration is checked against the calendar, sealed journal, actual initial-intent count,
+transport counters, rules hash and recorded routes. A latch observation, late start, early end,
+disconnect or overflow makes the session uncertain, not empty. This is still an attestation:
+it cannot prove vendor feed completeness or hidden signal omissions. Historical journals without
+lifecycle markers must remain unknown rather than being retroactively certified.
+
+### Preregistered cohort
+
+Before the first scheduled regular session, an operator external to the optimizer pins the exact
+SHA-256 of a JSON file with the following fields (example thresholds are engineering defaults,
+not claims of adequate statistical power):
+
+    {
+      "schema": "scorpion.paper-session-cohort.v1",
+      "analysis_version": "paper-session-statistics-v1",
+      "authority": "RESEARCH_ONLY",
+      "family_id": "paper-entry-cost-family-001",
+      "registered_ts_utc": "2026-11-20T20:00:00+00:00",
+      "start_date": "2026-11-23",
+      "end_date": "2026-11-27",
+      "sessions": ["2026-11-23","2026-11-24","2026-11-25","2026-11-27"],
+      "trust_sha256": "PINNED_STAGE_1_HASH",
+      "cost_policy_sha256": "PINNED_STAGE_2_HASH",
+      "family_alpha": 0.05,
+      "clip_bps": 500,
+      "minimum_sessions": 4,
+      "minimum_routes": 100,
+      "minimum_complete_fraction": 0.95,
+      "minimum_effective_sessions": 3,
+      "maximum_session_share": 0.4,
+      "maximum_ticker_share": 0.5,
+      "minimum_primary_score_bps": 0,
+      "minimum_chase_score_bps": 0,
+      "minimum_observed_chases": 30,
+      "maximum_tail_loss_bps": 100,
+      "minimum_group_sessions": 2,
+      "density_ratio_bound": 2,
+      "block_days": 2,
+      "bootstrap_trials": 2000,
+      "random_seed": 170053
+    }
+
+Replace example pins with real lowercase 64-character digests. For actual studies use a longer
+predeclared horizon and power analysis. All exchange sessions in the date range must be listed,
+including early closes but excluding holidays. Trust and cost policy registration must precede
+cohort registration, which must precede the first open. The declared registration time and pin
+require external trusted custody; the code cannot prove that the operator did not backdate them.
+
+The input index is separate from the cohort pin. It is an object with schema
+scorpion.paper-session-inputs.v1 and a sessions array. Each row has session_date and
+paths (relative to the index directory or absolute): journal, outcome_export, source_artifact,
+collector_signature, reviewer_signature, cost_export, market_artifact,
+cost_collector_signature, cost_reviewer_signature. There is at most one bundle per elapsed
+session; future or duplicate dates refuse. The original Stage 1 and 2 files are reverified
+under the pinned policies and cutoff. No arbitrary numeric result is admitted. Duplicate
+journal/artifact hashes, call identities, signal revisions, venue order IDs or fill IDs across
+sessions refuse the cohort. IDs must be globally scoped to the pinned paper account.
+
+    python -m scorpion paper-session-statistics \
+      --cohort /private/cohort.json --cohort-sha256 COHORT_PIN \
+      --inputs /private/session-inputs.json --trust /private/trust.json \
+      --cost-policy /private/cost-policy.json --as-of 2026-11-28T01:00:00+00:00
+
+### Estimands, missingness, and confidence
+
+Two fixed endpoints (higher is better), both over original initial intent routes:
+1. Negative Stage 2 implementation shortfall in basis points.
+2. Negative observed-minus-no-chase shortfall in basis points, zero only for a complete,
+   attested route with no chase submitted. This is observed-path accounting, not causal
+   challenger value. A censored chase remains unknown; actual chase intervention counts
+   are separately reported.
+
+The bounded estimand is the equal-session average of route scores clipped to [-B,B] under the
+preregistered B. A fully attested session with no initial intents has structural zero activity.
+A missing/invalid session gets [-B,B]; if a known denominator has m unknown routes and
+sum s of observed clipped scores, the day's interval is [(s-mB)/N,(s+mB)/N].
+This bounds the clipped estimand, not raw unbounded costs. There is no missing-at-random
+assumption. No trade-level pseudo-replication: one interval per elapsed exchange session.
+
+Hoeffding with alpha_n=alpha_endpoint/(n(n+1)) produces simultaneous over-time bounds for
+the average predictable conditional means of the bounded session scores under the declared
+filtration and valid intervals. Family alpha is split equally between the two fixed endpoints
+(Bonferroni), not repeatedly spent on arbitrary subgroup searches. No stationary-future-mean,
+IID-session or live-alpha claim is made. This is a within-cohort mathematical bound; preventing
+new-cohort alpha resets requires independent registry/ledger governance. Inputs can be
+re-evaluated as evidence arrives, with the same pinned roster and cutoff; reports are hashed.
+
+Complete-case raw session averages, route averages, leave-one-session-out range, worst route,
+worst-decile route mean and lag-one correlation are diagnostics. Circular block bootstrap uses
+predeclared seed/trials and block lengths 1, configured, and twice configured (capped at 30);
+it is withheld when sessions are incomplete or samples degenerate, and never called
+anytime-valid. Kish effective session count measures route-count concentration, not serial
+dependence-adjusted inferential degrees of freedom. Raw extremes are preserved; any clipping
+blocks positive support status. Raw tail, route coverage, session diversity, session/ticker
+concentration and absolute ticker score concentration are independent blockers.
+
+### Regime diagnostics
+
+Equity bands are fixed in v1: spread <=10/50 bps; quote age <=100/1000 ms; source-to-intent
+age <=120/300 seconds; existing open/midday/close session buckets. They use pre-intent
+features, not outcomes. Every observed group retains its denominator and distinct sessions.
+Empirical-Bayes means reuse the existing moment estimator on group/session means and are
+descriptive only (groups can overlap in dates). Mixture stress reuses the exact bounded
+density-ratio solver on raw route-weighted group means, not the equal-session primary
+estimand. It is withheld if any bucket is unobserved/under-supported or coverage is missing.
+Axes are marginal, not joint macro regimes. No subgroup significance or discovery claim.
+
+A positive bounded-support status is research evidence only, not a signal to retrain or
+promote. The CLI returns nonzero for blocked/insufficient evidence while printing the report.
+Prospective independent qualification, global hypothesis-budget governance, regime shift
+validation on fresh data, authentic live market feed, signed venue adapter, and complete
+round-trip P&L remain separate prerequisites.

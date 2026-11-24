@@ -335,6 +335,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     costs.add_argument("--market-artifact", type=Path, required=True)
     costs.add_argument("--cost-collector-signature", type=Path, required=True)
     costs.add_argument("--cost-reviewer-signature", type=Path, required=True)
+    stats = sub.add_parser("paper-session-statistics")
+    stats.add_argument("--cohort", type=Path, required=True)
+    stats.add_argument("--cohort-sha256", required=True)
+    stats.add_argument("--inputs", type=Path, required=True)
+    stats.add_argument("--trust", type=Path, required=True)
+    stats.add_argument("--cost-policy", type=Path, required=True)
+    stats.add_argument("--as-of", required=True)
     rp = sub.add_parser("replay")
     rp.add_argument("--date")
     rp.add_argument("--input", type=Path, default=REPLAY_FIXTURE)
@@ -358,6 +365,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     pull.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
 
+    if args.command == "paper-session-statistics":
+        from dataclasses import asdict
+
+        from .paper_session_statistics import evaluate_paper_session_cohort
+        from .session_calendar import CalendarNotCovered
+        from .session_service import JournalError
+
+        try:
+            cohort_report = evaluate_paper_session_cohort(
+                cohort_path=args.cohort, expected_cohort_sha256=args.cohort_sha256,
+                inputs_path=args.inputs, trust_path=args.trust, cost_policy_path=args.cost_policy,
+                as_of=datetime.fromisoformat(args.as_of),
+            )
+        except (OSError, JournalError, ValueError, ImportError, CalendarNotCovered) as exc:
+            _print({"ok": False, "reason": type(exc).__name__})
+            return 1
+        _print(asdict(cohort_report))
+        return 0 if (
+            cohort_report.primary.status == "BOUNDED_RESEARCH_SUPPORT"
+            and cohort_report.chase.status == "BOUNDED_RESEARCH_SUPPORT"
+            and cohort_report.regime_robustness == "DESCRIPTIVE_STRESS_OK"
+        ) else 1
     if args.command in ("paper-outcome-labels", "paper-execution-costs"):
         from dataclasses import asdict
 
