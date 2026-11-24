@@ -5,7 +5,7 @@ import hashlib
 import statistics
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
-from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
+from decimal import ROUND_HALF_EVEN, Context, Decimal, InvalidOperation, localcontext
 from pathlib import Path
 
 from .execution_attribution import PaperExecutionCostReport, PaperRouteCost, _load_cost_policy
@@ -49,6 +49,7 @@ from .walk_forward import FrozenValidationWindow, verify_frozen_validation_windo
 
 _RESERVE_DOMAIN = b"scorpion.prospective-study-approval.v1:reserve\x00"
 _REVIEW_DOMAIN = b"scorpion.prospective-study-approval.v1:review\x00"
+_ROSTER_DOMAIN = b"scorpion.common-entry-roster.v1\x00"
 
 
 class PaperQualificationError(ValueError):
@@ -107,6 +108,8 @@ class ProspectiveStudy:
     soak_sessions: int
     adverse_session_null_rate: float
     adverse_session_alternative_rate: float
+    upstream_source_id: str
+    roster_paths: tuple[tuple[date, Path, Path, Path], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +146,7 @@ class PairedEntryAssessment:
     recent_soak_mean_improvement_bps: float | None
     recent_soak_mean_challenger_cost_bps: float | None
     degradation: PaperDegradationEvidence
+    upstream_rosters: tuple[tuple[date, str, str], ...]
     blockers: tuple[str, ...]
     estimand: str = "MATCHED_EXTERNAL_PAPER_ENTRY_COST_NOT_CAUSAL_POLICY_VALUE"
 
@@ -213,7 +217,10 @@ def _open_close(days: tuple[date, ...]) -> tuple[datetime, datetime]:
 
 def _input_arms(path: Path) -> dict[str, dict[str, Path]]:
     data = _unique_json(_bounded_bytes(path))
-    _fields(data, {"schema", "arms"})
+    fields = {"schema", "arms"}
+    if "rosters" in data:
+        fields.add("rosters")
+    _fields(data, fields)
     if data["schema"] != "scorpion.prospective-study-inputs.v1":
         raise PaperQualificationError("study_input_schema")
     rows = data["arms"]
@@ -347,6 +354,7 @@ def _study(path: Path, digest: str, inputs: Path, root: _Root) -> ProspectiveStu
         "schema", "authority", "family_id", "kind", "registered_ts_utc", "alpha_units",
         "embargo_seconds", "minimum_improvement_bps", "maximum_challenger_cost_bps",
         "soak_sessions", "arms", "adverse_session_null_rate", "adverse_session_alternative_rate",
+        "upstream_source_id",
     })
     if (
         data["schema"] != "scorpion.prospective-study.v1" or data["authority"] != "RESEARCH_ONLY"
@@ -397,9 +405,15 @@ def _study(path: Path, digest: str, inputs: Path, root: _Root) -> ProspectiveStu
     alternative = _number(data["adverse_session_alternative_rate"], minimum=0.02, maximum=0.99)
     if alternative <= null:
         raise PaperQualificationError("invalid_degradation_alternative")
+    upstream = _text(data["upstream_source_id"])
+    if kind == "PAIRED_ENTRY_TRIAL" and upstream in {
+        arm.source for arm in arms
+    }.union(arm.market_source for arm in arms):
+        raise PaperQualificationError("upstream_roster_source_not_independent")
+    roster_paths = _roster_input_paths(inputs, first.sessions, paired=kind == "PAIRED_ENTRY_TRIAL")
     return ProspectiveStudy(
         digest, family_id, kind, registered, units, embargo, first.sessions, arms,
-        improvement, max_cost, soak, null, alternative,
+        improvement, max_cost, soak, null, alternative, upstream, roster_paths,
     )
 
 
@@ -489,6 +503,125 @@ def reserve_paper_study(
     )
 
 
+def _roster_input_paths(
+    path: Path, sessions: tuple[date, ...], *, paired: bool,
+) -> tuple[tuple[date, Path, Path, Path], ...]:
+    data = _unique_json(_bounded_bytes(path))
+    values = data.get("rosters", [])
+    if not isinstance(values, list) or len(values) > len(sessions) or (values and not paired):
+        raise PaperQualificationError("invalid_common_roster_index")
+    result: dict[date, tuple[Path, Path, Path]] = {}
+    for row in values:
+        if not isinstance(row, dict):
+            raise PaperQualificationError("invalid_common_roster_input")
+        _fields(row, {"session_date", "roster", "source_artifact", "signature"})
+        day = date.fromisoformat(_text(row["session_date"]))
+        if day not in sessions or day in result:
+            raise PaperQualificationError("duplicate_or_outside_common_roster_date")
+        result[day] = (
+            path.parent / _text(row["roster"]), path.parent / _text(row["source_artifact"]),
+            path.parent / _text(row["signature"]),
+        )
+    return tuple((day, *paths) for day, paths in sorted(result.items()))
+
+
+@dataclass(frozen=True, slots=True)
+class _CommonRoster:
+    digest: str
+    source_artifact_sha256: str
+    export_sha256: str
+    expected_routes: int
+    revisions: tuple[str, ...]
+
+
+def _roster_decimal(value: object, *, allow_zero: bool = False) -> Decimal:
+    raw = _text(value)
+    try:
+        number = Decimal(raw)
+    except InvalidOperation as exc:
+        raise PaperQualificationError("invalid_roster_decimal") from exc
+    if (
+        len(raw) > 128 or not number.is_finite() or number < 0
+        or (not allow_zero and number == 0) or number > 1_000_000_000
+        or not isinstance(number.as_tuple().exponent, int)
+        or abs(int(number.as_tuple().exponent)) > 128
+    ):
+        raise PaperQualificationError("invalid_roster_decimal")
+    return number
+
+
+def _load_common_roster(
+    *, root: _Root, study: ProspectiveStudy, day: date, as_of: datetime,
+    paths: tuple[Path, Path, Path],
+) -> _CommonRoster:
+    """Separate registrar attestation over the common upstream population."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    roster_path, artifact_path, signature_path = paths
+    raw = _bounded_bytes(roster_path)
+    try:
+        signature = _hex(_bounded_bytes(signature_path, 256).decode("ascii").strip(), 64)
+        Ed25519PublicKey.from_public_bytes(root.registrar_key).verify(
+            signature, _ROSTER_DOMAIN + raw,
+        )
+    except (InvalidSignature, ValueError, UnicodeError) as exc:
+        raise PaperQualificationError("common_roster_signature_invalid") from exc
+    data = _unique_json(raw)
+    _fields(data, {
+        "schema", "authority", "study_sha256", "session_date", "source_id",
+        "source_artifact_sha256", "complete_roster", "observed_through_ts_utc",
+        "signed_ts_utc", "routes",
+    })
+    artifact = _bounded_bytes(artifact_path)
+    artifact_hash, export_hash = hashlib.sha256(artifact).hexdigest(), hashlib.sha256(raw).hexdigest()
+    hours = session_hours(day)
+    if hours is None:
+        raise PaperQualificationError("common_roster_calendar")
+    if (
+        not artifact or artifact_hash == export_hash
+        or data["schema"] != "scorpion.common-entry-roster.v1"
+        or data["authority"] != "RESEARCH_ONLY" or data["study_sha256"] != study.digest
+        or data["session_date"] != day.isoformat() or data["source_id"] != study.upstream_source_id
+        or data["source_artifact_sha256"] != artifact_hash or data["complete_roster"] is not True
+        or not hours[1] <= _stamp(data["observed_through_ts_utc"])
+        <= _stamp(data["signed_ts_utc"]) <= as_of
+    ):
+        raise PaperQualificationError("common_roster_scope_or_availability")
+    values = data["routes"]
+    if not isinstance(values, list) or len(values) > 100_000:
+        raise PaperQualificationError("common_roster_size")
+    entries: dict[str, tuple[object, ...]] = {}
+    for row in values:
+        if not isinstance(row, dict):
+            raise PaperQualificationError("invalid_common_roster_row")
+        _fields(row, {
+            "revision_id", "ticker", "source_ts_utc", "initial_ts_utc", "target_quantity",
+            "decision_midpoint", "horizon_ts_utc", "initial_spread_bps", "initial_quote_event_ns",
+        })
+        revision = _hex(row["revision_id"], 32).hex()
+        source, initial = _stamp(row["source_ts_utc"]), _stamp(row["initial_ts_utc"])
+        horizon = _stamp(row["horizon_ts_utc"])
+        event_ns = row["initial_quote_event_ns"]
+        if (
+            revision in entries or not source <= initial
+            or not hours[0] <= initial < horizon < hours[1]
+            or horizon - initial != timedelta(seconds=study.arms[0].cost_horizon)
+            or not isinstance(event_ns, int) or isinstance(event_ns, bool)
+            or not 0 < event_ns <= int(initial.timestamp()) * 1_000_000_000 + initial.microsecond * 1000
+        ):
+            raise PaperQualificationError("common_roster_identity_or_clock_conflict")
+        entries[revision] = (
+            revision, _text(row["ticker"]), source, initial, _count(row["target_quantity"]),
+            _roster_decimal(row["decision_midpoint"]), horizon,
+            _roster_decimal(row["initial_spread_bps"], allow_zero=True), event_ns,
+        )
+    return _CommonRoster(
+        stable_hash(tuple(entries[key] for key in sorted(entries))), artifact_hash, export_hash,
+        len(entries), tuple(sorted(entries)),
+    )
+
+
 def _roster_material(route: PaperRouteCost) -> tuple[object, ...]:
     return (
         route.revision_id, route.ticker, route.source_ts_utc, route.initial_ts_utc,
@@ -530,13 +663,17 @@ def _check_binding(study: ProspectiveStudy, arm: StudyArm, day: date,
 def _pair_day(
     day: date, left: PaperExecutionCostReport | None, right: PaperExecutionCostReport | None,
     left_day: _Day, right_day: _Day, study: ProspectiveStudy,
+    roster: _CommonRoster | None,
 ) -> tuple[_Day, PairedSession, list[float]]:
     def unknown(reason: str) -> tuple[_Day, PairedSession, list[float]]:
         return (
             _Day(day, "MISSING_SESSION", None, (), None, (reason,)),
-            PairedSession(day, "UNKNOWN", None, 0, None, None, None, (reason,)), [],
+            PairedSession(day, "UNKNOWN", roster.expected_routes if roster else None,
+                          0, None, None, None, (reason,)), [],
         )
 
+    if roster is None:
+        return unknown("independent_common_roster_unavailable")
     if left is None or right is None or left_day.expected is None or right_day.expected is None:
         return unknown("arm_coverage_unverified")
     left_roster = _check_binding(study, study.arms[0], day, left)
@@ -547,7 +684,10 @@ def _pair_day(
         or left.source_artifact_sha256 == right.source_artifact_sha256
     ):
         raise PaperQualificationError("paired_arm_execution_artifact_reuse")
-    if left_roster != right_roster or left.market_artifact_sha256 != right.market_artifact_sha256:
+    if (
+        left_roster != roster.digest or right_roster != roster.digest
+        or left.market_artifact_sha256 != right.market_artifact_sha256
+    ):
         return unknown("paired_common_roster_or_market_mismatch")
     left_routes = {r.revision_id: r for r in left.routes}
     right_routes = {r.revision_id: r for r in right.routes}
@@ -591,7 +731,8 @@ def _pair_day(
 
 
 def _paired(
-    study: ProspectiveStudy, left: VerifiedPaperCohort, right: VerifiedPaperCohort,
+    root: _Root, study: ProspectiveStudy, left: VerifiedPaperCohort, right: VerifiedPaperCohort,
+    as_of: datetime,
 ) -> PairedEntryAssessment:
     policy = replace(left.policy, minimum_primary_score_bps=study.minimum_improvement_bps)
     left_costs, right_costs = dict(left.costs), dict(right.costs)
@@ -606,11 +747,32 @@ def _paired(
     paired_days: list[_Day] = []
     rows: list[PairedSession] = []
     challenger_costs: list[float] = []
+    roster_paths = {day: (path, artifact, sig) for day, path, artifact, sig in study.roster_paths}
+    roster_rows: list[tuple[date, str, str]] = []
+    seen_roster_artifacts: set[str] = set()
+    seen_roster_revisions: set[str] = set()
+    arm_artifacts = left_private | right_private | {
+        c.market_artifact_sha256 for _, c in left.costs + right.costs
+    }
+    if set(roster_paths) - {day.date for day in left.days}:
+        raise PaperQualificationError("future_common_roster_input")
     for a, b in zip(left.days, right.days, strict=True):
         if a.date != b.date:
             raise PaperQualificationError("paired_calendar_mismatch")
+        paths = roster_paths.get(a.date)
+        roster = None
+        if paths is not None:
+            roster = _load_common_roster(root=root, study=study, day=a.date, as_of=as_of, paths=paths)
+            identifiers = {roster.source_artifact_sha256, roster.export_sha256}
+            if identifiers & (arm_artifacts | seen_roster_artifacts):
+                raise PaperQualificationError("independent_roster_artifact_reuse")
+            if seen_roster_revisions.intersection(roster.revisions):
+                raise PaperQualificationError("independent_roster_revision_reuse")
+            seen_roster_artifacts.update(identifiers)
+            seen_roster_revisions.update(roster.revisions)
+            roster_rows.append((a.date, roster.source_artifact_sha256, roster.export_sha256))
         day, row, costs = _pair_day(
-            a.date, left_costs.get(a.date), right_costs.get(a.date), a, b, study,
+            a.date, left_costs.get(a.date), right_costs.get(a.date), a, b, study, roster,
         )
         paired_days.append(day)
         rows.append(row)
@@ -659,7 +821,7 @@ def _paired(
         blockers.append("sequential_adverse_session_alarm")
     return PairedEntryAssessment(
         tuple(rows), endpoint, axes, complete, observed, worst, recent_delta, recent_cost,
-        degradation, tuple(dict.fromkeys(blockers)),
+        degradation, tuple(roster_rows), tuple(dict.fromkeys(blockers)),
     )
 
 
@@ -711,11 +873,9 @@ def _dossier(
         inputs_path=arm.inputs_path, trust_path=arm.trust_path,
         cost_policy_path=arm.cost_policy_path, as_of=as_of,
     ) for arm in study.arms)
-    identities = tuple(sorted({item for c in cohorts for item in c.evidence_identities}))
+    identity_set = {item for c in cohorts for item in c.evidence_identities}
     training = {stable_hash(("artifact", item)) for arm in study.arms
                 for item in arm.training_data_hashes}
-    if training.intersection(identities):
-        raise PaperQualificationError("training_evaluation_artifact_overlap")
     blockers: list[str] = []
     if as_of < close:
         blockers.append("prospective_horizon_not_finished")
@@ -730,8 +890,14 @@ def _dossier(
         ):
             blockers.append("cohort_research_support_incomplete")
     else:
-        paired = _paired(study, cohorts[0], cohorts[1])
+        paired = _paired(root, study, cohorts[0], cohorts[1], as_of)
         blockers.extend(paired.blockers)
+        identity_set.update(stable_hash(("artifact", digest))
+                            for _, source, export in paired.upstream_rosters
+                            for digest in (source, export))
+    identities = tuple(sorted(identity_set))
+    if training.intersection(identities):
+        raise PaperQualificationError("training_evaluation_artifact_overlap")
     arm_reports = tuple((arm.arm, c.report) for arm, c in zip(study.arms, cohorts, strict=True))
     final_blockers = tuple(dict.fromkeys(blockers))
     material = {
