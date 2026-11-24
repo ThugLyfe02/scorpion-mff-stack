@@ -55,3 +55,21 @@ The verified prefix and any unverified trailing bytes are preserved separately, 
 checkpoint digests; the original file is untouched. A missing or mismatched checkpoint refuses
 rather than guessing which events were durable. No recovered file is represented as a clean run.
 This is evidence recovery, not automatic working-call resume or external execution recovery.
+
+
+## Point-in-time research features and conditional alternatives
+
+Use the existing causal_features and counterfactual modules to extract a sealed journal's
+unlabeled research features or compare its recorded initial and conditional-chase intentions:
+
+```sh
+python -m scorpion paper-intent-features --journal /private/session.jsonl
+python -m scorpion paper-intent-alternatives --journal /private/session.jsonl
+```
+
+Every accepted row binds the journal bytes, earlier decision sequence, message revision and
+content fingerprints, rules hash, quote event clock, receive-to-decision age, limit and quantity.
+Missing/noncausal evidence is refused, not imputed. The two alternatives are paired by call ID;
+only requested-limit, quantity and timing differences are measurable. No execution or P&L delta
+is imputed. No row is a labeled TrainingRow and no optimizer is invoked. Authenticated venue or
+adjudicated outcome evidence and independent qualification remain prerequisites for learning.

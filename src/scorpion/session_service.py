@@ -241,7 +241,8 @@ class Journal:
         size = 0
         try:
             if (
-                journal_checkpoint_path(self.path).exists() or journal_receipt_path(self.path).exists()
+                journal_checkpoint_path(self.path).exists()
+                or journal_receipt_path(self.path).exists()
             ):
                 raise FileExistsError("journal sidecar already exists")
             with self.path.open("xb") as handle:

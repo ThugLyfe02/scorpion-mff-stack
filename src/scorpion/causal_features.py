@@ -5,6 +5,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from .processing_order import ensure_processing_order_schema
@@ -359,3 +360,199 @@ def verify_feature_store(path: str | Path) -> FeatureStoreVerification:
         missing_target_events=missing,
         valid=not (invalid_seq or mismatches or missing),
     )
+
+
+# Forward paper-intent evidence is intentionally not a labeled TrainingRow.
+# A decision log cannot establish that a market fill or profitable outcome occurred.
+@dataclass(frozen=True, slots=True)
+class PaperIntentFeatureRow:
+    journal_sha256: str
+    decision_seq: int
+    intent_seq: int
+    call_id: str
+    ticker: str
+    rules_sha256: str
+    role: str
+    features: dict[str, float | int | str]
+    feature_sha256: str
+    authority: str = "RESEARCH_ONLY"
+    label_status: str = "UNLABELED"
+
+
+@dataclass(frozen=True, slots=True)
+class PaperIntentFeatureReport:
+    journal_sha256: str
+    rows: tuple[PaperIntentFeatureRow, ...]
+    refusals: tuple[tuple[str, int], ...]
+    labeled_training_rows: int = 0
+    authority: str = "RESEARCH_ONLY"
+
+
+def _paper_timestamp(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("timestamp")
+    stamp = datetime.fromisoformat(value)
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        raise ValueError("timestamp")
+    return stamp.astimezone(UTC)
+
+
+def _paper_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("nonnegative integer required")
+    return value
+
+
+def _paper_decimal(value: object) -> Decimal:
+    number = Decimal(str(value))
+    if not number.is_finite() or number <= 0:
+        raise ValueError("positive finite price required")
+    return number
+
+
+def _paper_hash(value: object) -> str:
+    if (
+        not isinstance(value, str) or len(value) != 64
+        or any(c not in "0123456789abcdef" for c in value)
+    ):
+        raise ValueError("invalid hash")
+    return value
+
+
+def _paper_text(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("missing identity")
+    return value
+
+
+def _intent_features(
+    decision: dict[str, object], row: dict[str, object], journal_hash: str,
+    max_age_ns: int,
+) -> PaperIntentFeatureRow:
+    call_id = _paper_text(row.get("call_id"))
+    ticker = _paper_text(row.get("ticker"))
+    rules = _paper_hash(row.get("rules_sha256"))
+    if (
+        decision.get("call_id") != call_id or decision.get("ticker") != ticker
+        or decision.get("rules_sha256") != rules
+        or decision.get("action") != "schedule_entry"
+        or row.get("mode") != "PAPER" or row.get("status") != "PAPER_INTENT_ONLY"
+    ):
+        raise ValueError("intent identity or authority mismatch")
+    if type(row.get("chase")) is not bool:
+        raise ValueError("intent role missing")
+    chase = row["chase"] is True
+    if row.get("conditional_on") != ("initial_unfilled" if chase else None):
+        raise ValueError("intent condition mismatch")
+    # Bind each feature to the source revision, prior decision and quote at admission.
+    content_hash = _paper_hash(decision.get("content_sha256"))
+    revision = _paper_hash(decision.get("revision_id"))
+    source = _paper_timestamp(decision.get("source_ts_utc"))
+    received = _paper_timestamp(decision.get("received_ts_utc"))
+    decided = _paper_timestamp(decision.get("ts_utc"))
+    intent_time = _paper_timestamp(row.get("ts_utc"))
+    if not source <= received <= decided <= intent_time:
+        raise ValueError("noncausal signal chronology")
+    decision_seq, intent_seq = _paper_int(decision["seq"]), _paper_int(row["seq"])
+    if not 0 < decision_seq < intent_seq:
+        raise ValueError("noncausal sequence")
+    evidence = row.get("quote_evidence")
+    if not isinstance(evidence, dict):
+        raise ValueError("quote evidence missing")
+    observed = _paper_timestamp(evidence.get("observed_ts_utc"))
+    event_ns = _paper_int(evidence.get("ts_event_ns"))
+    receive_ns = _paper_int(evidence.get("recv_mono_ns"))
+    decision_ns = _paper_int(evidence.get("decision_mono_ns"))
+    source_age_ns = _paper_int(evidence.get("source_age_ns"))
+    if (
+        event_ns == 0 or observed > intent_time or receive_ns > decision_ns
+        or abs(int(observed.timestamp() * 1_000_000_000) - event_ns) > 2000
+    ):
+        raise ValueError("noncausal quote clock")
+    age_ns = source_age_ns + decision_ns - receive_ns
+    if age_ns > max_age_ns:
+        raise ValueError("quote outside freshness bound")
+    bid, ask = _paper_decimal(evidence.get("bid")), _paper_decimal(evidence.get("ask"))
+    limit, anchor = _paper_decimal(row.get("limit")), _paper_decimal(row.get("reference_price"))
+    quantity = _paper_int(row.get("quantity"))
+    if ask < bid or quantity == 0:
+        raise ValueError("invalid executable inputs")
+    midpoint = (ask + bid) / 2
+    features: dict[str, float | int | str] = {
+        "feature_set": "paper-intent-features-v1",
+        "source_ts_utc": source.isoformat(),
+        "received_ts_utc": received.isoformat(),
+        "intent_ts_utc": intent_time.isoformat(),
+        "source_age_ms": (intent_time - source).total_seconds() * 1000,
+        "signal_receive_lag_ms": (received - source).total_seconds() * 1000,
+        "quote_event_ns": event_ns,
+        "quote_age_ns": age_ns,
+        "bid": str(bid), "ask": str(ask), "limit": str(limit),
+        "reference_price": str(anchor), "quantity": quantity,
+        "spread_bps": str((ask - bid) / midpoint * 10_000),
+        "limit_to_ask_bps": str((limit - ask) / ask * 10_000),
+        "revision_id": revision, "content_sha256": content_hash,
+    }
+    return PaperIntentFeatureRow(
+        journal_sha256=journal_hash, decision_seq=decision_seq, intent_seq=intent_seq,
+        call_id=call_id, ticker=ticker, rules_sha256=rules,
+        role="CHASE" if chase else "INITIAL", features=features,
+        feature_sha256=_hash({
+            **features, "journal_sha256": journal_hash, "call_id": call_id,
+            "ticker": ticker, "decision_seq": decision_seq, "intent_seq": intent_seq,
+            "rules_sha256": rules, "role": "CHASE" if chase else "INITIAL",
+        }),
+    )
+
+
+def load_paper_intent_features(
+    path: str | Path, *, max_quote_age_ms: int = 3000,
+) -> PaperIntentFeatureReport:
+    """Extract only pre-intent information from a sealed, exact-byte journal.
+
+    The sealed journal is local integrity evidence, not authenticated market data.
+    This function produces unlabeled research rows, never training targets or fills.
+    """
+    from .session_service import read_verified_paper_records
+
+    if max_quote_age_ms <= 0:
+        raise ValueError("quote age bound must be positive")
+    receipt, records = read_verified_paper_records(Path(path))
+    journal_hash = _paper_hash(receipt["sha256"])
+    decisions: dict[str, dict[str, object]] = {}
+    seen_roles: set[tuple[str, str]] = set()
+    rows: list[PaperIntentFeatureRow] = []
+    refusals: dict[str, int] = {}
+
+    def refuse(reason: str) -> None:
+        refusals[reason] = refusals.get(reason, 0) + 1
+
+    for row in records:
+        if row.get("kind") == "decision" and row.get("action") == "schedule_entry":
+            call_id = row.get("call_id")
+            if isinstance(call_id, str) and call_id:
+                if call_id in decisions:
+                    raise ValueError("duplicate scheduled call in sealed journal")
+                decisions[call_id] = row
+        if row.get("kind") != "intent":
+            continue
+        try:
+            call_id = _paper_text(row.get("call_id"))
+            decision = decisions.get(call_id)
+            if decision is None:
+                refuse("missing_prior_decision")
+                continue
+            feature = _intent_features(
+                decision, row, journal_hash, max_quote_age_ms * 1_000_000,
+            )
+            role = (feature.call_id, feature.role)
+            if role in seen_roles:
+                raise ValueError("duplicate intent role")
+            if feature.role == "CHASE" and (call_id, "INITIAL") not in seen_roles:
+                refuse("missing_qualified_initial")
+                continue
+            seen_roles.add(role)
+            rows.append(feature)
+        except (ValueError, TypeError, KeyError, InvalidOperation):
+            refuse("invalid_intent_evidence")
+    return PaperIntentFeatureReport(journal_hash, tuple(rows), tuple(sorted(refusals.items())))

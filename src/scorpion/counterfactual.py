@@ -3,8 +3,11 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
+from pathlib import Path
 
 from .association import associate_followup_with_evidence
+from .causal_features import PaperIntentFeatureRow, load_paper_intent_features
 from .config import DEFAULT_POLICY, Policy
 from .domain import BookState, Effect, EventKind, RawDiscordMessage, SignalEvent
 from .invariants import assert_valid_book
@@ -101,4 +104,63 @@ def compare_counterfactual_runs(
         event_kind_changes=event_kind_changes,
         contract_changes=contract_changes,
         effect_changes=effect_changes,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PaperIntentAlternative:
+    call_id: str
+    ticker: str
+    initial_feature_sha256: str
+    chase_feature_sha256: str
+    requested_limit_change_bps: Decimal
+    requested_quantity_change: int
+    source_age_change_ms: Decimal
+    modeled_pnl_delta: None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PaperIntentAlternativeReport:
+    journal_sha256: str
+    pairs: tuple[PaperIntentAlternative, ...]
+    initial_without_qualified_chase: int
+    unpaired_chase: int
+    feature_refusals: tuple[tuple[str, int], ...]
+    authority: str = "RESEARCH_ONLY"
+
+
+def compare_paper_intent_alternatives(path: str | Path) -> PaperIntentAlternativeReport:
+    """Compare observed initial/chase proposals, not two assumed executed trades."""
+    evidence = load_paper_intent_features(path)
+    by_role: dict[tuple[str, str], PaperIntentFeatureRow] = {
+        (row.call_id, row.role): row for row in evidence.rows
+    }
+    initials = {key for key, role in by_role if role == "INITIAL"}
+    chases = {key for key, role in by_role if role == "CHASE"}
+    pairs: list[PaperIntentAlternative] = []
+    for key in sorted(initials & chases):
+        first, second = by_role[(key, "INITIAL")], by_role[(key, "CHASE")]
+        if (
+            first.ticker != second.ticker or first.rules_sha256 != second.rules_sha256
+            or first.intent_seq >= second.intent_seq
+        ):
+            raise ValueError("counterfactual intent identity mismatch")
+        initial = Decimal(str(first.features["limit"]))
+        chase = Decimal(str(second.features["limit"]))
+        pairs.append(PaperIntentAlternative(
+            call_id=key, ticker=first.ticker,
+            initial_feature_sha256=first.feature_sha256,
+            chase_feature_sha256=second.feature_sha256,
+            requested_limit_change_bps=(chase - initial) / initial * 10_000,
+            requested_quantity_change=(
+                int(second.features["quantity"]) - int(first.features["quantity"])
+            ),
+            source_age_change_ms=(
+                Decimal(str(second.features["source_age_ms"]))
+                - Decimal(str(first.features["source_age_ms"]))
+            ),
+        ))
+    return PaperIntentAlternativeReport(
+        evidence.journal_sha256, tuple(pairs), len(initials - chases),
+        len(chases - initials), evidence.refusals,
     )
