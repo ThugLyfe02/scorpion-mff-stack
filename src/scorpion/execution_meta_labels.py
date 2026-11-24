@@ -262,6 +262,9 @@ class PaperOutcomeLabel:
     label_sha256: str
     authority: str = "RESEARCH_ONLY"
     evidence_kind: str = "DUAL_ATTESTED_EXTERNAL_PAPER"
+    filled_notional_usd: Decimal | None = None
+    terminal_ts_utc: datetime | None = None
+    submitted_ts_utc: datetime | None = None
 
     @property
     def observed_fill_target(self) -> int | None:
@@ -295,6 +298,8 @@ class PaperOutcomeReport:
     certifies_live_fills: bool = False
     authorizes_training: bool = False
     authorizes_promotion: bool = False
+    observed_through_ts_utc: datetime | None = None
+    reviewed_ts_utc: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,6 +439,7 @@ def _parse_trust(raw: bytes, expected_hash: str) -> _PaperTrust:
 
 def _verify_signatures(
     trust: _PaperTrust, raw: bytes, collector_signature: str, reviewer_signature: str,
+    *, collector_domain: bytes = _COLLECTOR_DOMAIN, reviewer_domain: bytes = _REVIEWER_DOMAIN,
 ) -> None:
     # Research-only optional dependency; never imported by the decision hot path.
     from cryptography.exceptions import InvalidSignature
@@ -441,10 +447,10 @@ def _verify_signatures(
 
     try:
         Ed25519PublicKey.from_public_bytes(trust.collector_key).verify(
-            _hex(collector_signature, 64), _COLLECTOR_DOMAIN + raw,
+            _hex(collector_signature, 64), collector_domain + raw,
         )
         Ed25519PublicKey.from_public_bytes(trust.reviewer_key).verify(
-            _hex(reviewer_signature, 64), _REVIEWER_DOMAIN + raw,
+            _hex(reviewer_signature, 64), reviewer_domain + raw,
         )
     except (InvalidSignature, ValueError) as exc:
         raise PaperOutcomeError("paper_export_signature_invalid") from exc
@@ -661,6 +667,12 @@ def admit_paper_outcome_labels(
             key, feature.intent_seq, feature.call_id, feature.ticker, feature.role,
             outcome, reason, int(feature.features["quantity"]), quantity, price,
             order.order_id if order else None, available, stable_hash(material),
+            filled_notional_usd=(
+                sum((qty * px for _, qty, px, _ in order.fills), Decimal(0))
+                if order is not None and quantity is not None else None
+            ),
+            terminal_ts_utc=order.terminal if order is not None and quantity is not None else None,
+            submitted_ts_utc=order.submitted if order is not None and quantity is not None else None,
         )
         labels.append(label)
         counts[outcome.value] = counts.get(outcome.value, 0) + 1
@@ -676,5 +688,39 @@ def admit_paper_outcome_labels(
         evidence.journal_sha256, expected_trust_sha256, export_hash, source_hash,
         trust.source_id, trust.account_ref, trust.collector_id, trust.reviewer_id, as_of,
         tuple(labels), evidence.refusals, extras, tuple(sorted(counts.items())),
-        target_count, report_hash,
+        target_count, report_hash, observed_through_ts_utc=through, reviewed_ts_utc=reviewed,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class PaperOutcomeAdmission:
+    """Operator-supplied inputs shared by outcome and economic research commands."""
+
+    journal_path: Path
+    trust_path: Path
+    expected_trust_sha256: str
+    export_path: Path
+    source_artifact_path: Path
+    collector_signature: str
+    reviewer_signature: str
+    as_of: datetime
+
+    def verify(self) -> PaperOutcomeReport:
+        return admit_paper_outcome_labels(
+            self.journal_path, trust_path=self.trust_path,
+            expected_trust_sha256=self.expected_trust_sha256, export_path=self.export_path,
+            source_artifact_path=self.source_artifact_path,
+            collector_signature=self.collector_signature, reviewer_signature=self.reviewer_signature,
+            as_of=self.as_of,
+        )
+
+    def verify_cost_supplement(
+        self, raw: bytes, collector_signature: str, reviewer_signature: str,
+    ) -> None:
+        """Reuse pinned Stage 1 identities with a distinct signature domain."""
+        trust = _parse_trust(_bounded_bytes(self.trust_path, 65536), self.expected_trust_sha256)
+        _verify_signatures(
+            trust, raw, collector_signature, reviewer_signature,
+            collector_domain=b"scorpion.paper-cost-export.v1:collector\x00",
+            reviewer_domain=b"scorpion.paper-cost-export.v1:reviewer\x00",
+        )
