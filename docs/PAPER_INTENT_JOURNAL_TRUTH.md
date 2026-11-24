@@ -326,3 +326,17 @@ Stage 2 cost-report hashes now use schema scorpion.paper-execution-cost-report.v
 new coverage, identities and regime fields. Prior v1 reports remain reproducible at their old
 commit; they are not silently reinterpreted as complete-session evidence. Terminal chase
 counts include attested zero-fill cancellations, not just orders that actually acquired shares.
+
+
+The session lifecycle additionally requires an armed safety latch at both boundaries, an
+authorized Discord guild/channel cache ready by the opening bell, no pre-close disconnect
+or callback failure, and a first usable admitted quote by the opening bell. This is conservative
+telemetry, not proof of vendor entitlement or complete history. No readiness event changes
+trading permission. A genuinely empty session still requires all the evidence.
+
+Chase-specific Kish diversity, per-session/ticker counts and absolute score shares are
+computed using only attested terminal chase interventions; structural no-chase zeros cannot
+inflate their effective support. Primary and chase raw session-tail checks are independent.
+The planned-horizon radius and best possible lower bound reveal underpowered cohort designs
+without tuning the support or stopping threshold after seeing data. These are best-case
+mathematical resolution diagnostics, not empirical power forecasts.

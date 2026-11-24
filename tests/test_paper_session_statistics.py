@@ -502,3 +502,48 @@ def test_empty_session_requires_operational_readiness(
     assert result.sessions[-1].expected_routes is None
     assert result.sessions[-1].primary_bounds_bps == (-100, 100)
     assert reason in result.sessions[-1].reasons
+
+
+def test_chase_concentration_not_diluted_by_structural_zero_routes() -> None:
+    days = tuple(_Day(day, "COVERED_COMPLETE", 2, (
+        score(f"{i}a", 20, 40 if i == 0 else 0, "AAA"),
+        score(f"{i}b", 10, 0, "BBB"),
+    ), str(i), ()) for i, day in enumerate(DAYS))
+    result = _evaluate_days(days, policy(), "a" * 64, AS_OF)
+    assert result.primary_concentration.effective_session_count == 4
+    assert result.chase_intervention_concentration.effective_session_count == 1
+    assert result.chase_intervention_concentration.maximum_session_share == 1
+    assert "chase_intervention_insufficient_kish_session_diversity" in result.chase.blockers
+    assert "chase_intervention_session_concentration" in result.chase.blockers
+    assert "chase_intervention_ticker_concentration" in result.chase.blockers
+
+
+def test_preregistered_resolution_and_internal_denominator_guard() -> None:
+    days = (_Day(DAYS[0], "COVERED_COMPLETE", 1, (score("a", 20, 0),), "a", ()),)
+    result = _evaluate_days(days, policy(), "a" * 64, AS_OF)
+    assert result.primary.planned_horizon_radius_bps > 0
+    assert result.primary.best_case_planned_lower_bound_bps <= 0
+    assert "preregistered_horizon_cannot_resolve_threshold_even_at_upper_support" in (
+        result.primary.blockers
+    )
+    with pytest.raises(PaperCohortError, match="denominator"):
+        _Day(DAYS[0], "COVERED_COMPLETE", 2, (score("a", 20, 0),), "a", ())
+    with pytest.raises(PaperCohortError, match="unknown_session"):
+        _Day(DAYS[0], "MISSING_SESSION", None, (score("a", 20, 0),), None, ())
+
+
+@pytest.mark.parametrize("missing", [0, 1, 2, 4])
+def test_interval_contains_every_bounded_missing_completion(missing: int) -> None:
+    import itertools
+
+    rows = (score("observed", 150, 0),) + tuple(
+        score(f"missing-{i}", None, None) for i in range(missing)
+    )
+    day = _Day(
+        DAYS[0], "COVERED_CENSORED" if missing else "COVERED_COMPLETE",
+        len(rows), rows, "a", (),
+    )
+    lo, hi = _bounds(day, "primary", 100)
+    for completion in itertools.product((-100, 0, 100), repeat=missing):
+        latent = (100 + sum(completion)) / len(rows)
+        assert lo <= latent <= hi

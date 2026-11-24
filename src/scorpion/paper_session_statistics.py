@@ -118,6 +118,8 @@ class PaperEndpointStatistics:
     anytime_conditional_mean: BoundedMeanConfidenceSequence
     identification_interval_bps: tuple[float, float] | None
     threshold_bps: float
+    planned_horizon_radius_bps: float
+    best_case_planned_lower_bound_bps: float
     status: str
     blockers: tuple[str, ...]
 
@@ -146,6 +148,17 @@ class PaperRegimeAxis:
 
 
 @dataclass(frozen=True, slots=True)
+class PaperConcentration:
+    observed_routes: int
+    observed_sessions: int
+    effective_session_count: float | None
+    maximum_session_share: float | None
+    maximum_ticker_share: float | None
+    maximum_absolute_score_session_share: float | None
+    maximum_absolute_score_ticker_share: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class PaperSessionCohortReport:
     cohort_sha256: str
     family_id: str
@@ -166,6 +179,8 @@ class PaperSessionCohortReport:
     maximum_observed_session_share: float | None
     maximum_observed_ticker_share: float | None
     maximum_absolute_score_ticker_share: float | None
+    primary_concentration: PaperConcentration
+    chase_intervention_concentration: PaperConcentration
     sessions: tuple[PaperSessionStatistic, ...]
     primary: PaperEndpointStatistics
     chase: PaperEndpointStatistics
@@ -190,6 +205,16 @@ class _RouteScore:
     chase: float | None
     terminal_chase_observed: bool
 
+    def __post_init__(self) -> None:
+        if not self.call_id or not self.ticker or set(dict(self.regimes)) != set(_AXES):
+            raise PaperCohortError("invalid_route_score_identity")
+        if len(self.regimes) != len(_AXES):
+            raise PaperCohortError("duplicate_route_regime_axis")
+        if any(value is not None and not math.isfinite(value) for value in (self.primary, self.chase)):
+            raise PaperCohortError("nonfinite_route_score")
+        if self.terminal_chase_observed and self.chase is None:
+            raise PaperCohortError("observed_chase_without_score")
+
 
 @dataclass(frozen=True, slots=True)
 class _Day:
@@ -199,6 +224,22 @@ class _Day:
     scores: tuple[_RouteScore, ...]
     report_hash: str | None
     reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.expected is None:
+            if self.scores:
+                raise PaperCohortError("unknown_session_has_scored_routes")
+        elif self.expected < 0 or self.expected != len(self.scores):
+            raise PaperCohortError("session_route_denominator_mismatch")
+        if len({row.call_id for row in self.scores}) != len(self.scores):
+            raise PaperCohortError("duplicate_session_route_identity")
+        complete = all(row.primary is not None and row.chase is not None for row in self.scores)
+        if self.status == "COVERED_EMPTY" and self.expected != 0:
+            raise PaperCohortError("invalid_empty_session")
+        if self.status == "COVERED_COMPLETE" and (not self.expected or not complete):
+            raise PaperCohortError("invalid_complete_session")
+        if self.status == "COVERED_CENSORED" and (not self.expected or complete):
+            raise PaperCohortError("invalid_censored_session")
 
 
 def _number(value: object, *, minimum: float, maximum: float) -> float:
@@ -423,25 +464,71 @@ def _tail(values: Sequence[float]) -> float | None:
 
 
 def _concentration(
-    days: Sequence[_Day],
-) -> tuple[float | None, float | None, float | None, float | None]:
-    counts = [len(_observed_values(day, "primary")) for day in days]
-    total = sum(counts)
-    if not total:
-        return None, None, None, None
+    days: Sequence[_Day], *, chase_interventions_only: bool = False,
+) -> PaperConcentration:
+    """Kish count and absolute score concentration, without structural-zero dilution."""
+    counts: list[int] = []
+    session_abs: list[float] = []
     ticker_counts: Counter[str] = Counter()
     abs_scores: dict[str, float] = defaultdict(float)
     for day in days:
+        count = 0
+        exposure = 0.0
         for row in day.scores:
-            if row.primary is not None:
-                ticker_counts[row.ticker] += 1
-                abs_scores[row.ticker] += abs(row.primary)
+            if chase_interventions_only and not row.terminal_chase_observed:
+                continue
+            value = row.chase if chase_interventions_only else row.primary
+            if value is None:
+                continue
+            count += 1
+            exposure += abs(value)
+            ticker_counts[row.ticker] += 1
+            abs_scores[row.ticker] += abs(value)
+        counts.append(count)
+        session_abs.append(exposure)
+    total = sum(counts)
+    if not total:
+        return PaperConcentration(0, 0, None, None, None, None, None)
     abs_total = math.fsum(abs_scores.values())
-    return (
+    return PaperConcentration(
+        total, sum(count > 0 for count in counts),
         total * total / sum(n * n for n in counts),
         max(counts) / total, max(ticker_counts.values()) / total,
+        max(session_abs) / abs_total if abs_total else None,
         max(abs_scores.values()) / abs_total if abs_total else None,
     )
+
+
+def _concentration_blockers(
+    evidence: PaperConcentration, policy: PaperCohortPolicy, *, prefix: str = "",
+) -> tuple[str, ...]:
+    blockers: list[str] = []
+    if (
+        evidence.effective_session_count is None
+        or evidence.effective_session_count < policy.minimum_effective_sessions
+    ):
+        blockers.append(prefix + "insufficient_kish_session_diversity")
+    if (
+        evidence.maximum_session_share is None
+        or evidence.maximum_session_share > policy.maximum_session_share
+    ):
+        blockers.append(prefix + "session_concentration")
+    if (
+        evidence.maximum_ticker_share is None
+        or evidence.maximum_ticker_share > policy.maximum_ticker_share
+    ):
+        blockers.append(prefix + "ticker_concentration")
+    if (
+        evidence.maximum_absolute_score_session_share is not None
+        and evidence.maximum_absolute_score_session_share > policy.maximum_session_share
+    ):
+        blockers.append(prefix + "economic_score_session_concentration")
+    if (
+        evidence.maximum_absolute_score_ticker_share is not None
+        and evidence.maximum_absolute_score_ticker_share > policy.maximum_ticker_share
+    ):
+        blockers.append(prefix + "economic_score_ticker_concentration")
+    return tuple(blockers)
 
 
 def _endpoint(
@@ -475,6 +562,13 @@ def _endpoint(
         else policy.minimum_chase_score_bps
     )
     blockers = list(common_blockers)
+    best_case = anytime_bounded_mean_confidence_sequence(
+        [(policy.clip_bps, policy.clip_bps)] * len(policy.sessions),
+        lower=-policy.clip_bps, upper=policy.clip_bps, alpha=alpha,
+    )
+    assert best_case.radius is not None
+    if best_case.lower_bound <= threshold:
+        blockers.append("preregistered_horizon_cannot_resolve_threshold_even_at_upper_support")
     if not known or len(values) / known < policy.minimum_complete_fraction:
         blockers.append("insufficient_known_route_coverage")
     if endpoint == "chase" and chase_count < policy.minimum_observed_chases:
@@ -485,6 +579,11 @@ def _endpoint(
     tail = _tail(values)
     if tail is not None and tail < -policy.maximum_tail_loss_bps:
         blockers.append("raw_route_tail_loss_exceeds_limit")
+    if (
+        diagnostics.lower_tail_mean is not None
+        and diagnostics.lower_tail_mean < -policy.maximum_tail_loss_bps
+    ):
+        blockers.append("raw_session_tail_loss_exceeds_limit")
     if (
         diagnostics.leave_one_out_min is None
         or diagnostics.leave_one_out_min <= threshold
@@ -502,8 +601,8 @@ def _endpoint(
     )
     return PaperEndpointStatistics(
         endpoint, len(values), known, clipped, _mean(values), min(values) if values else None,
-        tail, diagnostics, tuple(sensitivity), confidence, identified, threshold, status,
-        tuple(dict.fromkeys(blockers)),
+        tail, diagnostics, tuple(sensitivity), confidence, identified, threshold,
+        best_case.radius, best_case.lower_bound, status, tuple(dict.fromkeys(blockers)),
     )
 
 
@@ -580,7 +679,8 @@ def _evaluate_days(
     chases = sum(row.terminal_chase_observed for day in days for row in day.scores)
     covered = sum(day.expected is not None for day in days)
     complete = sum(day.status in ("COVERED_EMPTY", "COVERED_COMPLETE") for day in days)
-    kish, day_share, ticker_share, abs_share = _concentration(days)
+    primary_concentration = _concentration(days)
+    chase_concentration = _concentration(days, chase_interventions_only=True)
     common: list[str] = []
     if len(days) < policy.minimum_sessions:
         common.append("insufficient_elapsed_sessions")
@@ -590,16 +690,13 @@ def _evaluate_days(
         common.append("insufficient_verified_session_coverage")
     if not days or complete / len(days) < policy.minimum_complete_fraction:
         common.append("insufficient_complete_session_coverage")
-    if kish is None or kish < policy.minimum_effective_sessions:
-        common.append("insufficient_kish_session_diversity")
-    if day_share is None or day_share > policy.maximum_session_share:
-        common.append("session_concentration")
-    if ticker_share is None or ticker_share > policy.maximum_ticker_share:
-        common.append("ticker_concentration")
-    if abs_share is not None and abs_share > policy.maximum_ticker_share:
-        common.append("economic_score_ticker_concentration")
+    common.extend(_concentration_blockers(primary_concentration, policy))
     primary = _endpoint(days, policy, "primary", tuple(common), chases)
-    chase = _endpoint(days, policy, "chase", tuple(common), chases)
+    chase = _endpoint(
+        days, policy, "chase", tuple(common) + _concentration_blockers(
+            chase_concentration, policy, prefix="chase_intervention_",
+        ), chases,
+    )
     primary_regimes = _regimes(days, policy, "primary")
     chase_regimes = _regimes(days, policy, "chase")
     regime_statuses = {axis.status for axis in primary_regimes + chase_regimes}
@@ -619,13 +716,17 @@ def _evaluate_days(
         "regime_policy": _REGIMES,
         "as_of": as_of, "sessions": session_rows, "primary": primary, "chase": chase,
         "primary_regimes": primary_regimes, "chase_regimes": chase_regimes,
-        "concentration": (kish, day_share, ticker_share, abs_share),
+        "primary_concentration": primary_concentration,
+        "chase_intervention_concentration": chase_concentration,
     }
     return PaperSessionCohortReport(
         policy_hash, policy.family_id, policy.trust_sha256, policy.cost_policy_sha256, as_of,
         len(policy.sessions), len(days), len(policy.sessions) - len(days), covered, complete,
         known, observed, chases, len(days) - covered, observed / known if known else None,
-        kish, day_share, ticker_share, abs_share, session_rows, primary, chase,
+        primary_concentration.effective_session_count, primary_concentration.maximum_session_share,
+        primary_concentration.maximum_ticker_share,
+        primary_concentration.maximum_absolute_score_ticker_share,
+        primary_concentration, chase_concentration, session_rows, primary, chase,
         primary_regimes, chase_regimes, robustness, stable_hash(material),
     )
 
