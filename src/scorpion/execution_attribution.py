@@ -695,6 +695,23 @@ def _session_coverage(
             or not end <= _stamp(last.get("ts_utc")) <= min(through, outcome_through)
         ):
             reasons.append("journal_session_lifecycle_conflict")
+        if first.get("latch_armed") is not True or last.get("latch_armed") is not True:
+            reasons.append("journal_session_latch_not_armed")
+        ready = last.get("ingress_scope_ready_ts_utc")
+        disconnect = last.get("ingress_first_disconnect_ts_utc")
+        first_usable = last.get("feed_first_usable_recv_wall_ns")
+        if (
+            hours is None or not isinstance(ready, str)
+            or not _stamp(first.get("ts_utc")) <= _stamp(ready) <= hours[0]
+            or (disconnect is not None and _stamp(disconnect) < hours[1])
+            or type(last.get("ingress_callback_failures")) is not int
+            or last["ingress_callback_failures"] != 0
+            or not isinstance(first_usable, int) or isinstance(first_usable, bool)
+            or first_usable <= 0
+            or first_usable > int(hours[0].timestamp()) * 1_000_000_000
+            or first_usable < int(_stamp(first.get("ts_utc")).timestamp()) * 1_000_000_000
+        ):
+            reasons.append("journal_session_readiness_incomplete")
         if (
             type(last.get("feed_disconnects")) is not int or last["feed_disconnects"] != 0
             or not isinstance(last.get("feed_messages"), int)
@@ -703,7 +720,12 @@ def _session_coverage(
             or type(last.get("pending_ingress")) is not int or last["pending_ingress"] != 0
         ):
             reasons.append("journal_session_transport_incomplete")
-    if any(row.get("kind") == "latch" for row in records):
+    if any(
+        row.get("kind") == "latch"
+        or row.get("reason") == "blocked:no_trade_latch"
+        or row.get("action") == "blocked:conflicting_signal_create"
+        for row in records
+    ):
         reasons.append("journal_session_safety_latch_observed")
     timestamps = [_stamp(row.get("ts_utc")) for row in records]
     if any(ts.astimezone(MARKET_TZ).date() != day for ts in timestamps):

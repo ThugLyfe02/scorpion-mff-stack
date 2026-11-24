@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import discord
 
-from ..config import ALLOWED_CHANNEL_IDS, GUILD_ID
+from ..config import ALLOWED_CHANNEL_IDS, CHANNELS, GUILD_ID
 from ..domain import RawDiscordMessage
 
 Sink = Callable[[RawDiscordMessage], Awaitable[None]]
@@ -25,9 +25,23 @@ class DiscordSignalClient(discord.Client):
         intents.message_content = True
         super().__init__(intents=intents)
         self._sink = sink
+        # Read-only health evidence. Readiness is not proof of complete Discord history.
+        self.first_forward_scope_ready_ts_utc: datetime | None = None
+        self.first_disconnect_ts_utc: datetime | None = None
+        self.callback_failures = 0
 
     async def on_ready(self) -> None:
-        return None
+        guild = self.get_guild(int(GUILD_ID))
+        if (
+            self.first_forward_scope_ready_ts_utc is None
+            and guild is not None
+            and guild.get_channel(int(CHANNELS["options-king"])) is not None
+        ):
+            self.first_forward_scope_ready_ts_utc = datetime.now(UTC)
+
+    async def on_disconnect(self) -> None:
+        if self.first_disconnect_ts_utc is None:
+            self.first_disconnect_ts_utc = datetime.now(UTC)
 
     async def _emit(self, message: discord.Message) -> None:
         if message.guild is None or str(message.guild.id) != GUILD_ID:
@@ -54,9 +68,16 @@ class DiscordSignalClient(discord.Client):
         )
         await self._sink(raw)
 
+    async def _emit_with_health(self, message: discord.Message) -> None:
+        try:
+            await self._emit(message)
+        except Exception:
+            self.callback_failures += 1
+            raise
+
     async def on_message(self, message: discord.Message) -> None:
-        await self._emit(message)
+        await self._emit_with_health(message)
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
         del before
-        await self._emit(after)
+        await self._emit_with_health(after)

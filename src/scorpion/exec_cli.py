@@ -176,6 +176,7 @@ async def _run_session(args: argparse.Namespace) -> int:
     from .domain import RawDiscordMessage
     from .fastpath import QuoteCache
     from .health import FeedHealthMonitor
+    from .ingest.discord import DiscordSignalClient
     from .session_calendar import session_hours
     from .session_service import (
         Journal,
@@ -241,14 +242,14 @@ async def _run_session(args: argparse.Namespace) -> int:
             latch.trip("ingress_queue_overflow")
 
     ingest_run: Callable[[], object] | None = None
+    client: DiscordSignalClient | None = None
     if not args.no_discord:
-        from .ingest.discord import DiscordSignalClient
-
-        client = DiscordSignalClient(sink)
+        discord_client = DiscordSignalClient(sink)
+        client = discord_client
 
         async def discord_ingress() -> None:
             async def start_client() -> None:
-                await client.start(token)
+                await discord_client.start(token)
                 raise RuntimeError("discord_client_ended")
 
             async def watch_overflow() -> None:
@@ -265,6 +266,7 @@ async def _run_session(args: argparse.Namespace) -> int:
             "kind": "session_start", "session_date": today.isoformat(),
             "ts_utc": datetime.now(UTC).isoformat(), "mode": "PAPER",
             "rules_sha256": rules.sha256, "signal_ingress_enabled": not args.no_discord,
+            "latch_armed": latch.armed,
         })
         await supervise(
             session,
@@ -281,7 +283,17 @@ async def _run_session(args: argparse.Namespace) -> int:
             "ts_utc": datetime.now(UTC).isoformat(), "mode": "PAPER",
             "rules_sha256": rules.sha256, "feed_disconnects": feed.stats.disconnects,
             "feed_messages": feed.stats.messages, "ingress_overflow": overflow.is_set(),
-            "pending_ingress": queue.qsize(),
+            "pending_ingress": queue.qsize(), "latch_armed": latch.armed,
+            "feed_first_usable_recv_wall_ns": feed.stats.first_usable_recv_wall_ns,
+            "ingress_scope_ready_ts_utc": (
+                client.first_forward_scope_ready_ts_utc.isoformat()
+                if client is not None and client.first_forward_scope_ready_ts_utc else None
+            ),
+            "ingress_first_disconnect_ts_utc": (
+                client.first_disconnect_ts_utc.isoformat()
+                if client is not None and client.first_disconnect_ts_utc else None
+            ),
+            "ingress_callback_failures": client.callback_failures if client is not None else None,
         })
     finally:
         try:

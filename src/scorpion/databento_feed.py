@@ -95,6 +95,7 @@ class FeedStats:
     rejected_quote: int = 0
     rejected_symbol: int = 0
     timestamp_conflicts: int = 0
+    first_usable_recv_wall_ns: int | None = None
     delays_s: list[float] = field(default_factory=list)
 
 
@@ -156,7 +157,8 @@ class DatabentoFeed:
         if message.symbol not in self._subscribed:
             self.stats.rejected_symbol += 1
             return
-        age_ns = self._wall_ns() - message.ts_event_ns
+        received_wall = self._wall_ns()
+        age_ns = received_wall - message.ts_event_ns
         if self._on_skew is not None:
             self._on_skew(age_ns / 1_000_000.0, received)
         # A replayed, delayed or future exchange event cannot refresh an executable quote.
@@ -200,6 +202,8 @@ class DatabentoFeed:
             recv_mono_ns=received,
             source_age_ns=age_ns,
         )
+        if self.stats.first_usable_recv_wall_ns is None:
+            self.stats.first_usable_recv_wall_ns = received_wall
 
     async def run(self) -> None:
         attempt = 0

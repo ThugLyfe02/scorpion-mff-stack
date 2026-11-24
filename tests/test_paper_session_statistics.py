@@ -223,7 +223,7 @@ class SignedCohort:
 
 def build_bundle(
     ctx: SignedCohort, day: date, *, mode: str, disconnects: int = 0,
-    include_markers: bool = True,
+    include_markers: bool = True, armed: bool = True, ingress_ready: bool = True,
 ) -> SignedBundle:
     root = ctx.root / day.isoformat()
     root.mkdir()
@@ -246,7 +246,7 @@ def build_bundle(
     if include_markers:
         journal.submit({"kind": "session_start", **common,
                         "ts_utc": (open_at - timedelta(seconds=1)).isoformat(),
-                        "signal_ingress_enabled": True})
+                        "signal_ingress_enabled": True, "latch_armed": armed})
     if mode != "empty":
         journal.submit({
             "kind": "decision", "action": "schedule_entry", "call_id": call,
@@ -273,7 +273,10 @@ def build_bundle(
         journal.submit({
             "kind": "session_end", **common, "ts_utc": end.isoformat(),
             "feed_disconnects": disconnects, "feed_messages": 100,
-            "ingress_overflow": False, "pending_ingress": 0,
+            "ingress_overflow": False, "pending_ingress": 0, "latch_armed": armed,
+            "feed_first_usable_recv_wall_ns": int(open_at.timestamp()) * 1_000_000_000,
+            "ingress_scope_ready_ts_utc": open_at.isoformat() if ingress_ready else None,
+            "ingress_first_disconnect_ts_utc": None, "ingress_callback_failures": 0,
         })
     journal.close()
     features = load_paper_intent_features(journal_path)
@@ -482,3 +485,20 @@ def test_cli_nonzero_without_evidence_support(signed_cohort: SignedCohort, capsy
     assert rc == 1
     assert report["authority"] == "RESEARCH_ONLY"
     assert report["primary"]["status"] == "NOT_QUALIFIED"
+
+
+@pytest.mark.parametrize(("armed", "ready", "reason"), [
+    (False, True, "journal_session_latch_not_armed"),
+    (True, False, "journal_session_readiness_incomplete"),
+])
+def test_empty_session_requires_operational_readiness(
+    signed_cohort: SignedCohort, armed: bool, ready: bool, reason: str,
+) -> None:
+    bundle = build_bundle(signed_cohort, DAYS[3], mode="empty", armed=armed,
+                          ingress_ready=ready)
+    signed_cohort.bundles.append(bundle)
+    signed_cohort.index()
+    result = signed_cohort.report()
+    assert result.sessions[-1].expected_routes is None
+    assert result.sessions[-1].primary_bounds_bps == (-100, 100)
+    assert reason in result.sessions[-1].reasons
