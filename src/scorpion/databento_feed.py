@@ -93,6 +93,8 @@ class FeedStats:
     rejected_time: int = 0
     rejected_order: int = 0
     rejected_quote: int = 0
+    rejected_symbol: int = 0
+    timestamp_conflicts: int = 0
     delays_s: list[float] = field(default_factory=list)
 
 
@@ -118,7 +120,10 @@ class DatabentoFeed:
 
         self._client = client
         self._cache = cache
-        self._symbols = tuple(symbols)
+        self._symbols = tuple(dict.fromkeys(symbols))
+        if not self._symbols or any(not symbol for symbol in self._symbols):
+            raise ValueError("nonempty subscription universe required")
+        self._subscribed = set(self._symbols)
         self._schedule = schedule or ReconnectSchedule()
         self._rng = rng or random.Random()
         self._sleep = sleep or asyncio.sleep
@@ -130,19 +135,27 @@ class DatabentoFeed:
             raise ValueError("max_event_age_ms must be positive")
         self._max_event_age_ns = max_event_age_ms * 1_000_000
         self._event_watermark: dict[str, int] = {}
+        self._event_payload: dict[str, tuple[str, str, str]] = {}
         self.stats = FeedStats()
 
     def add_symbol(self, symbol: str) -> None:
         """Subscribe a newly called ticker (2 minutes of slack before its entry minute)."""
 
-        if symbol in self._symbols:
+        if not symbol:
+            raise ValueError("empty subscription symbol")
+        if symbol in self._subscribed:
             return
-        self._symbols = (*self._symbols, symbol)
+        # A failed subscribe must not falsely mark a symbol as subscribed.
         self._client.add_symbols([symbol])
+        self._symbols = (*self._symbols, symbol)
+        self._subscribed.add(symbol)
 
     def _apply(self, message: FeedMessage) -> None:
         received = self._mono_ns()
         self.stats.messages += 1
+        if message.symbol not in self._subscribed:
+            self.stats.rejected_symbol += 1
+            return
         age_ns = self._wall_ns() - message.ts_event_ns
         if self._on_skew is not None:
             self._on_skew(age_ns / 1_000_000.0, received)
@@ -151,10 +164,20 @@ class DatabentoFeed:
             self.stats.rejected_time += 1
             return
         previous = self._event_watermark.get(message.symbol, -1)
+        payload = (str(message.bid), str(message.ask), str(message.last))
         if message.ts_event_ns <= previous:
             self.stats.rejected_order += 1
+            if (
+                message.ts_event_ns == previous
+                and payload != self._event_payload.get(message.symbol)
+            ):
+                # Without a provider sequence tie-breaker, neither version is authoritative.
+                # In particular, a same-timestamp withdrawal cannot leave a price actionable.
+                self.stats.timestamp_conflicts += 1
+                self._cache.invalidate(message.symbol)
             return
         self._event_watermark[message.symbol] = message.ts_event_ns
+        self._event_payload[message.symbol] = payload
         bid, ask = message.bid, message.ask
         if (
             bid is None or ask is None or not bid.is_finite() or not ask.is_finite()

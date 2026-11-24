@@ -17,3 +17,11 @@ must be exercised with a licensed provider before a forward session is certified
 
 No strategy rule, broker authorization, or production account changes. This fixes market
 data admission; it does not make intent-only session output into verified fills.
+
+## Follow-up: ambiguous feed identity
+
+Exact retransmissions do not renew prices or size. Conflicting payloads at the same exchange
+timestamp withdraw the cached quote until a strictly newer event arrives; a timestamp alone
+cannot establish ordering between distinct updates. The subscription universe bounds admission;
+unsolicited symbols cannot refresh feed liveness. A failed dynamic subscription can be retried.
+Naive timestamps and monotonic regressions are not accepted as healthy quote evidence.

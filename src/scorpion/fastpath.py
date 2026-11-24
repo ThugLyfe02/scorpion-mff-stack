@@ -114,6 +114,8 @@ class QuoteCache:
     ) -> None:
         if not contract_key:
             raise ValueError("contract_key is required")
+        if observed_ts_utc.tzinfo is None or observed_ts_utc.utcoffset() is None:
+            raise ValueError("quote observation time must be timezone-aware")
         if not bid.is_finite() or not ask.is_finite() or bid <= 0 or ask <= 0 or ask < bid:
             raise ValueError("invalid quote")
         if source_age_ns < 0:
@@ -161,7 +163,10 @@ class QuoteCache:
         if quote is None or quote.recv_mono_ns is None:
             return None
         now = self._mono_ns() if now_mono_ns is None else now_mono_ns
-        return (now - quote.recv_mono_ns + quote.source_age_ns) / 1_000_000.0
+        local_age = now - quote.recv_mono_ns
+        if local_age < 0:
+            return None
+        return (local_age + quote.source_age_ns) / 1_000_000.0
 
     def fresh(
         self,
