@@ -568,7 +568,10 @@ def admit_paper_outcome_labels(
         "observed_through_ts_utc", "collected_ts_utc", "reviewed_ts_utc", "orders",
     })
     evidence = load_paper_intent_features(journal_path)
-    source_hash = hashlib.sha256(_bounded_bytes(source_artifact_path)).hexdigest()
+    source_bytes = _bounded_bytes(source_artifact_path)
+    if not source_bytes:
+        raise PaperOutcomeError("empty_source_artifact")
+    source_hash = hashlib.sha256(source_bytes).hexdigest()
     export_hash = hashlib.sha256(raw).hexdigest()
     if (
         data["schema"] != "scorpion.paper-outcome-export.v1"
