@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from scorpion_mff.account import FeeModel
 from scorpion_mff.broker import BrokerError
 from scorpion_mff.paper_capture import run_capture
 from scorpion_mff.paper_market import MarketQuote, PaperQuoteBook, QuoteDrivenPaperBroker
@@ -175,3 +176,91 @@ def test_partial_exit_identity_emits_the_resolved_held_key() -> None:
     intents = engine.on_signal(signal)
     assert len(intents) == 1
     assert intents[0].contract_key == KEY
+
+
+def test_same_timestamp_conflict_withdraws_liquidity() -> None:
+    book = PaperQuoteBook(lambda: T)
+    assert book.admit(quote()) == "accepted"
+    assert book.admit(quote(bid=0)) == "conflicting_quote_timestamp"
+    assert book.quote(KEY) is None
+    assert book.admit(quote()) == "duplicate_or_reordered_quote"
+    assert book.quote(KEY) is None
+
+
+def test_halt_reopen_and_disconnect_require_new_status_and_quote() -> None:
+    clock = [T]
+    book = PaperQuoteBook(lambda: clock[0], require_market_status=True)
+    assert book.admit(quote()) == "market_status_missing"
+    assert book.admit_status(OSI, T, "TRADING") == "accepted"
+    clock[0] += 1
+    row = MarketQuote(OSI, clock[0], clock[0], 1.01, 1.05, 2, 2)
+    assert book.admit(row) == "accepted"
+    assert book.quote(KEY) is not None
+    assert book.admit_status(OSI, clock[0], "HALTED") == "accepted"
+    assert book.quote(KEY) is None
+    assert book.admit_status(OSI, clock[0], "TRADING") == "conflicting_status_timestamp"
+    assert book.quote(KEY) is None
+    clock[0] += 1
+    assert book.admit_status(OSI, clock[0], "TRADING") == "accepted"
+    assert book.quote(KEY) is None
+    clock[0] += 1
+    row = MarketQuote(OSI, clock[0], clock[0], 1.01, 1.05, 2, 2)
+    assert book.admit(row) == "accepted"
+    book.gap()
+    assert book.admit_status(OSI, clock[0]-1, "TRADING") == "duplicate_or_reordered_status"
+    assert book.quote(KEY) is None
+
+
+def strict_capture() -> list[str]:
+    rows = [json.loads(line) for line in capture()]
+    rows.insert(0, dict(kind="market_status", received_ts=T-1, event_ts=T-1,
+                        osi=OSI, status="TRADING"))
+    return [json.dumps(dict(row, seq=i))+"\n" for i, row in enumerate(rows, 1)]
+
+
+def test_strict_sample_reconciles_cashflows_and_declared_fees(tmp_path: Path) -> None:
+    report = run_capture(
+        strict_capture(), tmp_path / "strict", source="fixture",
+        allowed_authors=frozenset({"authorized"}), require_market_status=True,
+        fee_model=FeeModel(per_contract_venue_cents=65), max_signal_age_s=10,
+    )
+    assert report["simulator_fill_match"] and report["simulator_inventory_match"]
+    assert report["flat_cashflow_match"] and report["modeled_sample_complete"]
+    assert report["modeled_cashflow_usd"] == 15.0
+    assert report["modeled_fees_usd"] == 1.30
+    assert report["modeled_net_realized_usd"] == 13.70
+    assert not report["certifies_live_fills"]
+
+
+def test_flat_without_fills_is_not_a_qualified_sample(tmp_path: Path) -> None:
+    report = run_capture(
+        capture(), tmp_path / "missing-status", source="fixture",
+        allowed_authors=frozenset({"authorized"}), require_market_status=True,
+        fee_model=FeeModel(), max_signal_age_s=10,
+    )
+    assert report["session_flat"] and report["ledger_integrity"]
+    assert report["modeled_fills"] == 0
+    assert not report["modeled_sample_complete"]
+    assert report["modeled_net_realized_usd"] is None
+    assert "no_modeled_fills" in report["sample_blockers"]
+
+
+def test_stale_signal_cannot_create_modeled_entry(tmp_path: Path) -> None:
+    rows = [json.loads(line) for line in strict_capture()]
+    rows[2]["source_ts"] -= 20
+    report = run_capture(
+        [json.dumps(row)+"\n" for row in rows], tmp_path / "stale", source="fixture",
+        allowed_authors=frozenset({"authorized"}), require_market_status=True,
+        fee_model=FeeModel(), max_signal_age_s=10,
+    )
+    assert report["admission_counts"]["stale_signal"] == 1
+    assert report["modeled_fills"] == 0
+    assert not report["modeled_sample_complete"]
+
+
+def test_legacy_capture_does_not_invent_net_return(tmp_path: Path) -> None:
+    report = run_capture(capture(), tmp_path / "legacy", source="fixture",
+                         allowed_authors=frozenset({"authorized"}))
+    assert report["modeled_realized_usd"] == 15.0
+    assert report["modeled_net_realized_usd"] is None
+    assert not report["modeled_sample_complete"]

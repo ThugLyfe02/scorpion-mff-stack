@@ -43,6 +43,10 @@ class PaperQuoteBook:
     max_age_s: float = 3.0
     quotes: dict[str, Liquidity] = field(default_factory=dict)
     watermarks: dict[str, float] = field(default_factory=dict)
+    require_market_status: bool = False
+    statuses: dict[str, tuple[float, str]] = field(default_factory=dict)
+    status_watermarks: dict[str, tuple[float, str]] = field(default_factory=dict)
+    payloads: dict[str, tuple[str, str, int, int]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.max_age_s) or self.max_age_s <= 0:
@@ -63,9 +67,20 @@ class PaperQuoteBook:
             return "noncausal_quote"
         if now - row.event_ts > self.max_age_s:
             return "stale_quote"
-        if row.event_ts <= self.watermarks.get(row.osi, -math.inf):
+        prior_ts = self.watermarks.get(row.osi, -math.inf)
+        payload = (str(row.bid), str(row.ask), row.bid_size, row.ask_size)
+        if row.event_ts <= prior_ts:
+            if row.event_ts == prior_ts and payload != self.payloads.get(row.osi):
+                self.quotes.pop(row.osi, None)
+                return "conflicting_quote_timestamp"
             return "duplicate_or_reordered_quote"
         self.watermarks[row.osi] = row.event_ts
+        self.payloads[row.osi] = payload
+        status = self.statuses.get(row.osi)
+        if status is None and self.require_market_status:
+            return "market_status_missing"
+        if status is not None and (status[1] != "TRADING" or row.event_ts <= status[0]):
+            return "market_not_tradable_or_quote_pre_status"
         # A newer withdrawal or malformed market update invalidates the old price.
         if (
             not math.isfinite(row.bid) or not math.isfinite(row.ask)
@@ -78,9 +93,41 @@ class PaperQuoteBook:
         self.quotes[row.osi] = Liquidity(row, row.bid_size, row.ask_size)
         return "accepted"
 
+    def admit_status(self, osi: str, event_ts: float, status: str) -> str:
+        """Explicit provider status is evidence, never inferred from a quote."""
+        try:
+            contract = OptionContract.parse_osi_symbol(osi)
+        except InstrumentError:
+            return "invalid_contract"
+        if contract.osi_symbol != osi:
+            return "noncanonical_contract"
+        now = self.clock()
+        if (
+            type(event_ts) not in (int, float) or not math.isfinite(event_ts)
+            or not math.isfinite(now) or not 0 < event_ts <= now
+            or now - event_ts > self.max_age_s
+        ):
+            return "invalid_status_time"
+        if status not in ("TRADING", "HALTED", "CLOSED", "UNKNOWN"):
+            return "invalid_market_status"
+        previous = self.status_watermarks.get(osi)
+        if previous is not None and event_ts <= previous[0]:
+            if event_ts == previous[0] and status != previous[1]:
+                self.statuses[osi] = (event_ts, "UNKNOWN")
+                self.quotes.pop(osi, None)
+                return "conflicting_status_timestamp"
+            return "duplicate_or_reordered_status"
+        self.status_watermarks[osi] = (event_ts, status)
+        self.statuses[osi] = (event_ts, status)
+        # Any new status, including reopen, invalidates pre-status liquidity.
+        self.quotes.pop(osi, None)
+        return "accepted"
+
     def gap(self) -> None:
         self.quotes.clear()
-        # A reconnect cannot replenish displayed size with the same event.
+        # Previously observed instruments become UNKNOWN until new status evidence.
+        self.statuses = {osi: (ts, "UNKNOWN") for osi, (ts, _) in self.statuses.items()}
+        # Retain status and quote watermarks: replay cannot replenish either state.
 
     def resolve(self, key: str) -> tuple[str, Liquidity]:
         now = self.clock()
@@ -94,6 +141,11 @@ class PaperQuoteBook:
             raise BrokerError("paper_outside_regular_session")
         if contract.expiry < session.day:
             raise BrokerError("paper_expired_contract")
+        status = self.statuses.get(contract.osi_symbol)
+        if status is None and self.require_market_status:
+            raise BrokerError("paper_market_status_missing")
+        if status is not None and status[1] != "TRADING":
+            raise BrokerError("paper_market_not_tradable")
         state = self.quotes.get(contract.osi_symbol)
         if state is None:
             raise BrokerError("paper_no_market")

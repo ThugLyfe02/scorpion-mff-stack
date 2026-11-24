@@ -35,3 +35,19 @@ Only the current 2025/2026 calendar in the existing engine is supported. The nex
 slice must bind to a licensed feed, confirm market-status/halts and adjusted-contract
 definitions, model explicit fees, persist capture watermarks, exercise crash recovery,
 and compare to an independent paper venue. No real orders are authorized.
+
+## Prospective evidence profile (follow-up)
+
+The compatibility capture remains available, but it cannot qualify a prospective modeled sample.
+Use the explicit strict profile with `--require-market-status --fee-model PATH
+--max-signal-age SECONDS`. The normalized market_status event carries osi, event_ts and status
+(TRADING/HALTED/CLOSED/UNKNOWN), with the same receive clock and sequence contract. A halt,
+withdrawal, conflicting timestamp or gap invalidates quote state; reopening requires a newer
+status and a newer quote. No status is inferred from price alone. Status is a declared provider
+observation, not authentication, exchange entitlement or proof of tradability in production.
+
+The existing FeeModel accounts for explicitly declared per-order fees. Net realized session P&L
+is withheld if fees are missing, there are no fills, the book is open, or reconciliation fails.
+The independently maintained simulator acknowledgement and inventory state must agree with the
+execution ledger; flat cashflow must agree with its gross P&L. A flat empty session is not a
+qualified sample. No data licensing, live fills, real-money readiness or profitable edge is certified.
