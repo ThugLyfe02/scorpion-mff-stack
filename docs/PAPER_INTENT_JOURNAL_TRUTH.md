@@ -369,11 +369,15 @@ merely by distinct public keys.
 The pinned study JSON has schema scorpion.prospective-study.v1, authority RESEARCH_ONLY,
 family_id, kind (COHORT or PAIRED_ENTRY_TRIAL), registered_ts_utc, alpha_units,
 embargo_seconds (at least 86400), minimum_improvement_bps, maximum_challenger_cost_bps,
-soak_sessions, adverse_session_null_rate, adverse_session_alternative_rate, and arms.
+soak_sessions, adverse_session_null_rate, adverse_session_alternative_rate, upstream_source_id,
+and arms. The upstream source declaration must differ from both venue and market source IDs
+in a paired trial.
 Arm order is COHORT or INCUMBENT then CHALLENGER. Each arm contains arm, cohort_sha256,
 artifact_sha256, code_revision (40 lowercase hex), training_manifest_sha256, frozen_ts_utc.
 The exact input index uses schema scorpion.prospective-study-inputs.v1 and arms, each with
 arm, cohort, trust, cost_policy, artifact, training_manifest, sessions (paths relative to index).
+Paired studies additionally provide rosters, an array of session_date, roster, source_artifact,
+and signature paths. Empty before collection; missing elapsed rosters remain unknown.
 The arm cohort and trust/fee-policy bytes are reverified. In a pair, account references and
 frozen rules/artifact hashes must be different; source venue, market source, date roster,
 benchmark/observation horizons and evaluation thresholds must agree.
@@ -396,9 +400,18 @@ The Stage 2 optional signed trial_binding has study_sha256, arm, artifact_sha256
 code_revision, common_roster_sha256, execution_manifest_sha256. These fields are checked
 against the pinned plan and canonical common roster, including signal revision, ticker,
 source/initial clocks, initial target, benchmark, horizon and initial quote identity.
-Both arms must have identical common opportunity rosters and market artifact bytes for a
-session; distinct local journals and venue exports/artifacts; equal horizon midpoint and
-quote ID for a matched route. The execution_manifest_sha256 is the canonical declaration
+Both arms must match the independently signed common opportunity roster and each other, with
+identical market artifact bytes for a session; distinct local journals and venue exports/artifacts;
+equal horizon midpoint and quote ID for a matched route. The independent roster is signed by
+the registrar, not an arm collector or final reviewer, over the exact JSON bytes prefixed by
+b"scorpion.common-entry-roster.v1\x00" (actual NUL). Schema scorpion.common-entry-roster.v1,
+authority RESEARCH_ONLY, study_sha256, session_date, source_id, source_artifact_sha256,
+complete_roster=true, observed_through_ts_utc, signed_ts_utc, routes. Each route carries
+revision_id, ticker, source_ts_utc, initial_ts_utc, target_quantity, decision_midpoint (decimal
+string), horizon_ts_utc, initial_spread_bps (decimal string), initial_quote_event_ns. Source bytes,
+clock bounds and independent signature are verified; a missing or mismatched roster withholds
+the session. Roster artifact and signal identities are included in cross-study reuse protection.
+This attests a declared upstream population, not independently proven live capture completeness. The execution_manifest_sha256 is the canonical declaration
 digest from execution_binding_digest, not a signed remote runtime measurement. The code
 cannot create or run the second strategy or establish independent vendor evidence.
 Selection/abstention outside the common initial-intent population is not evaluated.

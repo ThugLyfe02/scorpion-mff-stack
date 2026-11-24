@@ -598,6 +598,7 @@ REVIEW_CLOCK = AS_OF + timedelta(minutes=1)
 GENESIS = "0" * 64
 RESERVE_DOMAIN = b"scorpion.prospective-study-approval.v1:reserve\x00"
 REVIEW_DOMAIN = b"scorpion.prospective-study-approval.v1:review\x00"
+ROSTER_DOMAIN = b"scorpion.common-entry-roster.v1\x00"
 
 
 @dataclass
@@ -715,7 +716,7 @@ def study_fixture(tmp_path: Path, *, paired: bool = False) -> StudyFixture:
         "embargo_seconds": 86400, "minimum_improvement_bps": 0,
         "maximum_challenger_cost_bps": 100, "soak_sessions": 2,
         "adverse_session_null_rate": 0.1, "adverse_session_alternative_rate": 0.8,
-        "arms": plan_arms,
+        "upstream_source_id": "fixture-independent-roster", "arms": plan_arms,
     })
     put(inputs, {"schema": "scorpion.prospective-study-inputs.v1", "arms": input_arms})
     ctx = StudyFixture(tmp_path, arms, root, root_pin, study, study_pin, inputs,
@@ -723,6 +724,7 @@ def study_fixture(tmp_path: Path, *, paired: bool = False) -> StudyFixture:
     if paired:
         root_obj = _root(root, root_pin)
         study_obj = _study(study, study_pin, inputs, root_obj)
+        roster_index = []
         for arm, spec in zip(arms, study_obj.arms, strict=True):
             evidence = load_verified_paper_cohort(
                 cohort_path=arm.cohort, expected_cohort_sha256=arm.pin, inputs_path=arm.inputs,
@@ -739,6 +741,39 @@ def study_fixture(tmp_path: Path, *, paired: bool = False) -> StudyFixture:
                     "execution_manifest_sha256": execution_binding_digest(study_obj, spec, day, cost),
                 }
                 arm.sign(bundle)
+                if spec.arm == "INCUMBENT":
+                    roster_path = bundle.folder / "upstream-roster.json"
+                    artifact_path = bundle.folder / "upstream-source.json"
+                    signature_path = bundle.folder / "upstream.sig"
+                    artifact_hash = put(artifact_path, {"synthetic": "upstream", "date": str(day)})
+                    put(roster_path, {
+                        "schema": "scorpion.common-entry-roster.v1",
+                        "authority": "RESEARCH_ONLY", "study_sha256": study_pin,
+                        "session_date": str(day), "source_id": "fixture-independent-roster",
+                        "source_artifact_sha256": artifact_hash, "complete_roster": True,
+                        "observed_through_ts_utc": AS_OF.isoformat(), "signed_ts_utc": AS_OF.isoformat(),
+                        "routes": [{
+                            "revision_id": row.revision_id, "ticker": row.ticker,
+                            "source_ts_utc": row.source_ts_utc.isoformat(),
+                            "initial_ts_utc": row.initial_ts_utc.isoformat(),
+                            "target_quantity": row.target_quantity,
+                            "decision_midpoint": str(row.decision_midpoint),
+                            "horizon_ts_utc": row.horizon_ts_utc.isoformat(),
+                            "initial_spread_bps": str(row.initial_spread_bps),
+                            "initial_quote_event_ns": row.initial_quote_event_ns,
+                        } for row in cost.routes],
+                    })
+                    signature_path.write_text(registrar.sign(
+                        ROSTER_DOMAIN + roster_path.read_bytes(),
+                    ).hex())
+                    roster_index.append({
+                        "session_date": str(day), "roster": str(roster_path),
+                        "source_artifact": str(artifact_path), "signature": str(signature_path),
+                    })
+        put(inputs, {
+            "schema": "scorpion.prospective-study-inputs.v1", "arms": input_arms,
+            "rosters": roster_index,
+        })
     return ctx
 
 
@@ -937,3 +972,40 @@ def test_trained_model_requires_declared_purged_folds(tmp_path: Path) -> None:
     ctx.study_pin = put(ctx.study, plan)
     with pytest.raises(PaperQualificationError, match="walk_forward_lineage"):
         ctx.reserve()
+
+
+def test_independent_roster_detects_common_arm_omission(tmp_path: Path) -> None:
+    ctx = study_fixture(tmp_path, paired=True)
+    ctx.reserve()
+    inputs = json.loads(ctx.inputs.read_text())
+    paths = inputs["rosters"][0]
+    path, signature = Path(paths["roster"]), Path(paths["signature"])
+    roster = json.loads(path.read_text())
+    omitted = dict(roster["routes"][0], revision_id="f" * 64, ticker="OMITTED")
+    roster["routes"].append(omitted)
+    put(path, roster)
+    signature.write_text(ctx.registrar.sign(ROSTER_DOMAIN + path.read_bytes()).hex())
+    pair = ctx.assess().paired_entry
+    assert pair is not None
+    assert pair.sessions[0].status == "UNKNOWN"
+    assert pair.sessions[0].expected_routes == 2
+    assert pair.sessions[0].matched_observed == 0
+    assert "paired_common_roster_or_market_mismatch" in pair.sessions[0].reasons
+
+
+def test_missing_or_wrong_signer_roster_cannot_qualify(tmp_path: Path) -> None:
+    ctx = study_fixture(tmp_path, paired=True)
+    ctx.reserve()
+    inputs = json.loads(ctx.inputs.read_text())
+    first = inputs["rosters"].pop(0)
+    put(ctx.inputs, inputs)
+    pair = ctx.assess().paired_entry
+    assert pair is not None
+    assert pair.sessions[0].status == "UNKNOWN"
+    assert "independent_common_roster_unavailable" in pair.sessions[0].reasons
+    inputs["rosters"].insert(0, first)
+    put(ctx.inputs, inputs)
+    path, signature = Path(first["roster"]), Path(first["signature"])
+    signature.write_text(ctx.reviewer.sign(ROSTER_DOMAIN + path.read_bytes()).hex())
+    with pytest.raises(PaperQualificationError, match="common_roster_signature"):
+        ctx.assess()

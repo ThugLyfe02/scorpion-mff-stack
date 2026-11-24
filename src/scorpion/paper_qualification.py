@@ -147,6 +147,7 @@ class PairedEntryAssessment:
     recent_soak_mean_challenger_cost_bps: float | None
     degradation: PaperDegradationEvidence
     upstream_rosters: tuple[tuple[date, str, str], ...]
+    upstream_revision_keys: tuple[str, ...]
     blockers: tuple[str, ...]
     estimand: str = "MATCHED_EXTERNAL_PAPER_ENTRY_COST_NOT_CAUSAL_POLICY_VALUE"
 
@@ -603,12 +604,13 @@ def _load_common_roster(
         source, initial = _stamp(row["source_ts_utc"]), _stamp(row["initial_ts_utc"])
         horizon = _stamp(row["horizon_ts_utc"])
         event_ns = row["initial_quote_event_ns"]
+        initial_ns = int(initial.timestamp()) * 1_000_000_000 + initial.microsecond * 1000
         if (
             revision in entries or not source <= initial
             or not hours[0] <= initial < horizon < hours[1]
             or horizon - initial != timedelta(seconds=study.arms[0].cost_horizon)
             or not isinstance(event_ns, int) or isinstance(event_ns, bool)
-            or not 0 < event_ns <= int(initial.timestamp()) * 1_000_000_000 + initial.microsecond * 1000
+            or not 0 < event_ns <= initial_ns
         ):
             raise PaperQualificationError("common_roster_identity_or_clock_conflict")
         entries[revision] = (
@@ -821,7 +823,9 @@ def _paired(
         blockers.append("sequential_adverse_session_alarm")
     return PairedEntryAssessment(
         tuple(rows), endpoint, axes, complete, observed, worst, recent_delta, recent_cost,
-        degradation, tuple(roster_rows), tuple(dict.fromkeys(blockers)),
+        degradation, tuple(roster_rows),
+        tuple(sorted(stable_hash(("revision", key)) for key in seen_roster_revisions)),
+        tuple(dict.fromkeys(blockers)),
     )
 
 
@@ -895,6 +899,7 @@ def _dossier(
         identity_set.update(stable_hash(("artifact", digest))
                             for _, source, export in paired.upstream_rosters
                             for digest in (source, export))
+        identity_set.update(paired.upstream_revision_keys)
     identities = tuple(sorted(identity_set))
     if training.intersection(identities):
         raise PaperQualificationError("training_evaluation_artifact_overlap")
