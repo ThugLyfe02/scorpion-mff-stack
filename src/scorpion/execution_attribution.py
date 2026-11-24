@@ -4,15 +4,17 @@ import hashlib
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal, localcontext
+from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .causal_features import PaperIntentFeatureRow, load_paper_intent_features
+from .config import MARKET_TZ
 from .domain import EventKind
 from .microstructure import OptionMicrostructureTape, ns_from_datetime
 from .microstructure_forensics import MicroForensicLeg, MicrostructureForensicsReport
 from .provenance import stable_hash
+from .session_calendar import CalendarNotCovered, session_hours
 
 if TYPE_CHECKING:
     from .execution_meta_labels import PaperOutcomeAdmission, PaperOutcomeLabel
@@ -302,6 +304,7 @@ class PaperRouteCost:
     chase_notional_usd: Decimal | None
     available_ts_utc: datetime | None
     reason: str
+    chase_order_observed: bool = False
 
     @property
     def complete(self) -> bool:
@@ -510,8 +513,14 @@ def _route_cost(
 
     if globally_blocked:
         return withheld("EXPORT_OR_FEATURE_COVERAGE_CONFLICT")
-    if policy.registered_ts_utc > initial_time:
-        return withheld("POLICY_REGISTERED_AFTER_INTENT")
+    if policy.registered_ts_utc > _stamp(initial.features["source_ts_utc"]):
+        return withheld("POLICY_REGISTERED_AFTER_SIGNAL")
+    try:
+        hours = session_hours(initial_time.astimezone(MARKET_TZ).date())
+    except CalendarNotCovered:
+        return withheld("MARKET_CALENDAR_UNAVAILABLE")
+    if hours is None or not hours[0] <= initial_time <= deadline < hours[1]:
+        return withheld("HORIZON_OUTSIDE_REGULAR_SESSION")
     if (
         mark is None or not mark.route_closed or mark.initial_feature_hash != initial.feature_sha256
         or mark.ticker != initial.ticker or mark.target != deadline
@@ -536,7 +545,7 @@ def _route_cost(
     if chase_label is not None:
         if chase_label.venue_order_id is None:
             if initial_label.observed_fill_target == 0:
-                return withheld("CHASEROUTE_UNOBSERVED")
+                return withheld("CHASE_ROUTE_UNOBSERVED")
         else:
             if (
                 initial_label.outcome not in (
@@ -552,6 +561,7 @@ def _route_cost(
     notional = timing = within = fees = Decimal(0)
     initial_net_fees = chase_net_fees = chase_notional = Decimal(0)
     initial_qty = chase_qty = 0
+    chase_observed = False
     for label, cost in active:
         q, n = cost.filled_quantity, cost.filled_notional_usd
         gross, charge, rebate = cost.gross_slippage_usd, cost.fees_usd, cost.rebates_usd
@@ -566,6 +576,7 @@ def _route_cost(
             initial_qty, initial_net_fees = q, charge - rebate
         else:
             chase_qty, chase_net_fees, chase_notional = q, charge - rebate, n
+            chase_observed = True
     if qty > target:
         return withheld("PARENT_TARGET_OVERFILL")
     horizon_mid = (mark.bid + mark.ask) / 2
@@ -581,6 +592,7 @@ def _route_cost(
         horizon_mid, mark.quote_id, qty, initial_qty, chase_qty, notional, timing, within,
         fees, opportunity, shortfall, shortfall / (target * benchmark) * _BPS,
         initial_net_fees, chase_net_fees, chase_notional, available, "OBSERVED_PAPER_ROUTE",
+        chase_order_observed=chase_observed,
     )
 
 
@@ -598,8 +610,9 @@ def build_paper_execution_cost_report(
         _unique_json,
     )
 
-    with localcontext() as ctx:
-        ctx.prec = 50
+    # Stage 1 feature/label identity uses its original canonical 28-digit precision.
+    # The money decomposition below has a separate, fixed high-precision context.
+    with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
         outcome = admission.verify()
         evidence = load_paper_intent_features(admission.journal_path)
         if evidence.journal_sha256 != outcome.journal_sha256:

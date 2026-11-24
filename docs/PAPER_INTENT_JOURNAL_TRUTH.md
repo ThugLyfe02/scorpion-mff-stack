@@ -168,8 +168,10 @@ The decomposition must equal sum(N_i)-sum(q_i)*B+F+opportunity exactly.
 Order-level gross slippage remains descriptive if fees are absent; route net
 shortfall is withheld if any required outcome, fee, mark, horizon or route closure is missing.
 Partial fills keep the original Q; a reduced chase target never silently erases opportunity cost.
+The predeclared horizon must fit within the same regular session, including early closes.
+Stage 1 feature hashes use canonical decimal precision; costs use a fixed 50-digit context.
 
-For an observed positive chase following an attested terminal zero-fill initial order,
+For an observed terminal chase following an attested terminal zero-fill initial order,
 the no-chase reference retains the initial fees and marks all Q unfilled at the same H.
 The difference is the observed chase notional minus chase quantity times H plus chase
 net fees. This is a path-conditional reference, not an estimated counterfactual fill,

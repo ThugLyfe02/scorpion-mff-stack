@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from decimal import Decimal, localcontext
+from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from pathlib import Path
 
 from .association import associate_followup_with_evidence
@@ -205,12 +205,13 @@ def _compare_no_chase(route: PaperRouteCost) -> PaperNoChaseComparison:
     if not route.complete:
         return withheld("ROUTE_NOT_QUALIFIED")
     if (
-        route.initial_filled_quantity != 0 or not route.chase_filled_quantity
+        route.initial_filled_quantity != 0 or not route.chase_order_observed
+        or route.chase_filled_quantity is None
         or route.horizon_midpoint is None or route.initial_net_fees_usd is None
         or route.chase_net_fees_usd is None or route.chase_notional_usd is None
         or route.net_shortfall_usd is None
     ):
-        return withheld("NO_OBSERVED_POSITIVE_CHASE_AFTER_ZERO_FILL")
+        return withheld("NO_OBSERVED_CHASE_AFTER_ZERO_FILL")
     # Conditional reference: remove only the executed chase on this observed path,
     # retaining the initial cancellation's cost and marking the same parent quantity.
     # This does not simulate an alternative fill, an exit, or a policy intervention.
@@ -239,8 +240,7 @@ def compare_paper_no_chase(cost: PaperExecutionCostReport) -> PaperNoChaseReport
     permissions. In particular, it must not be inserted into the policy-value evaluator
     as independent challenger rewards.
     """
-    with localcontext() as ctx:
-        ctx.prec = 50
+    with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
         if len({row.call_id for row in cost.routes}) != len(cost.routes):
             raise ValueError("duplicate paper route")
         rows = tuple(_compare_no_chase(route) for route in cost.routes)

@@ -5,7 +5,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Context, Decimal, InvalidOperation, localcontext
 from pathlib import Path
 
 from .processing_order import ensure_processing_order_schema
@@ -542,9 +542,11 @@ def load_paper_intent_features(
             if decision is None:
                 refuse("missing_prior_decision")
                 continue
-            feature = _intent_features(
-                decision, row, journal_hash, max_quote_age_ms * 1_000_000,
-            )
+            # Freeze v1 arithmetic so a caller's Decimal context cannot change evidence IDs.
+            with localcontext(Context(prec=28, rounding=ROUND_HALF_EVEN)):
+                feature = _intent_features(
+                    decision, row, journal_hash, max_quote_age_ms * 1_000_000,
+                )
             role = (feature.call_id, feature.role)
             if role in seen_roles:
                 raise ValueError("duplicate intent role")

@@ -6,7 +6,7 @@ import re
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from enum import StrEnum
 from pathlib import Path
 
@@ -542,8 +542,10 @@ def _observe(
         or order.terminal is None or order.terminal > deadline
     ):
         return PaperOutcome.CENSORED, "terminal_horizon_not_observed", None, None
-    average = sum((price * qty for _, qty, price, _ in order.fills), Decimal(0))
-    avg = average / total if total else None
+    # Keep legacy label identity deterministic even inside a high-precision cost calculation.
+    with localcontext(Context(prec=28, rounding=ROUND_HALF_EVEN)):
+        average = sum((price * qty for _, qty, price, _ in order.fills), Decimal(0))
+        avg = average / total if total else None
     if order.state == "REJECTED":
         return PaperOutcome.REJECTED, "explicit_venue_rejection", 0, None
     if total == order.quantity:
@@ -555,6 +557,11 @@ def _observe(
         else PaperOutcome.EXPIRED_NO_FILL
     )
     return outcome, "explicit_terminal_zero_fill", 0, None
+
+
+def _exact_fill_notional(order: _PaperOrder) -> Decimal:
+    with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
+        return sum((qty * px for _, qty, px, _ in order.fills), Decimal(0))
 
 
 def admit_paper_outcome_labels(
@@ -668,7 +675,7 @@ def admit_paper_outcome_labels(
             outcome, reason, int(feature.features["quantity"]), quantity, price,
             order.order_id if order else None, available, stable_hash(material),
             filled_notional_usd=(
-                sum((qty * px for _, qty, px, _ in order.fills), Decimal(0))
+                _exact_fill_notional(order)
                 if order is not None and quantity is not None else None
             ),
             terminal_ts_utc=order.terminal if order is not None and quantity is not None else None,
