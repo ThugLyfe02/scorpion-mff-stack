@@ -25,3 +25,14 @@ timestamp withdraw the cached quote until a strictly newer event arrives; a time
 cannot establish ordering between distinct updates. The subscription universe bounds admission;
 unsolicited symbols cannot refresh feed liveness. A failed dynamic subscription can be retried.
 Naive timestamps and monotonic regressions are not accepted as healthy quote evidence.
+
+## Research-only signal decay: paired latency frontier
+
+The existing latency-value frontier still replays the same forensic engine. Each scenario now
+retains depth-evidenced completed trade identities; adjacent delays expose matched return and gross
+P&L changes separately from the original aggregate differences. Faster-only and slower-only trades
+are counted, never imputed as zeros. The equal-session-weighted descriptive comparison exposes
+concentration by session. An empty match produces no estimate. Minimum matched trades, sessions and
+coverage are descriptive evidence gates, not statistical significance or a promotion criterion.
+This is a latency intervention on historical modeled outcomes, not a live signal half-life estimate.
+No strategy, execution policy, risk limit or permission changes based on this report.
