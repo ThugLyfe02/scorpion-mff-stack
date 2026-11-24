@@ -363,7 +363,10 @@ def _fields(value: dict[str, object], expected: set[str]) -> None:
 
 
 def _text(value: object) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > 256:
+    if (
+        not isinstance(value, str) or not value or value != value.strip()
+        or len(value) > 256 or any(ord(char) < 32 for char in value)
+    ):
         raise PaperOutcomeError("invalid_evidence_identity")
     return value
 
@@ -453,8 +456,13 @@ def _parse_order(value: object) -> _PaperOrder:
     _fields(value, {
         "feature_sha256", "venue_order_id", "call_id", "ticker", "role",
         "intent_seq", "requested_quantity", "limit", "state", "submitted_ts_utc",
-        "terminal_ts_utc", "fills",
+        "terminal_ts_utc", "fills", "asset_class", "side", "currency", "quantity_unit",
     })
+    if (
+        value["asset_class"] != "EQUITY" or value["side"] != "BUY"
+        or value["currency"] != "USD" or value["quantity_unit"] != "SHARES"
+    ):
+        raise PaperOutcomeError("paper_order_asset_scope_mismatch")
     if not isinstance(value["fills"], list):
         raise PaperOutcomeError("invalid_fill_list")
     fills: list[tuple[str, int, Decimal, datetime]] = []
@@ -497,7 +505,7 @@ def _observe(
         or (feature.call_id, feature.ticker, feature.role, feature.intent_seq)
         != (order.call_id, order.ticker, order.role, order.intent_seq)
         or order.quantity != feature.features["quantity"]
-        or order.limit != _price(feature.features["limit"])
+        or order.limit != Decimal(str(feature.features["limit"]))
     ):
         return abstain("intent_binding_mismatch")
     if not intent_time <= order.submitted <= observed_through:

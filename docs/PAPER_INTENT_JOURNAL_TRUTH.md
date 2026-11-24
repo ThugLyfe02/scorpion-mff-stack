@@ -93,6 +93,7 @@ authority PAPER_ONLY, source_id, account_ref, trust_sha256, journal_sha256,
 source_artifact_sha256, complete_order_export=true, observed_through_ts_utc, collected_ts_utc,
 reviewed_ts_utc, orders. Each order contains feature_sha256, venue_order_id, call_id, ticker,
 role (INITIAL or CHASE), intent_seq, requested_quantity, limit (decimal string), state,
+asset_class=EQUITY, side=BUY, currency=USD, quantity_unit=SHARES,
 submitted_ts_utc, terminal_ts_utc (null for unresolved), fills (fill_id, quantity, price
 as decimal string, filled_ts_utc). Timestamps must be timezone-aware. The original vendor
 artifact is provided separately and hashed. Both parties sign the exact normalized export bytes,

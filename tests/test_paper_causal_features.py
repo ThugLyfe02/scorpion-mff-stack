@@ -144,6 +144,7 @@ def order_for(row, *, state: str = "FILLED", fills: list[dict] | None = None) ->
         "call_id": row.call_id, "ticker": row.ticker, "role": row.role,
         "intent_seq": row.intent_seq, "requested_quantity": row.features["quantity"],
         "limit": row.features["limit"], "state": state,
+        "asset_class": "EQUITY", "side": "BUY", "currency": "USD", "quantity_unit": "SHARES",
         "submitted_ts_utc": row.features["intent_ts_utc"],
         "terminal_ts_utc": T2 if state not in ("WORKING", "PARTIAL", "UNKNOWN") else None,
         "fills": fills if fills is not None else [fill()],
@@ -315,3 +316,22 @@ def test_unmatched_order_is_counted_not_joined(outcome_fixture) -> None:
     assert report.extra_feature_ids == ("d" * 64,)
     assert report.observed_fill_targets == 0
     assert all(label.outcome is PaperOutcome.UNOBSERVED for label in report.labels)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("asset_class", "OPTION"), ("side", "SELL"),
+    ("currency", "EUR"), ("quantity_unit", "CONTRACTS"),
+])
+def test_equity_label_refuses_other_asset_side_currency_or_units(
+    outcome_fixture, field, value,
+) -> None:
+    outcome_fixture.payload["orders"][0][field] = value
+    with pytest.raises(PaperOutcomeError, match="asset_scope"):
+        outcome_fixture.admit()
+
+
+def test_invalid_order_identity_is_quarantined(outcome_fixture) -> None:
+    outcome_fixture.payload["orders"][0]["ticker"] = "DIFFERENT"
+    report = outcome_fixture.admit()
+    assert report.labels[0].outcome is PaperOutcome.QUARANTINED
+    assert report.observed_fill_targets == 0
