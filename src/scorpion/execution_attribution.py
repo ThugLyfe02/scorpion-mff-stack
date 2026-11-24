@@ -358,6 +358,7 @@ class PaperExecutionCostReport:
     account_ref: str = ""
     source_artifact_sha256: str = ""
     session_coverage: PaperSessionCoverage | None = None
+    report_schema: str = "scorpion.paper-execution-cost-report.v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -704,8 +705,11 @@ def _session_coverage(
             reasons.append("journal_session_transport_incomplete")
     if any(row.get("kind") == "latch" for row in records):
         reasons.append("journal_session_safety_latch_observed")
-    if any(_stamp(row.get("ts_utc")).astimezone(MARKET_TZ).date() != day for row in records):
+    timestamps = [_stamp(row.get("ts_utc")) for row in records]
+    if any(ts.astimezone(MARKET_TZ).date() != day for ts in timestamps):
         reasons.append("journal_record_session_date_conflict")
+    if timestamps != sorted(timestamps):
+        reasons.append("journal_timestamp_regression")
     initial_records = [
         row for row in records if row.get("kind") == "intent" and row.get("chase") is False
     ]
@@ -846,7 +850,7 @@ def build_paper_execution_cost_report(
             ) if "session_coverage" in data else None
         )
         material = {
-            "version": "paper-execution-cost-report-v1", "journal_sha256": outcome.journal_sha256,
+            "version": "paper-execution-cost-report-v2", "journal_sha256": outcome.journal_sha256,
             "outcome_report_sha256": outcome.report_sha256, "policy_sha256": expected_policy_sha256,
             "cost_export_sha256": export_hash, "market_artifact_sha256": market_hash,
             "as_of": as_of, "orders": order_rows, "routes": tuple(routes), "blockers": blockers,
