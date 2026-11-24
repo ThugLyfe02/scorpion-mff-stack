@@ -934,7 +934,13 @@ class ProspectiveFinalization:
     ledger_chain_hash: str
 
 
-def _prospective_connection(path: Path) -> sqlite3.Connection:
+def _prospective_connection(path: Path, *, readonly: bool = False) -> sqlite3.Connection:
+    if readonly:
+        db = sqlite3.connect(
+            path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5.0, isolation_level=None,
+        )
+        db.row_factory = sqlite3.Row
+        return db
     db = sqlite3.connect(str(path), timeout=5.0, isolation_level=None)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA synchronous=FULL")
@@ -1040,7 +1046,7 @@ def read_prospective_reservation(
 ) -> ProspectiveReservation:
     if not path.is_file():
         raise ValueError("prospective registry unavailable")
-    db = _prospective_connection(path)
+    db = _prospective_connection(path, readonly=True)
     try:
         db.execute("BEGIN")
         head = _pinned_prospective_head(db, expected_chain_hash)
@@ -1138,7 +1144,7 @@ def prospective_registry_status(
 ) -> ProspectiveRegistryStatus:
     if not path.is_file():
         raise ValueError("prospective registry unavailable")
-    db = _prospective_connection(path)
+    db = _prospective_connection(path, readonly=True)
     try:
         db.execute("BEGIN")
         report = _pinned_prospective_head(db, expected_chain_hash)
@@ -1162,7 +1168,7 @@ def read_finalized_paper_dossier(
 ) -> dict[str, object]:
     if not path.is_file():
         raise ValueError("prospective registry unavailable")
-    db = _prospective_connection(path)
+    db = _prospective_connection(path, readonly=True)
     try:
         db.execute("BEGIN")
         _pinned_prospective_head(db, expected_chain_hash)

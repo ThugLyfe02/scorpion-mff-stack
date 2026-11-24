@@ -344,3 +344,104 @@ mathematical resolution diagnostics, not empirical power forecasts.
 Both lifecycle markers include the existing safety ledger's verified event count. A changed
 count or invalid ledger blocks full-session evidence even if the latch was rearmed by close.
 This adds two off-hot-path integrity reads; no latch state is changed by the research logic.
+
+
+## P1 stages 3+ and 4 — prospective research qualification
+
+The existing hypothesis-memory ledger now stores signed reservations and one-shot finalizations
+on the same hash chain. Alpha is reserved in integer billionths **before** the first session;
+the lifetime prospective budget is 50,000,000 units (0.05). No refund on rejection, no overlap
+of exchange dates even across family aliases, one root per registry, and no replay of finalized
+evidence identities. This is intentionally conservative: concurrent independent studies must
+use nonoverlapping rosters or be treated as one paired trial, not create extra registry roots.
+Legacy exploratory hypothesis resolutions are not counted in this new prospective budget.
+A separately administered, latest external checkpoint is mandatory: a local SQLite hash chain
+alone cannot prevent restoring an older valid database or cloning a fresh ledger. The operator
+must retain the latest chain hash outside the research/optimizer process. The CLI never signs.
+
+The root file (externally pinned exact SHA-256) has schema scorpion.prospective-study-root.v1,
+authority RESEARCH_ONLY, registry_id, registered_ts_utc, registrar_id, registrar_public_key,
+reviewer_id, reviewer_public_key. Keys are lowercase raw Ed25519 32-byte hex. The registration
+and review keys must differ from one another and from the arm collector/reviewer IDs and keys.
+Separate custody and trusted clock/registration are operational requirements, not established
+merely by distinct public keys.
+
+The pinned study JSON has schema scorpion.prospective-study.v1, authority RESEARCH_ONLY,
+family_id, kind (COHORT or PAIRED_ENTRY_TRIAL), registered_ts_utc, alpha_units,
+embargo_seconds (at least 86400), minimum_improvement_bps, maximum_challenger_cost_bps,
+soak_sessions, adverse_session_null_rate, adverse_session_alternative_rate, and arms.
+Arm order is COHORT or INCUMBENT then CHALLENGER. Each arm contains arm, cohort_sha256,
+artifact_sha256, code_revision (40 lowercase hex), training_manifest_sha256, frozen_ts_utc.
+The exact input index uses schema scorpion.prospective-study-inputs.v1 and arms, each with
+arm, cohort, trust, cost_policy, artifact, training_manifest, sessions (paths relative to index).
+The arm cohort and trust/fee-policy bytes are reverified. In a pair, account references and
+frozen rules/artifact hashes must be different; source venue, market source, date roster,
+benchmark/observation horizons and evaluation thresholds must agree.
+The training lineage file scorpion.frozen-training-lineage.v1, authority RESEARCH_ONLY,
+contains artifact_sha256, code_revision, rules_sha256, trained_through_ts_utc,
+labels_available_through_ts_utc, frozen_ts_utc, training_data_sha256 (nonempty digest list).
+Actual artifact bytes and lineage bytes are pinned; label availability and freeze must precede
+the holdout with the embargo. This checks declared lineage, not reconstructing model training.
+No training/holdout data artifact hash overlap is allowed.
+
+The Stage 2 optional signed trial_binding has study_sha256, arm, artifact_sha256,
+code_revision, common_roster_sha256, execution_manifest_sha256. These fields are checked
+against the pinned plan and canonical common roster, including signal revision, ticker,
+source/initial clocks, initial target, benchmark, horizon and initial quote identity.
+Both arms must have identical common opportunity rosters and market artifact bytes for a
+session; distinct local journals and venue exports/artifacts; equal horizon midpoint and
+quote ID for a matched route. The execution_manifest_sha256 is the canonical declaration
+digest from execution_binding_digest, not a signed remote runtime measurement. The code
+cannot create or run the second strategy or establish independent vendor evidence.
+Selection/abstention outside the common initial-intent population is not evaluated.
+No unmatched route is counted as zero. No synthetic order/fee/return is manufactured.
+Stage 2 report schema is now v3; historical v2 reports remain reproducible at prior commits.
+
+Approvals are detached lowercase hex Ed25519 signatures over exact JSON bytes, domain
+b"scorpion.prospective-study-approval.v1:reserve\x00" or
+b"scorpion.prospective-study-approval.v1:review\x00" (actual NUL).
+Common approval schema scorpion.prospective-study-approval.v1, authority RESEARCH_ONLY,
+action RESERVE/REVIEW, root_sha256, study_sha256, ledger_chain_hash, signer_id,
+issued_ts_utc, expires_ts_utc (maximum 7 days). Review adds dossier_sha256 and disposition
+(PAPER_RESEARCH_REVIEWED, INCONCLUSIVE or REJECTED). Reserve uses registrar; final review uses
+independent reviewer. Registration, ledger pin, signatures and actual UTC clock checked;
+finalization recomputes the original evidence at the exact reviewed cutoff, so changed inputs
+cannot reuse the old approval. Both approval bytes/signatures and final canonical dossier
+are retained in append-only records. No signature authorizes a model, runtime or brokerage.
+
+    python -m scorpion paper-study-reserve --registry /private/hypotheses.db \
+      --root /private/root.json --root-sha256 ROOT_PIN --study /private/study.json \
+      --study-sha256 STUDY_PIN --inputs /private/study-inputs.json \
+      --ledger-chain-sha256 CURRENT_EXTERNALLY_PINNED_CHAIN \
+      --approval /private/reserve.json --signature /private/reserve.sig
+
+    python -m scorpion paper-study-assess --registry /private/hypotheses.db \
+      --root /private/root.json --root-sha256 ROOT_PIN --study /private/study.json \
+      --study-sha256 STUDY_PIN --inputs /private/study-inputs.json \
+      --ledger-chain-sha256 CURRENT_EXTERNALLY_PINNED_CHAIN --as-of CUTOFF
+
+    python -m scorpion paper-study-finalize --registry /private/hypotheses.db \
+      --root /private/root.json --root-sha256 ROOT_PIN --study /private/study.json \
+      --study-sha256 STUDY_PIN --inputs /private/study-inputs.json \
+      --ledger-chain-sha256 CURRENT_EXTERNALLY_PINNED_CHAIN --as-of CUTOFF \
+      --approval /private/review.json --signature /private/review.sig
+
+Status and dossier inspection: paper-study-status or paper-study-dossier, --registry,
+--root-sha256, --ledger-chain-sha256 (dossier additionally --study-sha256).
+After a write independently retain the returned new chain hash; before another write
+verify against that pin. Genesis is 64 zeros for an empty ledger. Do not reset or fork.
+The prior paper-session-statistics command remains an unreserved diagnostic only.
+
+Paired entry improvement = incumbent shortfall minus challenger shortfall (higher is better).
+The primary endpoint reuses the session-bounded inference and concentration diagnostics,
+with 80% of the reserved alpha. The fixed adverse-session Bernoulli e-process receives 20%;
+the null is a bounded predictable conditional adverse-session probability. Unknown sessions
+supply lower indicators only; no alarm is not proof of health. A final dossier requires all
+planned sessions elapsed, complete paired coverage, independent session diversity, raw tail
+and absolute challenger-cost guards, robust observed marginal regimes, positive sequential
+lower bound, and recent fixed-window soak performance. An alarm blocks readiness.
+The arm reports are exploratory diagnostics only within a paired study, not separately
+confirmatory hypotheses with extra alpha. This is not a randomized causal strategy trial,
+portfolio P&L, or whole-strategy qualification: exits, independently observed round-trip
+economics, allocation/risk, authentic market data, strategy deployment and production approval
+remain outside this boundary. The only positive disposition is paper research reviewed.

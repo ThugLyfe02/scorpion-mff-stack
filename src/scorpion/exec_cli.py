@@ -358,6 +358,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     stats.add_argument("--trust", type=Path, required=True)
     stats.add_argument("--cost-policy", type=Path, required=True)
     stats.add_argument("--as-of", required=True)
+    reserve = sub.add_parser("paper-study-reserve")
+    assess = sub.add_parser("paper-study-assess")
+    finalize = sub.add_parser("paper-study-finalize")
+    registry = sub.add_parser("paper-study-status")
+    dossier = sub.add_parser("paper-study-dossier")
+    for command in (reserve, assess, finalize, registry, dossier):
+        command.add_argument("--registry", type=Path, required=True)
+        command.add_argument("--root-sha256", required=True)
+        command.add_argument("--ledger-chain-sha256", required=True)
+    for command in (reserve, assess, finalize):
+        command.add_argument("--root", type=Path, required=True)
+        command.add_argument("--study", type=Path, required=True)
+        command.add_argument("--study-sha256", required=True)
+        command.add_argument("--inputs", type=Path, required=True)
+    dossier.add_argument("--study-sha256", required=True)
+    for command in (reserve, finalize):
+        command.add_argument("--approval", type=Path, required=True)
+        command.add_argument("--signature", type=Path, required=True)
+    for command in (assess, finalize):
+        command.add_argument("--as-of", required=True)
     rp = sub.add_parser("replay")
     rp.add_argument("--date")
     rp.add_argument("--input", type=Path, default=REPLAY_FIXTURE)
@@ -381,6 +401,75 @@ def main(argv: Sequence[str] | None = None) -> int:
     pull.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
 
+    if args.command in (
+        "paper-study-reserve", "paper-study-assess", "paper-study-finalize",
+        "paper-study-status", "paper-study-dossier",
+    ):
+        import sqlite3
+        from dataclasses import asdict
+
+        from .paper_qualification import (
+            PaperQualificationError,
+            assess_paper_study,
+            finalize_paper_study,
+            reserve_paper_study,
+        )
+        from .research_hypothesis_memory import (
+            prospective_registry_status,
+            read_finalized_paper_dossier,
+        )
+        from .session_calendar import CalendarNotCovered
+        from .session_service import JournalError
+
+        try:
+            if args.command == "paper-study-status":
+                _print(asdict(prospective_registry_status(
+                    args.registry, root_sha256=args.root_sha256,
+                    expected_chain_hash=args.ledger_chain_sha256,
+                )))
+                return 0
+            if args.command == "paper-study-dossier":
+                _print(read_finalized_paper_dossier(
+                    args.registry, study_sha256=args.study_sha256,
+                    root_sha256=args.root_sha256, expected_chain_hash=args.ledger_chain_sha256,
+                ))
+                return 0
+            if args.command == "paper-study-reserve":
+                _print(asdict(reserve_paper_study(
+                    registry_path=args.registry, root_path=args.root,
+                    root_sha256=args.root_sha256, study_path=args.study,
+                    study_sha256=args.study_sha256, inputs_path=args.inputs,
+                    expected_chain_hash=args.ledger_chain_sha256,
+                    approval_path=args.approval, signature_path=args.signature,
+                )))
+                return 0
+            cutoff = datetime.fromisoformat(args.as_of)
+            if cutoff.tzinfo is None or cutoff > datetime.now(UTC):
+                raise PaperQualificationError("invalid_or_future_study_cutoff")
+            if args.command == "paper-study-finalize":
+                _print(asdict(finalize_paper_study(
+                    registry_path=args.registry, root_path=args.root,
+                    root_sha256=args.root_sha256, study_path=args.study,
+                    study_sha256=args.study_sha256, inputs_path=args.inputs,
+                    expected_chain_hash=args.ledger_chain_sha256, as_of=cutoff,
+                    approval_path=args.approval, signature_path=args.signature,
+                )))
+                return 0
+            study_report = assess_paper_study(
+                registry_path=args.registry, root_path=args.root,
+                root_sha256=args.root_sha256, study_path=args.study,
+                study_sha256=args.study_sha256, inputs_path=args.inputs,
+                expected_chain_hash=args.ledger_chain_sha256, as_of=cutoff,
+            )
+            _print(asdict(study_report))
+            return 0 if study_report.status == "READY_FOR_INDEPENDENT_PAPER_REVIEW" else 1
+        except PaperQualificationError as exc:
+            _print({"ok": False, "reason": str(exc)})
+            return 1
+        except (OSError, ValueError, ImportError, JournalError, CalendarNotCovered,
+                sqlite3.Error) as exc:
+            _print({"ok": False, "reason": type(exc).__name__})
+            return 1
     if args.command == "paper-session-statistics":
         from dataclasses import asdict
 

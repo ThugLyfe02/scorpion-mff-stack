@@ -43,6 +43,7 @@ from .research_hypothesis_memory import (
     _reserve_prospective_study,
     read_prospective_reservation,
 )
+from .sequential_evidence import BernoulliEPolicy, BernoulliEProcess, SequentialEvidenceStatus
 from .session_calendar import session_hours
 
 _RESERVE_DOMAIN = b"scorpion.prospective-study-approval.v1:reserve\x00"
@@ -101,6 +102,8 @@ class ProspectiveStudy:
     minimum_improvement_bps: float
     maximum_challenger_cost_bps: float
     soak_sessions: int
+    adverse_session_null_rate: float
+    adverse_session_alternative_rate: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +119,17 @@ class PairedSession:
 
 
 @dataclass(frozen=True, slots=True)
+class PaperDegradationEvidence:
+    observed_sessions: int
+    confirmed_adverse_sessions: int
+    unknown_sessions: int
+    alpha: float
+    anytime_p_value: float
+    max_log_e_value: float
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
 class PairedEntryAssessment:
     sessions: tuple[PairedSession, ...]
     endpoint: PaperEndpointStatistics
@@ -125,6 +139,7 @@ class PairedEntryAssessment:
     challenger_worst_route_cost_bps: float | None
     recent_soak_mean_improvement_bps: float | None
     recent_soak_mean_challenger_cost_bps: float | None
+    degradation: PaperDegradationEvidence
     blockers: tuple[str, ...]
     estimand: str = "MATCHED_EXTERNAL_PAPER_ENTRY_COST_NOT_CAUSAL_POLICY_VALUE"
 
@@ -290,7 +305,7 @@ def _study(path: Path, digest: str, inputs: Path, root: _Root) -> ProspectiveStu
     _fields(data, {
         "schema", "authority", "family_id", "kind", "registered_ts_utc", "alpha_units",
         "embargo_seconds", "minimum_improvement_bps", "maximum_challenger_cost_bps",
-        "soak_sessions", "arms",
+        "soak_sessions", "arms", "adverse_session_null_rate", "adverse_session_alternative_rate",
     })
     if (
         data["schema"] != "scorpion.prospective-study.v1" or data["authority"] != "RESEARCH_ONLY"
@@ -337,9 +352,13 @@ def _study(path: Path, digest: str, inputs: Path, root: _Root) -> ProspectiveStu
     soak = _count(data["soak_sessions"])
     if not 2 <= soak <= len(first.sessions):
         raise PaperQualificationError("invalid_soak_horizon")
+    null = _number(data["adverse_session_null_rate"], minimum=0.01, maximum=0.98)
+    alternative = _number(data["adverse_session_alternative_rate"], minimum=0.02, maximum=0.99)
+    if alternative <= null:
+        raise PaperQualificationError("invalid_degradation_alternative")
     return ProspectiveStudy(
         digest, family_id, kind, registered, units, embargo, first.sessions, arms,
-        improvement, max_cost, soak,
+        improvement, max_cost, soak, null, alternative,
     )
 
 
@@ -567,7 +586,7 @@ def _paired(
     blockers.extend(_concentration_blockers(_concentration(paired_days), policy))
     endpoint = _endpoint(
         paired_days, policy, "primary", tuple(blockers), 0,
-        alpha_override=study.alpha_units / 1_000_000_000,
+        alpha_override=0.8 * study.alpha_units / 1_000_000_000,
     )
     blockers.extend(endpoint.blockers)
     axes = _regimes(paired_days, policy, "primary")
@@ -594,9 +613,42 @@ def _paired(
         or recent_cost is None or recent_cost > study.maximum_challenger_cost_bps
     ):
         blockers.append("recent_soak_degradation_or_insufficient")
+    degradation = _degradation(tuple(rows), study)
+    if degradation.status == "ALARM":
+        blockers.append("sequential_adverse_session_alarm")
     return PairedEntryAssessment(
         tuple(rows), endpoint, axes, complete, observed, worst, recent_delta, recent_cost,
-        tuple(dict.fromkeys(blockers)),
+        degradation, tuple(dict.fromkeys(blockers)),
+    )
+
+
+def _degradation(rows: tuple[PairedSession, ...], study: ProspectiveStudy) -> PaperDegradationEvidence:
+    alpha = 0.2 * study.alpha_units / 1_000_000_000
+    monitor = BernoulliEProcess(BernoulliEPolicy(
+        null_rate=study.adverse_session_null_rate,
+        alternative_rate=study.adverse_session_alternative_rate, alpha=alpha,
+    ))
+    unknown = 0
+    for row in rows:
+        complete = row.status in ("COVERED_COMPLETE", "COVERED_EMPTY")
+        delta, cost = row.raw_improvement_mean_bps, row.challenger_cost_mean_bps
+        known = complete and delta is not None and cost is not None
+        adverse = bool(
+            known and delta is not None and cost is not None
+            and (delta <= study.minimum_improvement_bps or cost > study.maximum_challenger_cost_bps)
+        )
+        if not known:
+            unknown += 1
+        # Unknown days contribute the lower indicator only, never evidence of health.
+        monitor.observe(adverse)
+    snapshot = monitor.snapshot()
+    status = (
+        "ALARM" if snapshot.status is SequentialEvidenceStatus.ALARM
+        else "UNRESOLVED" if unknown or not rows else "NO_ALARM_NOT_PROOF_OF_HEALTH"
+    )
+    return PaperDegradationEvidence(
+        len(rows) - unknown, snapshot.violations, unknown, alpha, snapshot.anytime_p_value,
+        monitor.max_log_e_value, status,
     )
 
 
