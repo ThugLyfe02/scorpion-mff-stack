@@ -673,6 +673,35 @@ def _session_coverage(
     receipt, records = read_verified_paper_records(journal_path)
     if receipt["sha256"] != journal_sha256:
         raise PaperOutcomeError("journal_changed_during_coverage_verification")
+    # A clean receipt is not necessarily a complete session: the runtime also
+    # closes the journal after faults. Require explicit start and successful end.
+    starts = [row for row in records if row.get("kind") == "session_start"]
+    ends = [row for row in records if row.get("kind") == "session_end"]
+    if len(starts) != 1 or len(ends) != 1 or records[0] != starts[0] or records[-1] != ends[0]:
+        reasons.append("journal_session_lifecycle_incomplete")
+    else:
+        first, last = starts[0], ends[0]
+        if (
+            first.get("session_date") != day.isoformat()
+            or last.get("session_date") != day.isoformat()
+            or first.get("mode") != "PAPER" or last.get("mode") != "PAPER"
+            or first.get("signal_ingress_enabled") is not True
+            or first.get("rules_sha256") != last.get("rules_sha256")
+            or not isinstance(first.get("rules_sha256"), str)
+            or hours is None
+            or not _stamp(first.get("ts_utc")) <= hours[0] < hours[1] <= _stamp(last.get("ts_utc"))
+        ):
+            reasons.append("journal_session_lifecycle_conflict")
+        if (
+            type(last.get("feed_disconnects")) is not int or last["feed_disconnects"] != 0
+            or not isinstance(last.get("feed_messages"), int)
+            or type(last["feed_messages"]) is not int or int(last["feed_messages"]) <= 0
+            or last.get("ingress_overflow") is not False
+            or type(last.get("pending_ingress")) is not int or last["pending_ingress"] != 0
+        ):
+            reasons.append("journal_session_transport_incomplete")
+    if any(row.get("kind") == "latch" for row in records):
+        reasons.append("journal_session_safety_latch_observed")
     initial_records = [
         row for row in records if row.get("kind") == "intent" and row.get("chase") is False
     ]

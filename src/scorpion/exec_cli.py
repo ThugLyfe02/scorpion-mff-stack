@@ -261,6 +261,11 @@ async def _run_session(args: argparse.Namespace) -> int:
 
         ingest_run = discord_ingress
     try:
+        journal.submit({
+            "kind": "session_start", "session_date": today.isoformat(),
+            "ts_utc": datetime.now(UTC).isoformat(), "mode": "PAPER",
+            "rules_sha256": rules.sha256, "signal_ingress_enabled": not args.no_discord,
+        })
         await supervise(
             session,
             monitor=monitor,
@@ -271,6 +276,13 @@ async def _run_session(args: argparse.Namespace) -> int:
             on_new_symbol=feed.add_symbol,
             ingest_run=ingest_run,
         )
+        journal.submit({
+            "kind": "session_end", "session_date": today.isoformat(),
+            "ts_utc": datetime.now(UTC).isoformat(), "mode": "PAPER",
+            "rules_sha256": rules.sha256, "feed_disconnects": feed.stats.disconnects,
+            "feed_messages": feed.stats.messages, "ingress_overflow": overflow.is_set(),
+            "pending_ingress": queue.qsize(),
+        })
     finally:
         try:
             journal.close()
