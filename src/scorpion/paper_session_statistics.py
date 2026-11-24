@@ -210,7 +210,9 @@ class _RouteScore:
             raise PaperCohortError("invalid_route_score_identity")
         if len(self.regimes) != len(_AXES):
             raise PaperCohortError("duplicate_route_regime_axis")
-        if any(value is not None and not math.isfinite(value) for value in (self.primary, self.chase)):
+        if any(
+            value is not None and not math.isfinite(value) for value in (self.primary, self.chase)
+        ):
             raise PaperCohortError("nonfinite_route_score")
         if self.terminal_chase_observed and self.chase is None:
             raise PaperCohortError("observed_chase_without_score")
