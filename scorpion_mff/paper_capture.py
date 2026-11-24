@@ -308,8 +308,8 @@ def compare_capture_venue(run: Path, export_path: Path) -> dict[str, Any]:
     day = date.fromisoformat(summary["session_date"])
     cutoff = export.get("as_of_ts")
     if (
-        type(cutoff) not in (int, float) or not math.isfinite(cutoff)
-        or cutoff < summary["capture_end_ts"]
+        not isinstance(cutoff, (int, float)) or isinstance(cutoff, bool)
+        or not math.isfinite(cutoff) or cutoff < summary["capture_end_ts"]
         or et_date(datetime.fromtimestamp(cutoff, UTC)) != day
     ):
         raise ReconcileError("paper venue snapshot outside capture session")
