@@ -35,7 +35,7 @@ from .paper_session_statistics import (
     _RouteScore,
     load_verified_paper_cohort,
 )
-from .provenance import stable_hash
+from .provenance import canonical_json, stable_hash
 from .research_hypothesis_memory import (
     ProspectiveFinalization,
     ProspectiveReservation,
@@ -343,10 +343,18 @@ def _study(path: Path, digest: str, inputs: Path, root: _Root) -> ProspectiveStu
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _Approval:
+    digest: str
+    raw_hex: str
+    signature: str
+    disposition: str
+
+
 def _approval(
     path: Path, signature_path: Path, root: _Root, study: ProspectiveStudy,
     expected_chain: str, now: datetime, *, dossier: PaperQualificationDossier | None = None,
-) -> tuple[str, str]:
+) -> _Approval:
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -391,7 +399,10 @@ def _approval(
                 and dossier.status != "READY_FOR_INDEPENDENT_PAPER_REVIEW")
         ):
             raise PaperQualificationError("study_review_disposition_or_dossier_mismatch")
-    return stable_hash((hashlib.sha256(raw).hexdigest(), signature.hex())), disposition
+    return _Approval(
+        stable_hash((hashlib.sha256(raw).hexdigest(), signature.hex())),
+        raw.hex(), signature.hex(), disposition,
+    )
 
 
 def reserve_paper_study(
@@ -406,13 +417,14 @@ def reserve_paper_study(
     first, _ = _open_close(study.sessions)
     if not study.registered <= clock < first:
         raise PaperQualificationError("study_reservation_not_prospective")
-    approval, _ = _approval(
+    approval = _approval(
         approval_path, signature_path, root, study, expected_chain_hash, clock,
     )
     return _reserve_prospective_study(
         registry_path, study_sha256=study.digest, root_sha256=root.digest,
         family_id=study.family_id, study_kind=study.kind, alpha_units=study.alpha_units,
-        sessions=study.sessions, approval_sha256=approval,
+        sessions=study.sessions, approval_sha256=approval.digest,
+        approval_raw_hex=approval.raw_hex, approval_signature=approval.signature,
         expected_chain_hash=expected_chain_hash, now=clock,
     )
 
@@ -421,6 +433,7 @@ def _roster_material(route: PaperRouteCost) -> tuple[object, ...]:
     return (
         route.revision_id, route.ticker, route.source_ts_utc, route.initial_ts_utc,
         route.target_quantity, route.decision_midpoint, route.horizon_ts_utc,
+        route.initial_spread_bps, route.initial_quote_event_ns,
     )
 
 
@@ -522,6 +535,14 @@ def _paired(
 ) -> PairedEntryAssessment:
     policy = replace(left.policy, minimum_primary_score_bps=study.minimum_improvement_bps)
     left_costs, right_costs = dict(left.costs), dict(right.costs)
+    left_private = {identity for _, c in left.costs for identity in (
+        c.journal_sha256, c.outcome_export_sha256, c.source_artifact_sha256, c.cost_export_sha256,
+    )}
+    right_private = {identity for _, c in right.costs for identity in (
+        c.journal_sha256, c.outcome_export_sha256, c.source_artifact_sha256, c.cost_export_sha256,
+    )}
+    if left_private.intersection(right_private):
+        raise PaperQualificationError("paired_arm_execution_artifact_reuse")
     paired_days: list[_Day] = []
     rows: list[PairedSession] = []
     challenger_costs: list[float] = []
@@ -663,12 +684,13 @@ def finalize_paper_study(
         expected_chain_hash=expected_chain_hash,
     )
     dossier = _dossier(root, study, reservation, cutoff)
-    approval, disposition = _approval(
+    approval = _approval(
         approval_path, signature_path, root, study, expected_chain_hash, clock, dossier=dossier,
     )
     return _finalize_prospective_study(
         registry_path, study_sha256=study.digest, root_sha256=root.digest,
-        dossier_sha256=dossier.dossier_sha256, approval_sha256=approval,
-        expected_chain_hash=expected_chain_hash, disposition=disposition, now=clock,
-        evidence_keys=dossier.evidence_identities,
+        dossier_sha256=dossier.dossier_sha256, approval_sha256=approval.digest,
+        approval_raw_hex=approval.raw_hex, approval_signature=approval.signature,
+        expected_chain_hash=expected_chain_hash, disposition=approval.disposition, now=clock,
+        evidence_keys=dossier.evidence_identities, dossier_json=canonical_json(dossier),
     )

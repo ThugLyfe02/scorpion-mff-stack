@@ -191,6 +191,7 @@ class PaperSessionCohortReport:
     authority: str = "RESEARCH_ONLY"
     estimand: str = "EQUAL_SESSION_CLIPPED_ENTRY_COST_SCORE_NOT_RETURN_OR_CAUSAL_ALPHA"
     familywise_alpha_scope: str = "TWO_PINNED_ENDPOINTS_WITHIN_THIS_COHORT_ONLY"
+    governance_scope: str = "DIAGNOSTIC_ONLY_REQUIRES_RESERVED_STUDY"
     authorizes_training: bool = False
     authorizes_promotion: bool = False
     certifies_live_fills: bool = False

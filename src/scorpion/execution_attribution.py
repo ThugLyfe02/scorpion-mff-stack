@@ -311,6 +311,7 @@ class PaperRouteCost:
     initial_spread_bps: Decimal | None = None
     initial_quote_age_ms: Decimal | None = None
     initial_signal_age_ms: Decimal | None = None
+    initial_quote_event_ns: int | None = None
     revision_id: str = ""
 
     @property
@@ -536,6 +537,7 @@ def _route_cost(
     spread = Decimal(str(initial.features["spread_bps"]))
     quote_age = Decimal(str(initial.features["quote_age_ns"])) / 1_000_000
     signal_age = Decimal(str(initial.features["source_age_ms"]))
+    quote_event_ns = int(initial.features["quote_event_ns"])
     revision = str(initial.features["revision_id"])
 
     def withheld(reason: str) -> PaperRouteCost:
@@ -553,6 +555,7 @@ def _route_cost(
             chase_notional_usd=None, available_ts_utc=None, reason=reason,
             initial_ts_utc=initial_time, source_ts_utc=source_time, initial_spread_bps=spread,
             initial_quote_age_ms=quote_age, initial_signal_age_ms=signal_age, revision_id=revision,
+            initial_quote_event_ns=quote_event_ns,
         )
 
     if globally_blocked:
@@ -639,6 +642,7 @@ def _route_cost(
         chase_order_observed=chase_observed,
         initial_ts_utc=initial_time, source_ts_utc=source_time, initial_spread_bps=spread,
         initial_quote_age_ms=quote_age, initial_signal_age_ms=signal_age, revision_id=revision,
+        initial_quote_event_ns=quote_event_ns,
     )
 
 
