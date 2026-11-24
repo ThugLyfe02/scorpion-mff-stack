@@ -17,3 +17,25 @@ Discord-enabled service. No real credentials or order submission are involved.
 Remaining: causal equity fill-state simulation, fees, real licensed feed
 validation, complete restart recovery, and external paper comparison. This
 change does not claim to fill or certify trades.
+
+
+## Follow-up: immutable paper evidence and explicit admission
+
+The existing JSONL writer now freezes records at admission and binds its own byte digest,
+record count and sequence to a sidecar receipt only after fsync, close and independent readback.
+A missing, torn, changed or reordered journal cannot verify. The receipt is local evidence,
+not a signature or proof of source authenticity. Use:
+
+```sh
+python -m scorpion verify-paper-journal --journal /private/session.jsonl
+```
+
+The forward service records content/revision hashes and source/receive timestamps, the
+locked rules hash and the quote actually used for the intent. It rejects foreign guilds,
+noncausal messages and unauthorized authors. Exact creates are deduplicated, and a conflicting
+create trips the existing latch. Revisions retain the existing ignore policy. Bounded Discord
+queue overflow explicitly reaches supervision instead of relying on callback exceptions.
+
+A valid receipt establishes journal closure and byte identity only. No fill or profitability
+is asserted. Raw private messages and market captures must remain outside Git. Crash recovery
+and provider/venue authentication remain external prerequisites.

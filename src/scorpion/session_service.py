@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import math
@@ -29,12 +30,13 @@ from functools import partial
 from pathlib import Path
 
 from .alerts import Page, Pager
-from .broker import ExecutionMode, ExecutionResult, PaperIntentBroker, ReviewOnlyBroker
+from .broker import ExecutionMode, ExecutionResult, PaperIntentBroker, Quote, ReviewOnlyBroker
 from .config import (
     ALLOWED_CHANNEL_IDS,
     CHANNELS,
     EXECUTION_COMPONENT,
     EXECUTION_LIMITS,
+    GUILD_ID,
     MARKET_TZ,
     STALE_POLICY,
     ExecutionLimits,
@@ -60,6 +62,52 @@ class JournalError(RuntimeError):
     """The paper evidence stream cannot be trusted to persist."""
 
 
+def journal_receipt_path(path: Path) -> Path:
+    return path.with_name(path.name + ".receipt.json")
+
+
+def journal_identity(path: Path) -> dict[str, object]:
+    """Verify the framing and sequence while computing an exact-byte identity."""
+    digest = hashlib.sha256()
+    count = 0
+    size = 0
+    try:
+        with path.open("rb") as handle:
+            for line in handle:
+                if not line.endswith(b"\n"):
+                    raise JournalError("journal_incomplete_record")
+                row = json.loads(line)
+                count += 1
+                if (
+                    not isinstance(row, dict) or type(row.get("seq")) is not int
+                    or row["seq"] != count
+                ):
+                    raise JournalError("journal_sequence_mismatch")
+                size += len(line)
+                digest.update(line)
+    except (OSError, ValueError) as exc:
+        raise JournalError(f"journal_read:{type(exc).__name__}") from exc
+    return {
+        "schema": "scorpion.paper-intent-journal-receipt.v1",
+        "authority": "PAPER_INTENT_ONLY",
+        "records": count,
+        "bytes": size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def verify_paper_journal(path: Path) -> dict[str, object]:
+    """A receipt proves clean journal close and byte identity, not market fills."""
+    try:
+        receipt = json.loads(journal_receipt_path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise JournalError("journal_receipt_missing_or_invalid") from exc
+    actual = journal_identity(path)
+    if receipt != actual:
+        raise JournalError("journal_receipt_mismatch")
+    return actual
+
+
 class Journal:
     """Bounded asynchronous writer. Refuse backlog, writer failure and silent restart.
 
@@ -80,12 +128,13 @@ class Journal:
             raise ValueError("journal batch and queue bound must be positive")
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._queue: queue.Queue[dict[str, object] | None] = queue.Queue(maxsize=max_pending)
+        self._queue: queue.Queue[tuple[int, bytes] | None] = queue.Queue(maxsize=max_pending)
         self._on_durable = on_durable
         self._batch = batch
         self._seq = 0
         self._closed = False
         self._failure: str | None = None
+        self._completed: dict[str, object] | None = None
         self._ready = threading.Event()
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, name="exec-journal", daemon=True)
@@ -104,17 +153,28 @@ class Journal:
             if self._closed:
                 raise JournalError("journal_closed")
             next_seq = self._seq + 1
-            row = {**record, "seq": next_seq}
+            # Serialize before handing ownership to the worker: nested caller mutations
+            # cannot change what was admitted. NaN is not valid research evidence.
             try:
-                self._queue.put_nowait(row)
+                encoded = (
+                    json.dumps({**record, "seq": next_seq}, sort_keys=True, default=str,
+                               allow_nan=False) + "\n"
+                ).encode("utf-8")
+            except (TypeError, ValueError) as exc:
+                raise JournalError("journal_invalid_record") from exc
+            try:
+                self._queue.put_nowait((next_seq, encoded))
             except queue.Full as exc:
                 raise JournalError("journal_backpressure") from exc
             self._seq = next_seq
             return next_seq
 
     def _run(self) -> None:
+        digest = hashlib.sha256()
+        count = 0
+        size = 0
         try:
-            with self.path.open("x", encoding="utf-8") as handle:
+            with self.path.open("xb") as handle:
                 self._ready.set()
                 while True:
                     pending = [self._queue.get()]
@@ -129,8 +189,15 @@ class Journal:
                         if record is None:
                             stop = True
                             continue
-                        handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
-                        written.append(int(str(record["seq"])))
+                        seq, encoded = record
+                        if seq != count + 1:
+                            raise JournalError("journal_writer_sequence")
+                        if handle.write(encoded) != len(encoded):
+                            raise JournalError("journal_short_write")
+                        digest.update(encoded)
+                        count += 1
+                        size += len(encoded)
+                        written.append(seq)
                     handle.flush()
                     os.fsync(handle.fileno())
                     if self._on_durable is not None:
@@ -138,6 +205,13 @@ class Journal:
                         for seq in written:
                             self._on_durable(seq, durable_ns)
                     if stop:
+                        self._completed = {
+                            "schema": "scorpion.paper-intent-journal-receipt.v1",
+                            "authority": "PAPER_INTENT_ONLY",
+                            "records": count,
+                            "bytes": size,
+                            "sha256": digest.hexdigest(),
+                        }
                         return
         except Exception as exc:
             self._failure = f"journal_writer:{type(exc).__name__}"
@@ -152,6 +226,7 @@ class Journal:
             if self._closed:
                 if self._thread.is_alive():
                     raise JournalError("journal_close_incomplete")
+                verify_paper_journal(self.path)
                 return
             self._closed = True
         deadline = time.monotonic() + timeout_s
@@ -163,6 +238,20 @@ class Journal:
         self.check()
         if self._thread.is_alive():
             raise JournalError("journal_close_timeout")
+        if (
+            self._completed is None or self._completed["records"] != self._seq
+            or journal_identity(self.path) != self._completed
+        ):
+            raise JournalError("journal_close_identity_mismatch")
+        # Never overwrite a prior receipt. A torn receipt fails verification.
+        try:
+            with journal_receipt_path(self.path).open("x", encoding="utf-8") as handle:
+                json.dump(self._completed, handle, sort_keys=True, allow_nan=False)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise JournalError("journal_receipt_write_failed") from exc
 
 
 # ------------------------------------------------------------------------------ latch mirror
@@ -289,6 +378,7 @@ class PaperExecutionSession:
         self._now_utc = now_utc
         self._broker = PaperIntentBroker() if mode is ExecutionMode.PAPER else ReviewOnlyBroker()
         self.working: dict[str, WorkingCall] = {}
+        self._seen_creates: dict[str, tuple[str, str, str, str]] = {}
         self.orders: list[ExecutionResult] = []
         self.latency = LatencyRecorder()
 
@@ -297,7 +387,14 @@ class PaperExecutionSession:
         started = time.perf_counter_ns() if recv_ns is None else recv_ns
         decision = self._decide(raw, started)
         self.latency.add("post_to_decision", decision.latency_ns)
-        self._journal({"kind": "decision", **_decision_record(decision)})
+        self._journal({
+            "kind": "decision", **_decision_record(decision),
+            "source_ts_utc": raw.source_ts_utc.isoformat(),
+            "received_ts_utc": raw.received_ts_utc.isoformat(),
+            "revision_id": raw.revision_id,
+            "content_sha256": raw.content_sha256,
+            "rules_sha256": self.rules.sha256,
+        })
         return decision
 
     def _decide(self, raw: RawDiscordMessage, started: int) -> Decision:
@@ -319,10 +416,26 @@ class PaperExecutionSession:
                 entry,
             )
 
+        if raw.guild_id != GUILD_ID:
+            return done("ignore:guild")
         if raw.channel_id not in ALLOWED_CHANNEL_IDS or raw.channel_id != _OK_CHANNEL_ID:
             return done("ignore:channel")
         if raw.edited_ts_utc is not None:
             return done("ignore:edit_revision")
+        if raw.source_ts_utc > raw.received_ts_utc:
+            return done("skip:noncausal_signal")
+        if self.allowed_author_ids is not None and raw.author_id not in self.allowed_author_ids:
+            return done("ignore:unauthorized_author")
+        identity = (
+            raw.revision_id, raw.author_id, raw.channel_id, raw.source_ts_utc.isoformat(),
+        )
+        previous = self._seen_creates.get(raw.message_id)
+        if previous is not None:
+            if previous != identity:
+                self.latch.trip("conflicting_signal_create")
+                return done("blocked:conflicting_signal_create")
+            return done("ignore:duplicate_message")
+        self._seen_creates[raw.message_id] = identity
         event = parse_message(raw, self.allowed_author_ids)
         if event.kind is not EventKind.ENTRY or event.ticker is None:
             return done(f"ignore:{event.kind.value.lower()}")
@@ -366,8 +479,10 @@ class PaperExecutionSession:
             working.status = "blocked:no_trade_latch"
             self._journal({"kind": "skip", "call_id": call_id, "reason": working.status})
             return None
+        observed_mono_ns = self._mono_ns()
         quote = self.cache.fresh(
-            working.spec.ticker, max_age_ms=self.stale.quote_max_age_ms, now_mono_ns=self._mono_ns()
+            working.spec.ticker, max_age_ms=self.stale.quote_max_age_ms,
+            now_mono_ns=observed_mono_ns,
         )
         anchor = working.limit if chase and working.limit is not None else reference_price(quote)
         limit = (
@@ -420,6 +535,20 @@ class PaperExecutionSession:
                 "quantity": quantity,
                 "status": result.status,
                 "mode": result.mode.value,
+                "rules_sha256": self.rules.sha256,
+                "reference_price": str(anchor),
+                "quote_evidence": (
+                    {
+                        "bid": str(quote.bid), "ask": str(quote.ask),
+                        "last": str(quote.last) if quote.last is not None else None,
+                        "observed_ts_utc": quote.observed_ts_utc.isoformat(),
+                        "ts_event_ns": quote.ts_event_ns,
+                        "recv_mono_ns": quote.recv_mono_ns,
+                        "source_age_ns": quote.source_age_ns,
+                        "decision_mono_ns": observed_mono_ns,
+                    }
+                    if isinstance(quote, Quote) else None
+                ),
                 "latency_us": elapsed // 1_000,
             }
         )

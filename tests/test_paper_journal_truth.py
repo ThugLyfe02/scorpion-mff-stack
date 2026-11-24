@@ -11,7 +11,12 @@ import pytest
 
 from scorpion.broker import PaperIntentBroker
 from scorpion.domain import Effect, EffectKind
-from scorpion.session_service import Journal, JournalError
+from scorpion.session_service import (
+    Journal,
+    JournalError,
+    journal_receipt_path,
+    verify_paper_journal,
+)
 
 
 def test_intent_is_not_a_fill() -> None:
@@ -76,3 +81,51 @@ def test_backpressure_is_not_a_silent_drop(tmp_path: Path) -> None:
         release.set()
         journal.close()
     assert [json.loads(line)["seq"] for line in journal.path.read_text().splitlines()] == [1, 2]
+
+
+def test_receipt_binds_exact_bytes_and_record_count(tmp_path: Path) -> None:
+    path = tmp_path / "sealed.jsonl"
+    journal = Journal(path)
+    journal.submit({"kind": "intent"})
+    assert not journal_receipt_path(path).exists()
+    journal.close()
+    receipt = verify_paper_journal(path)
+    assert receipt["records"] == 1
+    assert receipt["authority"] == "PAPER_INTENT_ONLY"
+    path.write_bytes(path.read_bytes().replace(b"intent", b"edited"))
+    with pytest.raises(JournalError, match="receipt_mismatch"):
+        verify_paper_journal(path)
+
+
+def test_receipt_missing_or_truncated_stream_refuses(tmp_path: Path) -> None:
+    path = tmp_path / "incomplete.jsonl"
+    journal = Journal(path)
+    journal.submit({"kind": "intent"})
+    journal.close()
+    path.write_bytes(path.read_bytes().rstrip(b"\n"))
+    with pytest.raises(JournalError, match="incomplete_record"):
+        verify_paper_journal(path)
+    journal_receipt_path(path).unlink()
+    with pytest.raises(JournalError, match="receipt_missing"):
+        verify_paper_journal(path)
+
+
+def test_admitted_nested_values_cannot_change_after_submit(tmp_path: Path) -> None:
+    path = tmp_path / "immutable.jsonl"
+    journal = Journal(path)
+    nested = {"bid": "1.20"}
+    journal.submit({"kind": "quote", "evidence": nested})
+    nested["bid"] = "9.99"
+    journal.close()
+    row = json.loads(path.read_text())
+    assert row["evidence"]["bid"] == "1.20"
+    assert verify_paper_journal(path)["records"] == 1
+
+
+def test_nonfinite_record_refuses_without_consuming_sequence(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "finite.jsonl")
+    with pytest.raises(JournalError, match="invalid_record"):
+        journal.submit({"kind": "bad", "value": float("nan")})
+    assert journal.submit({"kind": "good"}) == 1
+    journal.close()
+    assert verify_paper_journal(journal.path)["records"] == 1

@@ -224,6 +224,7 @@ async def _run_session(args: argparse.Namespace) -> int:
     monitor = FeedHealthMonitor(cache, session.stale, started_mono_ns=time.monotonic_ns())
     feed = DatabentoFeed(DatabentoLiveClient(), cache, ("QQQ", "SPY"), on_skew=monitor.observe_skew)
     queue: asyncio.Queue[tuple[RawDiscordMessage, int]] = asyncio.Queue(maxsize=512)
+    overflow = asyncio.Event()
     open_et, close_et = hours
 
     def session_open() -> bool:
@@ -231,14 +232,34 @@ async def _run_session(args: argparse.Namespace) -> int:
         return now.replace(hour=9, minute=10, second=0, microsecond=0) <= now < close_et
 
     async def sink(raw: RawDiscordMessage) -> None:
-        queue.put_nowait((raw, time.perf_counter_ns()))
+        try:
+            queue.put_nowait((raw, time.perf_counter_ns()))
+        except asyncio.QueueFull:
+            # Discord callbacks can swallow raised exceptions. Signal the supervised
+            # task explicitly and immediately close the paper admission latch.
+            overflow.set()
+            latch.trip("ingress_queue_overflow")
 
     ingest_run: Callable[[], object] | None = None
     if not args.no_discord:
         from .ingest.discord import DiscordSignalClient
 
         client = DiscordSignalClient(sink)
-        ingest_run = lambda: client.start(token)  # noqa: E731
+
+        async def discord_ingress() -> None:
+            async def start_client() -> None:
+                await client.start(token)
+                raise RuntimeError("discord_client_ended")
+
+            async def watch_overflow() -> None:
+                await overflow.wait()
+                raise RuntimeError("ingress_queue_overflow")
+
+            async with asyncio.TaskGroup() as group:
+                group.create_task(start_client())
+                group.create_task(watch_overflow())
+
+        ingest_run = discord_ingress
     try:
         await supervise(
             session,
@@ -276,6 +297,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     run = sub.add_parser("run-session")
     run.add_argument("--no-discord", action="store_true", help="feed/health only (drills)")
     sub.add_parser("preflight")
+    journal_verify = sub.add_parser("verify-paper-journal")
+    journal_verify.add_argument("--journal", type=Path, required=True)
     rp = sub.add_parser("replay")
     rp.add_argument("--date")
     rp.add_argument("--input", type=Path, default=REPLAY_FIXTURE)
@@ -299,6 +322,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     pull.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
 
+    if args.command == "verify-paper-journal":
+        from .session_service import JournalError, verify_paper_journal
+
+        try:
+            receipt = verify_paper_journal(args.journal)
+        except JournalError as exc:
+            _print({"ok": False, "reason": str(exc)})
+            return 1
+        _print({"ok": True, "receipt": receipt, "certifies_fills": False})
+        return 0
     if args.command == "replay":
         text = replay_csv(args.input, only_date=args.date)
         if args.out:
