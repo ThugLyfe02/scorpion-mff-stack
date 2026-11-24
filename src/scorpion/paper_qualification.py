@@ -622,7 +622,9 @@ def _paired(
     )
 
 
-def _degradation(rows: tuple[PairedSession, ...], study: ProspectiveStudy) -> PaperDegradationEvidence:
+def _degradation(
+    rows: tuple[PairedSession, ...], study: ProspectiveStudy,
+) -> PaperDegradationEvidence:
     alpha = 0.2 * study.alpha_units / 1_000_000_000
     monitor = BernoulliEProcess(BernoulliEPolicy(
         null_rate=study.adverse_session_null_rate,

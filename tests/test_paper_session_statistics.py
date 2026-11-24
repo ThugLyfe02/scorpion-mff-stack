@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sqlite3
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -15,6 +16,16 @@ from scorpion.causal_features import load_paper_intent_features
 from scorpion.confidence_sequence import anytime_bounded_mean_confidence_sequence
 from scorpion.cost_adjusted_policy_value import session_mean_diagnostics
 from scorpion.exec_cli import main
+from scorpion.paper_qualification import (
+    PaperQualificationError,
+    _root,
+    _study,
+    assess_paper_study,
+    common_roster_digest,
+    execution_binding_digest,
+    finalize_paper_study,
+    reserve_paper_study,
+)
 from scorpion.paper_session_statistics import (
     PaperCohortError,
     PaperCohortPolicy,
@@ -23,6 +34,12 @@ from scorpion.paper_session_statistics import (
     _evaluate_days,
     _RouteScore,
     evaluate_paper_session_cohort,
+    load_verified_paper_cohort,
+)
+from scorpion.research_hypothesis_memory import (
+    prospective_registry_status,
+    read_finalized_paper_dossier,
+    verify_hypothesis_memory,
 )
 from scorpion.session_calendar import session_hours
 from scorpion.session_service import Journal
@@ -192,6 +209,8 @@ class SignedCohort:
     collector: Ed25519PrivateKey
     reviewer: Ed25519PrivateKey
     bundles: list[SignedBundle]
+    rules: str = RULES
+    account: str = "fixture-account"
 
     def sign(self, bundle: SignedBundle) -> None:
         raw = json.dumps(bundle.outcome, sort_keys=True).encode()
@@ -243,7 +262,7 @@ def build_bundle(
     reviewed = collected + timedelta(seconds=1)
     ticker = "AAA" if day == DAYS[0] else "BBB"
     call = f"call-{day.isoformat()}"
-    common = {"session_date": day.isoformat(), "mode": "PAPER", "rules_sha256": RULES}
+    common = {"session_date": day.isoformat(), "mode": "PAPER", "rules_sha256": ctx.rules}
     if include_markers:
         journal.submit({"kind": "session_start", **common,
                         "ts_utc": (open_at - timedelta(seconds=1)).isoformat(),
@@ -252,14 +271,14 @@ def build_bundle(
     if mode != "empty":
         journal.submit({
             "kind": "decision", "action": "schedule_entry", "call_id": call,
-            "ticker": ticker, "rules_sha256": RULES, "source_ts_utc": source.isoformat(),
+            "ticker": ticker, "rules_sha256": ctx.rules, "source_ts_utc": source.isoformat(),
             "received_ts_utc": source.isoformat(), "ts_utc": source.isoformat(),
             "revision_id": hashlib.sha256(call.encode()).hexdigest(),
             "content_sha256": "c" * 64,
         })
         for chase, moment in [(False, first)] + ([(True, second)] if mode == "chase" else []):
             journal.submit({
-                "kind": "intent", "call_id": call, "ticker": ticker, "rules_sha256": RULES,
+                "kind": "intent", "call_id": call, "ticker": ticker, "rules_sha256": ctx.rules,
                 "mode": "PAPER", "status": "PAPER_INTENT_ONLY", "chase": chase,
                 "conditional_on": "initial_unfilled" if chase else None,
                 "limit": "10.10" if chase else "10.00", "quantity": 9 if chase else 10,
@@ -313,11 +332,13 @@ def build_bundle(
                 "received_ts_utc": (horizon - timedelta(seconds=1)).isoformat(),
                 "bid": "10.49", "ask": "10.51", "route_closed": True,
             })
-    venue_hash = put(root / "venue.json", {"synthetic": "venue", "date": day.isoformat()})
+    venue_hash = put(root / "venue.json", {
+        "synthetic": "venue", "date": day.isoformat(), "account": ctx.account,
+    })
     market_hash = put(root / "market.json", {"synthetic": "market", "date": day.isoformat()})
     outcome = {
         "schema": "scorpion.paper-outcome-export.v1", "authority": "PAPER_ONLY",
-        "source_id": "fixture-venue", "account_ref": "fixture-account",
+        "source_id": "fixture-venue", "account_ref": ctx.account,
         "trust_sha256": ctx.trust_hash, "journal_sha256": features.journal_sha256,
         "source_artifact_sha256": venue_hash, "complete_order_export": True,
         "observed_through_ts_utc": through.isoformat(),
@@ -350,14 +371,16 @@ def build_bundle(
     return bundle
 
 
-@pytest.fixture
-def signed_cohort(tmp_path: Path) -> SignedCohort:
+def make_cohort(
+    tmp_path: Path, *, rules: str = RULES, account: str = "fixture-account",
+) -> SignedCohort:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     collector = Ed25519PrivateKey.generate()
     reviewer = Ed25519PrivateKey.generate()
     trust = tmp_path / "trust.json"
     trust_hash = put(trust, {
         "schema": "scorpion.paper-outcome-trust.v1", "authority": "PAPER_ONLY",
-        "source_id": "fixture-venue", "account_ref": "fixture-account", "rules_sha256": RULES,
+        "source_id": "fixture-venue", "account_ref": account, "rules_sha256": rules,
         "registered_ts_utc": REGISTERED.isoformat(), "horizon_seconds": 60,
         "collector_id": "collector", "reviewer_id": "reviewer",
         "collector_public_key": collector.public_key().public_bytes_raw().hex(),
@@ -373,13 +396,18 @@ def signed_cohort(tmp_path: Path) -> SignedCohort:
     cohort = tmp_path / "cohort.json"
     pin = put(cohort, raw_policy(trust_hash, cost_hash))
     ctx = SignedCohort(tmp_path, trust, cost_policy, cohort, tmp_path / "inputs.json",
-                       pin, trust_hash, cost_hash, collector, reviewer, [])
+                       pin, trust_hash, cost_hash, collector, reviewer, [], rules, account)
     ctx.bundles.extend([
         build_bundle(ctx, DAYS[0], mode="full"), build_bundle(ctx, DAYS[1], mode="chase"),
         build_bundle(ctx, DAYS[2], mode="empty"),
     ])
     ctx.index()
     return ctx
+
+
+@pytest.fixture
+def signed_cohort(tmp_path: Path) -> SignedCohort:
+    return make_cohort(tmp_path)
 
 
 def test_signed_cohort_keeps_calendar_and_missing_day(signed_cohort: SignedCohort) -> None:
@@ -561,3 +589,307 @@ def test_mid_session_latch_transition_cannot_be_hidden_by_rearming(
     result = signed_cohort.report()
     assert result.sessions[-1].status == "COVERAGE_UNVERIFIED"
     assert "journal_session_safety_history_changed_or_unverified" in result.sessions[-1].reasons
+
+
+# Stage 4 fixtures are entirely synthetic, including artifacts, keys and approvals.
+RESERVE_CLOCK = REGISTERED + timedelta(hours=1)
+REVIEW_CLOCK = AS_OF + timedelta(minutes=1)
+GENESIS = "0" * 64
+RESERVE_DOMAIN = b"scorpion.prospective-study-approval.v1:reserve\x00"
+REVIEW_DOMAIN = b"scorpion.prospective-study-approval.v1:review\x00"
+
+
+@dataclass
+class StudyFixture:
+    folder: Path
+    arms: list[SignedCohort]
+    root: Path
+    root_pin: str
+    study: Path
+    study_pin: str
+    inputs: Path
+    registry: Path
+    registrar: Ed25519PrivateKey
+    reviewer: Ed25519PrivateKey
+    chain: str = GENESIS
+
+    def kwargs(self) -> dict:
+        return dict(
+            registry_path=self.registry, root_path=self.root, root_sha256=self.root_pin,
+            study_path=self.study, study_sha256=self.study_pin, inputs_path=self.inputs,
+            expected_chain_hash=self.chain,
+        )
+
+    def approval(self, *, review: bool = False, dossier=None, disposition="INCONCLUSIVE",
+                 signer=None) -> tuple[Path, Path]:
+        now = REVIEW_CLOCK if review else RESERVE_CLOCK
+        payload = {
+            "schema": "scorpion.prospective-study-approval.v1", "authority": "RESEARCH_ONLY",
+            "action": "REVIEW" if review else "RESERVE",
+            "root_sha256": self.root_pin, "study_sha256": self.study_pin,
+            "ledger_chain_hash": self.chain, "signer_id": "study-reviewer" if review else "registrar",
+            "issued_ts_utc": now.isoformat(), "expires_ts_utc": (now + timedelta(days=1)).isoformat(),
+        }
+        if review:
+            payload.update(dossier_sha256=dossier.dossier_sha256, disposition=disposition)
+        path, signature = self.folder / "approval.json", self.folder / "approval.sig"
+        put(path, payload)
+        key = signer or (self.reviewer if review else self.registrar)
+        signature.write_text(key.sign(
+            (REVIEW_DOMAIN if review else RESERVE_DOMAIN) + path.read_bytes(),
+        ).hex())
+        return path, signature
+
+    def reserve(self):
+        approval, signature = self.approval()
+        result = reserve_paper_study(
+            **self.kwargs(), approval_path=approval, signature_path=signature, now=RESERVE_CLOCK,
+        )
+        self.chain = result.ledger_chain_hash
+        return result
+
+    def assess(self):
+        return assess_paper_study(**self.kwargs(), as_of=AS_OF)
+
+    def finalize(self, dossier, disposition="INCONCLUSIVE"):
+        approval, signature = self.approval(review=True, dossier=dossier, disposition=disposition)
+        result = finalize_paper_study(
+            **self.kwargs(), as_of=AS_OF, approval_path=approval,
+            signature_path=signature, now=REVIEW_CLOCK,
+        )
+        self.chain = result.ledger_chain_hash
+        return result
+
+    def status(self):
+        return prospective_registry_status(
+            self.registry, root_sha256=self.root_pin, expected_chain_hash=self.chain,
+        )
+
+
+def study_fixture(tmp_path: Path, *, paired: bool = False) -> StudyFixture:
+    arms = [make_cohort(tmp_path / "incumbent")]
+    if paired:
+        arms.append(make_cohort(tmp_path / "challenger", rules="b" * 64, account="fixture-other"))
+    registrar, reviewer = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
+    root = tmp_path / "root.json"
+    root_pin = put(root, {
+        "schema": "scorpion.prospective-study-root.v1", "authority": "RESEARCH_ONLY",
+        "registry_id": "fixture-registry", "registered_ts_utc": REGISTERED.isoformat(),
+        "registrar_id": "registrar", "reviewer_id": "study-reviewer",
+        "registrar_public_key": registrar.public_key().public_bytes_raw().hex(),
+        "reviewer_public_key": reviewer.public_key().public_bytes_raw().hex(),
+    })
+    plan_arms, input_arms = [], []
+    frozen = REGISTERED - timedelta(days=1)
+    for idx, arm in enumerate(arms):
+        name = ("INCUMBENT" if idx == 0 else "CHALLENGER") if paired else "COHORT"
+        artifact = arm.root / "artifact.bin"
+        artifact.write_bytes(f"synthetic frozen strategy {name}".encode())
+        artifact_hash = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        manifest = arm.root / "training.json"
+        revision = str(idx + 1) * 40
+        manifest_hash = put(manifest, {
+            "schema": "scorpion.frozen-training-lineage.v1", "authority": "RESEARCH_ONLY",
+            "artifact_sha256": artifact_hash, "code_revision": revision, "rules_sha256": arm.rules,
+            "trained_through_ts_utc": (frozen - timedelta(days=2)).isoformat(),
+            "labels_available_through_ts_utc": (frozen - timedelta(days=1)).isoformat(),
+            "frozen_ts_utc": frozen.isoformat(), "training_data_sha256": ["f" * 64],
+        })
+        plan_arms.append({
+            "arm": name, "cohort_sha256": arm.pin, "artifact_sha256": artifact_hash,
+            "code_revision": revision, "training_manifest_sha256": manifest_hash,
+            "frozen_ts_utc": frozen.isoformat(),
+        })
+        input_arms.append({
+            "arm": name, "cohort": str(arm.cohort), "trust": str(arm.trust),
+            "cost_policy": str(arm.cost_policy), "artifact": str(artifact),
+            "training_manifest": str(manifest), "sessions": str(arm.inputs),
+        })
+    study, inputs = tmp_path / "study.json", tmp_path / "study-inputs.json"
+    study_pin = put(study, {
+        "schema": "scorpion.prospective-study.v1", "authority": "RESEARCH_ONLY",
+        "family_id": "fixture-family", "kind": "PAIRED_ENTRY_TRIAL" if paired else "COHORT",
+        "registered_ts_utc": REGISTERED.isoformat(), "alpha_units": 50_000_000,
+        "embargo_seconds": 86400, "minimum_improvement_bps": 0,
+        "maximum_challenger_cost_bps": 100, "soak_sessions": 2,
+        "adverse_session_null_rate": 0.1, "adverse_session_alternative_rate": 0.8,
+        "arms": plan_arms,
+    })
+    put(inputs, {"schema": "scorpion.prospective-study-inputs.v1", "arms": input_arms})
+    ctx = StudyFixture(tmp_path, arms, root, root_pin, study, study_pin, inputs,
+                       tmp_path / "hypothesis.db", registrar, reviewer)
+    if paired:
+        root_obj = _root(root, root_pin)
+        study_obj = _study(study, study_pin, inputs, root_obj)
+        for arm, spec in zip(arms, study_obj.arms, strict=True):
+            evidence = load_verified_paper_cohort(
+                cohort_path=arm.cohort, expected_cohort_sha256=arm.pin, inputs_path=arm.inputs,
+                trust_path=arm.trust, cost_policy_path=arm.cost_policy, as_of=AS_OF,
+            )
+            by_day = dict(evidence.costs)
+            for bundle in arm.bundles:
+                day = date.fromisoformat(bundle.row["session_date"])
+                cost = by_day[day]
+                bundle.costs["trial_binding"] = {
+                    "study_sha256": study_pin, "arm": spec.arm,
+                    "artifact_sha256": spec.artifact_hash, "code_revision": spec.code_revision,
+                    "common_roster_sha256": common_roster_digest(cost.routes),
+                    "execution_manifest_sha256": execution_binding_digest(study_obj, spec, day, cost),
+                }
+                arm.sign(bundle)
+    return ctx
+
+
+def test_reserved_cohort_finalization_preserves_negative_result(tmp_path: Path) -> None:
+    ctx = study_fixture(tmp_path)
+    with pytest.raises(ValueError, match="registry unavailable"):
+        ctx.assess()
+    reservation = ctx.reserve()
+    assert reservation.sessions == DAYS
+    assert ctx.status().remaining_alpha_units == 0
+    assert ctx.status().reserved_sessions == 4
+    assert verify_hypothesis_memory(ctx.registry).valid
+    result = ctx.assess()
+    assert result.status == "NOT_QUALIFIED" and result == ctx.assess()
+    assert not result.authorizes_training and not result.authorizes_promotion
+    assert not result.authorizes_live_orders and not result.certifies_round_trip_profitability
+    with pytest.raises(PaperQualificationError, match="disposition"):
+        ctx.finalize(result, "PAPER_RESEARCH_REVIEWED")
+    final = ctx.finalize(result, "INCONCLUSIVE")
+    assert final.disposition == "INCONCLUSIVE"
+    assert ctx.status().remaining_alpha_units == 0
+    assert ctx.status().finalized_studies == 1
+    stored = read_finalized_paper_dossier(
+        ctx.registry, study_sha256=ctx.study_pin, root_sha256=ctx.root_pin,
+        expected_chain_hash=ctx.chain,
+    )
+    assert stored["dossier"]["dossier_sha256"] == result.dossier_sha256
+    assert stored["disposition"] == "INCONCLUSIVE"
+    assert verify_hypothesis_memory(ctx.registry).valid
+    with pytest.raises(ValueError, match="already finalized"):
+        ctx.assess()
+
+
+def test_approval_signature_independence_and_actual_reservation_clock(tmp_path: Path) -> None:
+    ctx = study_fixture(tmp_path)
+    approval, signature = ctx.approval(signer=ctx.reviewer)
+    with pytest.raises(PaperQualificationError, match="signature"):
+        reserve_paper_study(**ctx.kwargs(), approval_path=approval,
+                            signature_path=signature, now=RESERVE_CLOCK)
+    approval, signature = ctx.approval()
+    with pytest.raises(PaperQualificationError, match="not_prospective"):
+        reserve_paper_study(**ctx.kwargs(), approval_path=approval,
+                            signature_path=signature, now=stamp(DAYS[0], 15))
+    assert not ctx.registry.exists()
+    ctx.reserve()
+    old = ctx.chain
+    with pytest.raises(ValueError, match="already reserved"):
+        ctx.reserve()
+    ctx.chain = GENESIS
+    with pytest.raises(ValueError, match="checkpoint mismatch"):
+        ctx.assess()
+    ctx.chain = old
+    assert ctx.status().reservations == 1
+
+
+def test_new_study_pin_cannot_reuse_reserved_calendar_or_budget(tmp_path: Path) -> None:
+    ctx = study_fixture(tmp_path)
+    ctx.reserve()
+    plan = json.loads(ctx.study.read_text())
+    plan["minimum_improvement_bps"] = 1
+    ctx.study_pin = put(ctx.study, plan)
+    with pytest.raises(ValueError, match="roster overlaps"):
+        ctx.reserve()
+    arm = ctx.arms[0]
+    policy_data = json.loads(arm.cohort.read_text())
+    policy_data["start_date"], policy_data["end_date"] = "2026-11-30", "2026-12-03"
+    policy_data["sessions"] = ["2026-11-30", "2026-12-01", "2026-12-02", "2026-12-03"]
+    plan["arms"][0]["cohort_sha256"] = put(arm.cohort, policy_data)
+    ctx.study_pin = put(ctx.study, plan)
+    with pytest.raises(ValueError, match="alpha budget"):
+        ctx.reserve()
+    assert ctx.status().reservations == 1
+
+
+def test_signed_review_cannot_finalize_changed_evidence(tmp_path: Path) -> None:
+    ctx = study_fixture(tmp_path)
+    ctx.reserve()
+    result = ctx.assess()
+    approval, signature = ctx.approval(review=True, dossier=result)
+    arm = ctx.arms[0]
+    arm.index(arm.bundles[1:])
+    with pytest.raises(PaperQualificationError, match="dossier_mismatch"):
+        finalize_paper_study(
+            **ctx.kwargs(), as_of=AS_OF, approval_path=approval,
+            signature_path=signature, now=REVIEW_CLOCK,
+        )
+    assert ctx.status().finalized_studies == 0
+
+
+def test_ledger_tamper_refuses_read_even_when_current_pin_supplied(tmp_path: Path) -> None:
+    ctx = study_fixture(tmp_path)
+    ctx.reserve()
+    with sqlite3.connect(ctx.registry) as db:
+        with pytest.raises(sqlite3.IntegrityError, match="append_only"):
+            db.execute("UPDATE prospective_study_reservations SET alpha_units=1")
+        db.execute("DROP TRIGGER prospective_study_reservations_no_update")
+        db.execute("UPDATE prospective_study_reservations SET alpha_units=1")
+    assert not verify_hypothesis_memory(ctx.registry).valid
+    with pytest.raises(ValueError, match="integrity"):
+        ctx.assess()
+
+
+def test_paired_trial_matches_same_opportunities_and_keeps_missing_day(tmp_path: Path) -> None:
+    ctx = study_fixture(tmp_path, paired=True)
+    ctx.reserve()
+    result = ctx.assess()
+    pair = result.paired_entry
+    assert pair is not None
+    assert pair.observed_pairs == 2 and pair.complete_sessions == 3
+    assert pair.sessions[-1].status == "UNKNOWN"
+    assert pair.endpoint.anytime_conditional_mean.alpha == pytest.approx(0.04)
+    assert pair.degradation.alpha == pytest.approx(0.01)
+    assert pair.degradation.unknown_sessions == 1
+    assert pair.endpoint.raw_route_mean_bps == 0
+    assert "paired_session_coverage_incomplete" in result.blockers
+    assert result.status == "NOT_QUALIFIED"
+    assert result == ctx.assess()
+
+
+def test_paired_market_horizon_mismatch_is_censored_not_matched(tmp_path: Path) -> None:
+    ctx = study_fixture(tmp_path, paired=True)
+    ctx.reserve()
+    arm = ctx.arms[1]
+    bundle = arm.bundles[0]
+    bundle.costs["marks"][0]["bid"] = "10.39"
+    bundle.costs["marks"][0]["ask"] = "10.41"
+    arm.sign(bundle)
+    pair = ctx.assess().paired_entry
+    assert pair is not None
+    assert pair.sessions[0].status == "COVERED_CENSORED"
+    assert pair.sessions[0].matched_observed == 0
+    assert pair.sessions[0].raw_improvement_mean_bps is None
+
+
+def test_signed_trial_binding_must_match_frozen_artifact(tmp_path: Path) -> None:
+    ctx = study_fixture(tmp_path, paired=True)
+    ctx.reserve()
+    arm = ctx.arms[1]
+    bundle = arm.bundles[0]
+    bundle.costs["trial_binding"]["artifact_sha256"] = "0" * 64
+    arm.sign(bundle)
+    with pytest.raises(PaperQualificationError, match="binding_mismatch"):
+        ctx.assess()
+
+
+def test_training_embargo_rejects_future_label_availability(tmp_path: Path) -> None:
+    ctx = study_fixture(tmp_path)
+    plan = json.loads(ctx.study.read_text())
+    inputs = json.loads(ctx.inputs.read_text())
+    manifest_path = Path(inputs["arms"][0]["training_manifest"])
+    manifest = json.loads(manifest_path.read_text())
+    manifest["labels_available_through_ts_utc"] = stamp(DAYS[0], 15).isoformat()
+    plan["arms"][0]["training_manifest_sha256"] = put(manifest_path, manifest)
+    ctx.study_pin = put(ctx.study, plan)
+    with pytest.raises(PaperQualificationError, match="embargo"):
+        ctx.reserve()
