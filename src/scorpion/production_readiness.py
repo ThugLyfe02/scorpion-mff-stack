@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import sqlite3
@@ -211,11 +212,20 @@ def parse_bottleneck_policy_json(encoded: str) -> ProductionBottleneckAuditPolic
 
 
 def bottleneck_state_fingerprint(report: ProductionBottleneckAuditReport) -> str:
-    """Hash the full observed bottleneck state without its generation timestamp."""
+    """Bind logical state and all pressure findings, not physical checkpoint placement.
+
+    SQLite may move already-committed pages from WAL into the database between two
+    read-only audits. Raw sizes remain in the separately hashed audit report.
+    Logical page count, freelist, all pressure findings (including WAL thresholds),
+    and every control-state field remain mandatory for preparation.
+    """
+    material = asdict(report.snapshot)
+    material.pop("db_bytes")
+    material.pop("wal_bytes")
     return _hash_payload(
         {
-            "version": "production-bottleneck-state-v1",
-            "snapshot": asdict(report.snapshot),
+            "version": "production-bottleneck-state-v2",
+            "snapshot": material,
             "findings": [asdict(item) for item in report.findings],
             "dominant_bottleneck": report.dominant_bottleneck,
             "ready_for_rollout": report.ready_for_rollout,
@@ -254,7 +264,7 @@ def operator_state_fingerprint(snapshot: OperatorObservabilitySnapshot) -> str:
     """Hash operator-visible state independently from the snapshot generation timestamp."""
     return _hash_payload(
         {
-            "version": "operator-production-state-v1",
+            "version": "operator-production-state-v2",
             "system_state": snapshot.system_state.value,
             "schema_compatible": snapshot.schema_compatible,
             "runtime_halted": snapshot.runtime_halted,
@@ -497,7 +507,8 @@ def _read_control_state_binding(
     required_heartbeats: tuple[str, ...],
 ) -> ControlStateBinding:
     uri = f"file:{path.resolve().as_posix()}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as db:
+    with contextlib.closing(sqlite3.connect(uri, uri=True)) as db:
+        db.execute("BEGIN")
         return capture_control_state_binding(
             db,
             component=component,
@@ -512,7 +523,7 @@ def _readiness_policy_hash(
 ) -> str:
     return _hash_payload(
         {
-            "version": "production-readiness-policy-v3",
+            "version": "production-readiness-policy-v4",
             "readiness": asdict(policy),
             "benchmark": asdict(benchmark_policy) if benchmark_policy is not None else None,
             "bottleneck": bottleneck_policy_material(bottleneck_policy),
@@ -832,7 +843,8 @@ def issue_rollout_readiness_certificate(
     candidate_policy = ""
     candidate_manifest = ""
     predecessor = ""
-    with sqlite3.connect(uri, uri=True) as db:
+    with contextlib.closing(sqlite3.connect(uri, uri=True)) as db:
+        db.execute("BEGIN")
         db.row_factory = sqlite3.Row
         candidate = db.execute(
             "SELECT * FROM component_releases WHERE release_id=?",

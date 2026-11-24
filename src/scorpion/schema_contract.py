@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from pathlib import Path
 
@@ -157,7 +158,9 @@ def inspect_schema(path: str | Path) -> SchemaContractReport:
     database = Path(path)
     if not database.is_file():
         raise FileNotFoundError(database)
-    with sqlite3.connect(str(database)) as db:
+    uri = database.resolve().as_uri() + "?mode=ro"
+    with contextlib.closing(sqlite3.connect(uri, uri=True)) as db:
+        db.execute("BEGIN")
         return inspect_schema_connection(db)
 
 

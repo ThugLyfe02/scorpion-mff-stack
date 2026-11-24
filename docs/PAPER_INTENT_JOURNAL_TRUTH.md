@@ -466,3 +466,17 @@ confirmatory hypotheses with extra alpha. This is not a randomized causal strate
 portfolio P&L, or whole-strategy qualification: exits, independently observed round-trip
 economics, allocation/risk, authentic market data, strategy deployment and production approval
 remain outside this boundary. The only positive disposition is paper research reviewed.
+
+
+### Production-readiness fingerprint maintenance
+
+The previous preparation fingerprint included exact physical main-database and WAL byte sizes.
+A SQLite checkpoint can move already committed pages between the two without changing logical
+control state. The v2 preparation-state fingerprint now omits only these two physical-placement
+counters, preserving logical page count/freelist ratio, all observed risk findings (including
+WAL growth), health, backlog, release identity, safety epoch and latency evidence. The raw
+audit hash still binds both physical sizes, and the existing operator READY requirement and
+control-state compare-and-swap remain unchanged. Old preparation certificates must be reissued
+under the new fingerprint/policy version. Read-only audit connections are explicitly closed,
+and use read transactions to reduce inconsistent intra-audit observations. The regression tests
+exercise a real WAL checkpoint plus a changed queue and a breached WAL threshold.

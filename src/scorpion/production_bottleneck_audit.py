@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -324,13 +325,19 @@ def audit_production_bottlenecks(
     if not db_path.is_file():
         raise FileNotFoundError(db_path)
 
-    with sqlite3.connect(str(db_path), timeout=1.0) as db:
+    uri = db_path.resolve().as_uri() + "?mode=ro"
+    with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as db:
         db.row_factory = sqlite3.Row
+        db.execute("BEGIN")
         page_count = int(db.execute("PRAGMA page_count").fetchone()[0])
         freelist_pages = int(db.execute("PRAGMA freelist_count").fetchone()[0])
         db_bytes = db_path.stat().st_size
         wal_path = Path(f"{db_path}-wal")
-        wal_bytes = wal_path.stat().st_size if wal_path.exists() else 0
+        try:
+            wal_bytes = wal_path.stat().st_size
+        except FileNotFoundError:
+            # The last writer may have checkpointed and removed the physical WAL.
+            wal_bytes = 0
         freelist_ratio = freelist_pages / page_count if page_count else 0.0
         pending_raw, pending_raw_age = _pending_raw(db, now=timestamp)
         pending_review = (
