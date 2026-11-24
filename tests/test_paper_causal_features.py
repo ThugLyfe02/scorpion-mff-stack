@@ -464,7 +464,9 @@ def setup_chase(cost_fixture: CostFixture, *, filled: bool = True) -> None:
     cost_fixture.payload["fees"] = [fee_for(first, "0.10", "0"), fee_for(chase)]
 
 
-def test_observed_chase_compares_fixed_target_not_hypothetical_fill(cost_fixture: CostFixture) -> None:
+def test_observed_chase_compares_fixed_target_not_hypothetical_fill(
+    cost_fixture: CostFixture,
+) -> None:
     setup_chase(cost_fixture)
     report = cost_fixture.report()
     row = report.routes[0]
