@@ -299,6 +299,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser("preflight")
     journal_verify = sub.add_parser("verify-paper-journal")
     journal_verify.add_argument("--journal", type=Path, required=True)
+    recovery = sub.add_parser("recover-paper-journal")
+    recovery.add_argument("--journal", type=Path, required=True)
+    recovery.add_argument("--out", type=Path, required=True)
     rp = sub.add_parser("replay")
     rp.add_argument("--date")
     rp.add_argument("--input", type=Path, default=REPLAY_FIXTURE)
@@ -322,6 +325,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     pull.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
 
+    if args.command == "recover-paper-journal":
+        from .recovery import recover_paper_session_journal
+        from .session_service import JournalError
+
+        try:
+            report = recover_paper_session_journal(args.journal, args.out)
+        except (OSError, JournalError, ValueError) as exc:
+            _print({"ok": False, "reason": type(exc).__name__})
+            return 1
+        _print(report)
+        return 0
     if args.command == "verify-paper-journal":
         from .session_service import JournalError, verify_paper_journal
 

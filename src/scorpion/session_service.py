@@ -14,15 +14,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import io
 import json
 import logging
 import math
 import os
 import queue
 import socket
+import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -66,25 +68,27 @@ def journal_receipt_path(path: Path) -> Path:
     return path.with_name(path.name + ".receipt.json")
 
 
-def journal_identity(path: Path) -> dict[str, object]:
-    """Verify the framing and sequence while computing an exact-byte identity."""
+def journal_checkpoint_path(path: Path) -> Path:
+    return path.with_name(path.name + ".checkpoint.json")
+
+
+def _journal_identity(lines: Iterable[bytes]) -> dict[str, object]:
     digest = hashlib.sha256()
     count = 0
     size = 0
     try:
-        with path.open("rb") as handle:
-            for line in handle:
-                if not line.endswith(b"\n"):
-                    raise JournalError("journal_incomplete_record")
-                row = json.loads(line)
-                count += 1
-                if (
-                    not isinstance(row, dict) or type(row.get("seq")) is not int
-                    or row["seq"] != count
-                ):
-                    raise JournalError("journal_sequence_mismatch")
-                size += len(line)
-                digest.update(line)
+        for line in lines:
+            if not line.endswith(b"\n"):
+                raise JournalError("journal_incomplete_record")
+            row = json.loads(line)
+            count += 1
+            if (
+                not isinstance(row, dict) or type(row.get("seq")) is not int
+                or row["seq"] != count
+            ):
+                raise JournalError("journal_sequence_mismatch")
+            size += len(line)
+            digest.update(line)
     except (OSError, ValueError) as exc:
         raise JournalError(f"journal_read:{type(exc).__name__}") from exc
     return {
@@ -94,6 +98,19 @@ def journal_identity(path: Path) -> dict[str, object]:
         "bytes": size,
         "sha256": digest.hexdigest(),
     }
+
+
+def journal_identity_bytes(data: bytes) -> dict[str, object]:
+    return _journal_identity(io.BytesIO(data))
+
+
+def journal_identity(path: Path) -> dict[str, object]:
+    """Verify the framing and sequence while computing an exact-byte identity."""
+    try:
+        with path.open("rb") as handle:
+            return _journal_identity(handle)
+    except OSError as exc:
+        raise JournalError(f"journal_read:{type(exc).__name__}") from exc
 
 
 def verify_paper_journal(path: Path) -> dict[str, object]:
@@ -106,6 +123,55 @@ def verify_paper_journal(path: Path) -> dict[str, object]:
     if receipt != actual:
         raise JournalError("journal_receipt_mismatch")
     return actual
+
+
+def read_verified_paper_records(
+    path: Path, *, max_bytes: int = 64 * 1024 * 1024,
+) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
+    """Read exactly the verified bytes once; consumers cannot race a second journal read."""
+    if max_bytes <= 0:
+        raise ValueError("journal read limit must be positive")
+    try:
+        receipt = json.loads(journal_receipt_path(path).read_text(encoding="utf-8"))
+        with path.open("rb") as handle:
+            raw = handle.read(max_bytes + 1)
+    except (OSError, ValueError) as exc:
+        raise JournalError("journal_receipt_missing_or_invalid") from exc
+    if len(raw) > max_bytes:
+        raise JournalError("journal_read_bound_exceeded")
+    identity = journal_identity_bytes(raw)
+    if receipt != identity:
+        raise JournalError("journal_receipt_mismatch")
+    records = tuple(json.loads(line) for line in io.BytesIO(raw))
+    return identity, records
+
+
+def _fsync_directory(path: Path) -> None:
+    # systemd deployment is POSIX. Other platforms retain file fsync but do not
+    # claim power-loss durability of directory-entry updates.
+    if os.name == "posix":
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _write_checkpoint(path: Path, payload: dict[str, object]) -> None:
+    """Publish a durable-prefix pointer only after the journal itself was fsync'd."""
+    target = journal_checkpoint_path(path)
+    descriptor, name = tempfile.mkstemp(prefix=target.name + ".", dir=target.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        _fsync_directory(target.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class Journal:
@@ -174,6 +240,10 @@ class Journal:
         count = 0
         size = 0
         try:
+            if (
+                journal_checkpoint_path(self.path).exists() or journal_receipt_path(self.path).exists()
+            ):
+                raise FileExistsError("journal sidecar already exists")
             with self.path.open("xb") as handle:
                 self._ready.set()
                 while True:
@@ -200,18 +270,20 @@ class Journal:
                         written.append(seq)
                     handle.flush()
                     os.fsync(handle.fileno())
+                    checkpoint: dict[str, object] = {
+                        "schema": "scorpion.paper-intent-journal-receipt.v1",
+                        "authority": "PAPER_INTENT_ONLY",
+                        "records": count,
+                        "bytes": size,
+                        "sha256": digest.hexdigest(),
+                    }
+                    _write_checkpoint(self.path, checkpoint)
                     if self._on_durable is not None:
                         durable_ns = time.perf_counter_ns()
                         for seq in written:
                             self._on_durable(seq, durable_ns)
                     if stop:
-                        self._completed = {
-                            "schema": "scorpion.paper-intent-journal-receipt.v1",
-                            "authority": "PAPER_INTENT_ONLY",
-                            "records": count,
-                            "bytes": size,
-                            "sha256": digest.hexdigest(),
-                        }
+                        self._completed = checkpoint
                         return
         except Exception as exc:
             self._failure = f"journal_writer:{type(exc).__name__}"
@@ -250,6 +322,7 @@ class Journal:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+            _fsync_directory(self.path.parent)
         except OSError as exc:
             raise JournalError("journal_receipt_write_failed") from exc
 

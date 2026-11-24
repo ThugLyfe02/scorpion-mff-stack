@@ -39,3 +39,19 @@ queue overflow explicitly reaches supervision instead of relying on callback exc
 A valid receipt establishes journal closure and byte identity only. No fill or profitability
 is asserted. Raw private messages and market captures must remain outside Git. Crash recovery
 and provider/venue authentication remain external prerequisites.
+
+## Crash recovery checkpoint
+
+The writer now fsyncs the journal batch, atomically publishes its verified-prefix checkpoint,
+then issues durable callbacks. Directory entries are fsync'd on the POSIX/systemd deployment;
+other platforms do not claim equivalent power-loss directory durability. The sidecar is not a
+clean-close receipt or authenticated signature. Offline recovery requires the writer to be stopped:
+
+```sh
+python -m scorpion recover-paper-journal --journal /private/session.jsonl --out /private/recovery
+```
+
+The verified prefix and any unverified trailing bytes are preserved separately, with source and
+checkpoint digests; the original file is untouched. A missing or mismatched checkpoint refuses
+rather than guessing which events were durable. No recovered file is represented as a clean run.
+This is evidence recovery, not automatic working-call resume or external execution recovery.

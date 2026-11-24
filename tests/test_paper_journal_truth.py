@@ -11,9 +11,11 @@ import pytest
 
 from scorpion.broker import PaperIntentBroker
 from scorpion.domain import Effect, EffectKind
+from scorpion.recovery import recover_paper_session_journal
 from scorpion.session_service import (
     Journal,
     JournalError,
+    journal_checkpoint_path,
     journal_receipt_path,
     verify_paper_journal,
 )
@@ -129,3 +131,52 @@ def test_nonfinite_record_refuses_without_consuming_sequence(tmp_path: Path) -> 
     assert journal.submit({"kind": "good"}) == 1
     journal.close()
     assert verify_paper_journal(journal.path)["records"] == 1
+
+
+def test_interrupted_prefix_recovery_preserves_every_source_byte(tmp_path: Path) -> None:
+    path = tmp_path / "interrupted.jsonl"
+    journal = Journal(path)
+    journal.submit({"kind": "intent", "call_id": "synthetic"})
+    journal.close()
+    original = path.read_bytes()
+    # Remove clean-close evidence and model a write after the durable checkpoint.
+    journal_receipt_path(path).unlink()
+    tail = b'{"seq":2,"kind":"unfinished'
+    path.write_bytes(original + tail)
+    dest = tmp_path / "quarantine"
+    report = recover_paper_session_journal(path, dest)
+    assert report["status"] == "VERIFIED_PREFIX_QUARANTINED"
+    assert report["unverified_tail_bytes"] == len(tail)
+    assert not report["resume_authorized"]
+    assert (dest / "verified-prefix.jsonl").read_bytes() == original
+    assert (dest / "unverified-tail.bin").read_bytes() == tail
+    assert path.read_bytes() == original + tail
+    with pytest.raises(FileExistsError):
+        recover_paper_session_journal(path, dest)
+
+
+def test_corrupt_checkpoint_or_prefix_never_creates_recovery(tmp_path: Path) -> None:
+    path = tmp_path / "corrupt.jsonl"
+    journal = Journal(path)
+    journal.submit({"kind": "intent"})
+    journal.close()
+    journal_receipt_path(path).unlink()
+    path.write_bytes(path.read_bytes().replace(b"intent", b"edited"))
+    dest = tmp_path / "refused"
+    with pytest.raises(JournalError, match="prefix_mismatch"):
+        recover_paper_session_journal(path, dest)
+    assert not dest.exists()
+    journal_checkpoint_path(path).unlink()
+    with pytest.raises(JournalError, match="checkpoint_unavailable"):
+        recover_paper_session_journal(path, dest)
+
+
+def test_sealed_copy_keeps_clean_close_distinct_from_recovery(tmp_path: Path) -> None:
+    path = tmp_path / "closed.jsonl"
+    journal = Journal(path)
+    journal.submit({"kind": "intent"})
+    journal.close()
+    report = recover_paper_session_journal(path, tmp_path / "copy")
+    assert report["status"] == "SEALED_COPY"
+    assert report["unverified_tail_bytes"] == 0
+    assert not report["resume_authorized"]
