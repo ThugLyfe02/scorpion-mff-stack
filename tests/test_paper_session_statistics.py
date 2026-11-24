@@ -751,7 +751,8 @@ def study_fixture(tmp_path: Path, *, paired: bool = False) -> StudyFixture:
                         "authority": "RESEARCH_ONLY", "study_sha256": study_pin,
                         "session_date": str(day), "source_id": "fixture-independent-roster",
                         "source_artifact_sha256": artifact_hash, "complete_roster": True,
-                        "observed_through_ts_utc": AS_OF.isoformat(), "signed_ts_utc": AS_OF.isoformat(),
+                        "observed_through_ts_utc": AS_OF.isoformat(),
+                        "signed_ts_utc": AS_OF.isoformat(),
                         "routes": [{
                             "revision_id": row.revision_id, "ticker": row.ticker,
                             "source_ts_utc": row.source_ts_utc.isoformat(),
