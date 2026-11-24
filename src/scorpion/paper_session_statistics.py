@@ -19,7 +19,6 @@ from .confidence_sequence import (
     BoundedMeanConfidenceSequence,
     anytime_bounded_mean_confidence_sequence,
 )
-from .config import MARKET_TZ
 from .cost_adjusted_policy_value import SessionMeanDiagnostics, session_mean_diagnostics
 from .counterfactual import compare_paper_no_chase
 from .distribution_robust import bounded_mixture_stress
