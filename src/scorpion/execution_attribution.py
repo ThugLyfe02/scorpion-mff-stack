@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -275,6 +275,7 @@ class PaperOrderCost:
     rebates_usd: Decimal | None
     net_filled_cost_usd: Decimal | None
     reason: str
+    venue_fill_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,10 +306,29 @@ class PaperRouteCost:
     available_ts_utc: datetime | None
     reason: str
     chase_order_observed: bool = False
+    initial_ts_utc: datetime | None = None
+    source_ts_utc: datetime | None = None
+    initial_spread_bps: Decimal | None = None
+    initial_quote_age_ms: Decimal | None = None
+    initial_signal_age_ms: Decimal | None = None
+    revision_id: str = ""
 
     @property
     def complete(self) -> bool:
         return self.net_shortfall_usd is not None
+
+
+@dataclass(frozen=True, slots=True)
+class PaperSessionCoverage:
+    session_date: date
+    covered_from_ts_utc: datetime
+    covered_through_ts_utc: datetime
+    expected_initial_routes: int
+    journal_complete: bool
+    ingress_complete: bool
+    no_feed_gaps: bool
+    valid: bool
+    reasons: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +354,10 @@ class PaperExecutionCostReport:
     certifies_live_fills: bool = False
     authorizes_training: bool = False
     authorizes_promotion: bool = False
+    source_id: str = ""
+    account_ref: str = ""
+    source_artifact_sha256: str = ""
+    session_coverage: PaperSessionCoverage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,6 +503,7 @@ def _order_cost(
         "OBSERVED" if net is not None else (
             "OUTCOME_UNAVAILABLE" if qty is None else "FEE_UNAVAILABLE_OR_MISMATCHED"
         ),
+        venue_fill_ids=label.venue_fill_ids,
     )
 
 
@@ -495,6 +520,11 @@ def _route_cost(
     target = initial_label.requested_quantity
     initial_time = _stamp(initial.features["intent_ts_utc"])
     deadline = initial_time + timedelta(seconds=policy.horizon_seconds)
+    source_time = _stamp(initial.features["source_ts_utc"])
+    spread = Decimal(str(initial.features["spread_bps"]))
+    quote_age = Decimal(str(initial.features["quote_age_ns"])) / 1_000_000
+    signal_age = Decimal(str(initial.features["source_age_ms"]))
+    revision = str(initial.features["revision_id"])
 
     def withheld(reason: str) -> PaperRouteCost:
         return PaperRouteCost(
@@ -509,6 +539,8 @@ def _route_cost(
             net_fees_usd=None, opportunity_cost_usd=None, net_shortfall_usd=None,
             net_shortfall_bps=None, initial_net_fees_usd=None, chase_net_fees_usd=None,
             chase_notional_usd=None, available_ts_utc=None, reason=reason,
+            initial_ts_utc=initial_time, source_ts_utc=source_time, initial_spread_bps=spread,
+            initial_quote_age_ms=quote_age, initial_signal_age_ms=signal_age, revision_id=revision,
         )
 
     if globally_blocked:
@@ -593,6 +625,70 @@ def _route_cost(
         fees, opportunity, shortfall, shortfall / (target * benchmark) * _BPS,
         initial_net_fees, chase_net_fees, chase_notional, available, "OBSERVED_PAPER_ROUTE",
         chase_order_observed=chase_observed,
+        initial_ts_utc=initial_time, source_ts_utc=source_time, initial_spread_bps=spread,
+        initial_quote_age_ms=quote_age, initial_signal_age_ms=signal_age, revision_id=revision,
+    )
+
+
+def _session_coverage(
+    raw: object, *, routes: tuple[PaperRouteCost, ...], through: datetime,
+    outcome_through: datetime, journal_path: Path, journal_sha256: str,
+) -> PaperSessionCoverage:
+    """Verify a signed coverage declaration against the sealed local journal.
+
+    Completeness of the external feed is attested by the signers, not inferred
+    merely from a clean file receipt. A missing declaration never means no activity.
+    """
+    from .execution_meta_labels import PaperOutcomeError, _fields, _stamp, _text
+    from .session_service import read_verified_paper_records
+
+    if not isinstance(raw, dict):
+        raise PaperOutcomeError("invalid_session_coverage")
+    _fields(raw, {
+        "session_date", "covered_from_ts_utc", "covered_through_ts_utc",
+        "expected_initial_routes", "journal_complete", "ingress_complete", "no_feed_gaps",
+    })
+    day = date.fromisoformat(_text(raw["session_date"]))
+    start, end = _stamp(raw["covered_from_ts_utc"]), _stamp(raw["covered_through_ts_utc"])
+    count = raw["expected_initial_routes"]
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise PaperOutcomeError("invalid_coverage_route_count")
+    if any(type(raw[name]) is not bool for name in (
+        "journal_complete", "ingress_complete", "no_feed_gaps",
+    )):
+        raise PaperOutcomeError("invalid_coverage_flags")
+    reasons: list[str] = []
+    try:
+        hours = session_hours(day)
+    except CalendarNotCovered:
+        hours = None
+    if hours is None or not start <= hours[0] < hours[1] <= end <= min(through, outcome_through):
+        reasons.append("regular_session_coverage_incomplete")
+    if start.astimezone(MARKET_TZ).date() != day or end.astimezone(MARKET_TZ).date() != day:
+        reasons.append("coverage_session_date_conflict")
+    if not all(raw[name] is True for name in (
+        "journal_complete", "ingress_complete", "no_feed_gaps",
+    )):
+        reasons.append("coverage_not_attested_complete")
+    receipt, records = read_verified_paper_records(journal_path)
+    if receipt["sha256"] != journal_sha256:
+        raise PaperOutcomeError("journal_changed_during_coverage_verification")
+    initial_records = [
+        row for row in records if row.get("kind") == "intent" and row.get("chase") is False
+    ]
+    if count != len(initial_records) or count != len(routes):
+        reasons.append("coverage_route_count_mismatch")
+    if any(
+        route.initial_ts_utc is None
+        or route.initial_ts_utc.astimezone(MARKET_TZ).date() != day
+        or hours is None or not hours[0] <= route.initial_ts_utc < hours[1]
+        for route in routes
+    ):
+        reasons.append("coverage_route_session_conflict")
+    return PaperSessionCoverage(
+        day, start, end, count, raw["journal_complete"] is True,
+        raw["ingress_complete"] is True, raw["no_feed_gaps"] is True,
+        not reasons, tuple(reasons),
     )
 
 
@@ -624,12 +720,15 @@ def build_paper_execution_cost_report(
         raw = _bounded_bytes(cost_export_path)
         admission.verify_cost_supplement(raw, collector_signature, reviewer_signature)
         data = _unique_json(raw)
-        _fields(data, {
+        expected_fields = {
             "schema", "authority", "trust_sha256", "cost_policy_sha256", "journal_sha256",
             "outcome_export_sha256", "market_source_id", "market_artifact_sha256",
             "complete_fee_export", "observed_through_ts_utc", "collected_ts_utc",
             "reviewed_ts_utc", "fees", "marks",
-        })
+        }
+        if "session_coverage" in data:
+            expected_fields.add("session_coverage")
+        _fields(data, expected_fields)
         artifact = _bounded_bytes(market_artifact_path)
         market_hash = hashlib.sha256(artifact).hexdigest()
         export_hash = hashlib.sha256(raw).hexdigest()
@@ -705,15 +804,25 @@ def build_paper_execution_cost_report(
                           Decimal(0))
         bps = total / denominator * _BPS if total is not None and denominator else None
         order_rows = tuple(order_costs[row.feature_sha256] for row in evidence.rows)
+        coverage = (
+            _session_coverage(
+                data["session_coverage"], routes=tuple(routes), through=through,
+                outcome_through=outcome.observed_through_ts_utc,
+                journal_path=admission.journal_path, journal_sha256=outcome.journal_sha256,
+            ) if "session_coverage" in data else None
+        )
         material = {
             "version": "paper-execution-cost-report-v1", "journal_sha256": outcome.journal_sha256,
             "outcome_report_sha256": outcome.report_sha256, "policy_sha256": expected_policy_sha256,
             "cost_export_sha256": export_hash, "market_artifact_sha256": market_hash,
             "as_of": as_of, "orders": order_rows, "routes": tuple(routes), "blockers": blockers,
+            "session_coverage": coverage,
         }
         return PaperExecutionCostReport(
             outcome.journal_sha256, outcome.export_sha256, outcome.report_sha256,
             outcome.trust_sha256, expected_policy_sha256, export_hash, market_hash,
             policy.market_source_id, as_of, order_rows, tuple(routes), len(initials),
             len(complete), total, bps, tuple(blockers), stable_hash(material),
+            source_id=outcome.source_id, account_ref=outcome.account_ref,
+            source_artifact_sha256=outcome.source_artifact_sha256, session_coverage=coverage,
         )

@@ -265,6 +265,7 @@ class PaperOutcomeLabel:
     filled_notional_usd: Decimal | None = None
     terminal_ts_utc: datetime | None = None
     submitted_ts_utc: datetime | None = None
+    venue_fill_ids: tuple[str, ...] = ()
 
     @property
     def observed_fill_target(self) -> int | None:
@@ -680,6 +681,7 @@ def admit_paper_outcome_labels(
             ),
             terminal_ts_utc=order.terminal if order is not None and quantity is not None else None,
             submitted_ts_utc=order.submitted if order is not None and quantity is not None else None,
+            venue_fill_ids=tuple(sorted(fill[0] for fill in order.fills)) if order else (),
         )
         labels.append(label)
         counts[outcome.value] = counts.get(outcome.value, 0) + 1

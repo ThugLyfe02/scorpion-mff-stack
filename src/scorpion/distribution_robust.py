@@ -165,3 +165,24 @@ def evaluate_distribution_robustness(
     else:
         status = DistributionRobustStatus.PASS
     return DistributionRobustReport(tuple(axes), status, tuple(failures))
+
+
+def bounded_mixture_stress(
+    rows: list[tuple[str, float, float]], *, density_ratio_bound: float,
+) -> tuple[float, tuple[tuple[str, float], ...]]:
+    """Expose the existing exact mixture solver for descriptive numeric regime scores."""
+    import math
+
+    if (
+        not rows or not math.isfinite(density_ratio_bound) or density_ratio_bound < 1
+        or len({name for name, _, _ in rows}) != len(rows)
+        or any(not name or not math.isfinite(p) or p <= 0 or not math.isfinite(v)
+               for name, p, v in rows)
+        or not math.isclose(math.fsum(p for _, p, _ in rows), 1.0, abs_tol=1e-9)
+    ):
+        raise ValueError("invalid bounded mixture inputs")
+    stressed = _worst_case_weights(rows, density_ratio_bound)
+    return (
+        math.fsum(weight * value for _, weight, value in stressed),
+        tuple((name, weight) for name, weight, _ in stressed),
+    )
