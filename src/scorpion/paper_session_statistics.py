@@ -536,11 +536,12 @@ def _concentration_blockers(
 def _endpoint(
     days: Sequence[_Day], policy: PaperCohortPolicy, endpoint: str,
     common_blockers: tuple[str, ...], chase_count: int,
+    *, alpha_override: float | None = None,
 ) -> PaperEndpointStatistics:
     values = [value for day in days for value in _observed_values(day, endpoint)]
     known = sum(day.expected or 0 for day in days)
     intervals = tuple(_bounds(day, endpoint, policy.clip_bps) for day in days)
-    alpha = policy.family_alpha / _FAMILY_ENDPOINTS
+    alpha = policy.family_alpha / _FAMILY_ENDPOINTS if alpha_override is None else alpha_override
     confidence = anytime_bounded_mean_confidence_sequence(
         intervals, lower=-policy.clip_bps, upper=policy.clip_bps, alpha=alpha,
     )
@@ -733,10 +734,19 @@ def _evaluate_days(
     )
 
 
-def evaluate_paper_session_cohort(
+@dataclass(frozen=True, slots=True)
+class VerifiedPaperCohort:
+    policy: PaperCohortPolicy
+    days: tuple[_Day, ...]
+    costs: tuple[tuple[date, PaperExecutionCostReport], ...]
+    evidence_identities: tuple[str, ...]
+    report: PaperSessionCohortReport
+
+
+def load_verified_paper_cohort(
     *, cohort_path: Path, expected_cohort_sha256: str, inputs_path: Path,
     trust_path: Path, cost_policy_path: Path, as_of: datetime,
-) -> PaperSessionCohortReport:
+) -> VerifiedPaperCohort:
     """Verify original signed inputs per elapsed exchange session, then analyze.
 
     No caller-supplied numeric report or claim of source completeness is trusted
@@ -766,6 +776,7 @@ def evaluate_paper_session_cohort(
     seen_orders: set[str] = set()
     seen_fills: set[str] = set()
     days: list[_Day] = []
+    admitted_costs: list[tuple[date, PaperExecutionCostReport]] = []
     route_count = 0
 
     def claim(value: str, seen: set[str], reason: str) -> None:
@@ -813,5 +824,35 @@ def evaluate_paper_session_cohort(
         route_count += len(cost.routes)
         if route_count > _MAX_ROUTES:
             raise PaperCohortError("cohort_route_bound")
+        admitted_costs.append((day, cost))
         days.append(_as_day(day, cost))
-    return _evaluate_days(tuple(days), policy, expected_cohort_sha256, as_of)
+    # Domain-separated keys allow common signal identity across arms to collapse only
+    # within one trial, while preserving venue account-scoped order/fill identities.
+    identity_keys = {
+        stable_hash((kind, item))
+        for kind, items in (
+            ("artifact", seen_artifacts), ("call", seen_calls), ("revision", seen_revisions),
+        )
+        for item in items
+    }
+    identity_keys.update(
+        stable_hash((kind, trust.source_id, trust.account_ref, item))
+        for kind, items in (("order", seen_orders), ("fill", seen_fills))
+        for item in items
+    )
+    result = _evaluate_days(tuple(days), policy, expected_cohort_sha256, as_of)
+    return VerifiedPaperCohort(
+        policy, tuple(days), tuple(admitted_costs), tuple(sorted(identity_keys)), result,
+    )
+
+
+def evaluate_paper_session_cohort(
+    *, cohort_path: Path, expected_cohort_sha256: str, inputs_path: Path,
+    trust_path: Path, cost_policy_path: Path, as_of: datetime,
+) -> PaperSessionCohortReport:
+    """Compatibility diagnostic; formal qualification requires a reserved study."""
+    return load_verified_paper_cohort(
+        cohort_path=cohort_path, expected_cohort_sha256=expected_cohort_sha256,
+        inputs_path=inputs_path, trust_path=trust_path, cost_policy_path=cost_policy_path,
+        as_of=as_of,
+    ).report

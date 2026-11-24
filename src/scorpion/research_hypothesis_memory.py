@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS prospective_study_finalizations (
     approval_sha256 TEXT NOT NULL,
     previous_chain_hash TEXT NOT NULL,
     disposition TEXT NOT NULL,
+    evidence_keys_json TEXT NOT NULL,
     finalized_ts_utc TEXT NOT NULL,
     record_hash TEXT NOT NULL UNIQUE
 );
@@ -754,9 +755,17 @@ def _verify_hypothesis_memory_connection(
     if len(roots) > 1 or units > _PROSPECTIVE_BUDGET_UNITS:
         failures.append("prospective_root_or_budget_conflict")
     finalized_by_id: dict[str, str] = {}
+    final_evidence: set[str] = set()
     for row in finalizations:
         identifier = _hash(_prospective_finalization_payload(row))
         reservation = reservation_by_study.get(str(row["study_sha256"]))
+        keys = json.loads(str(row["evidence_keys_json"]))
+        if not isinstance(keys, list) or not all(_is_digest(key) for key in keys):
+            failures.append("prospective_evidence_identity_invalid")
+            keys = []
+        if len(keys) != len(set(keys)) or final_evidence.intersection(keys):
+            failures.append("prospective_cross_study_evidence_reuse")
+        final_evidence.update(keys)
         if (
             identifier != str(row["record_hash"]) or reservation is None
             or row["root_sha256"] != reservation["root_sha256"]
@@ -859,7 +868,7 @@ def _prospective_finalization_payload(row: sqlite3.Row | dict[str, object]) -> d
         "version": "prospective-finalization-v1",
         **{key: row[key] for key in (
             "study_sha256", "root_sha256", "dossier_sha256", "approval_sha256",
-            "previous_chain_hash", "disposition", "finalized_ts_utc",
+            "previous_chain_hash", "disposition", "evidence_keys_json", "finalized_ts_utc",
         )},
     }
 
@@ -1013,6 +1022,7 @@ def read_prospective_reservation(
 def _finalize_prospective_study(
     path: Path, *, study_sha256: str, root_sha256: str, dossier_sha256: str,
     approval_sha256: str, expected_chain_hash: str, disposition: str, now: datetime,
+    evidence_keys: tuple[str, ...],
 ) -> ProspectiveFinalization:
     """Internal persistence boundary for independently reviewed research, not activation."""
     if not all(_is_digest(v) for v in (
@@ -1021,6 +1031,10 @@ def _finalize_prospective_study(
         raise ValueError("invalid prospective finalization")
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("naive finalization timestamp")
+    if tuple(sorted(set(evidence_keys))) != evidence_keys or not all(
+        _is_digest(key) for key in evidence_keys
+    ) or len(evidence_keys) > 1_000_000:
+        raise ValueError("invalid finalization evidence keys")
     db = _prospective_connection(path)
     try:
         db.execute("BEGIN IMMEDIATE")
@@ -1034,15 +1048,19 @@ def _finalize_prospective_study(
             "SELECT 1 FROM prospective_study_finalizations WHERE study_sha256=?", (study_sha256,),
         ).fetchone() is not None:
             raise ValueError("prospective study already finalized")
+        for row in db.execute("SELECT evidence_keys_json FROM prospective_study_finalizations"):
+            if set(evidence_keys).intersection(json.loads(row["evidence_keys_json"])):
+                raise ValueError("prospective cross-study evidence reuse")
         material: dict[str, object] = {
             "study_sha256": study_sha256, "root_sha256": root_sha256,
             "dossier_sha256": dossier_sha256, "approval_sha256": approval_sha256,
             "previous_chain_hash": expected_chain_hash, "disposition": disposition,
+            "evidence_keys_json": _json(list(evidence_keys)),
             "finalized_ts_utc": now.astimezone(UTC).isoformat(),
         }
         record_hash = _hash(_prospective_finalization_payload(material))
         db.execute(
-            "INSERT INTO prospective_study_finalizations VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO prospective_study_finalizations VALUES (?,?,?,?,?,?,?,?,?)",
             (*material.values(), record_hash),
         )
         _append_event(

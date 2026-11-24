@@ -332,6 +332,16 @@ class PaperSessionCoverage:
 
 
 @dataclass(frozen=True, slots=True)
+class PaperTrialBinding:
+    study_sha256: str
+    arm: str
+    artifact_sha256: str
+    code_revision: str
+    common_roster_sha256: str
+    execution_manifest_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class PaperExecutionCostReport:
     journal_sha256: str
     outcome_export_sha256: str
@@ -358,7 +368,8 @@ class PaperExecutionCostReport:
     account_ref: str = ""
     source_artifact_sha256: str = ""
     session_coverage: PaperSessionCoverage | None = None
-    report_schema: str = "scorpion.paper-execution-cost-report.v2"
+    report_schema: str = "scorpion.paper-execution-cost-report.v3"
+    trial_binding: PaperTrialBinding | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -797,6 +808,8 @@ def build_paper_execution_cost_report(
         }
         if "session_coverage" in data:
             expected_fields.add("session_coverage")
+        if "trial_binding" in data:
+            expected_fields.add("trial_binding")
         _fields(data, expected_fields)
         artifact = _bounded_bytes(market_artifact_path)
         market_hash = hashlib.sha256(artifact).hexdigest()
@@ -881,8 +894,10 @@ def build_paper_execution_cost_report(
                 expected_rules_sha256=outcome.rules_sha256,
             ) if "session_coverage" in data else None
         )
+        binding = _trial_binding(data["trial_binding"]) if "trial_binding" in data else None
         material = {
-            "version": "paper-execution-cost-report-v2", "journal_sha256": outcome.journal_sha256,
+            "version": "paper-execution-cost-report-v3", "journal_sha256": outcome.journal_sha256,
+            "trial_binding": binding,
             "outcome_report_sha256": outcome.report_sha256, "policy_sha256": expected_policy_sha256,
             "cost_export_sha256": export_hash, "market_artifact_sha256": market_hash,
             "as_of": as_of, "orders": order_rows, "routes": tuple(routes), "blockers": blockers,
@@ -895,4 +910,27 @@ def build_paper_execution_cost_report(
             len(complete), total, bps, tuple(blockers), stable_hash(material),
             source_id=outcome.source_id, account_ref=outcome.account_ref,
             source_artifact_sha256=outcome.source_artifact_sha256, session_coverage=coverage,
+            trial_binding=binding,
         )
+
+
+def _trial_binding(raw: object) -> PaperTrialBinding:
+    from .execution_meta_labels import PaperOutcomeError, _fields, _hex, _text
+
+    if not isinstance(raw, dict):
+        raise PaperOutcomeError("invalid_paper_trial_binding")
+    _fields(raw, {
+        "study_sha256", "arm", "artifact_sha256", "code_revision",
+        "common_roster_sha256", "execution_manifest_sha256",
+    })
+    arm = _text(raw["arm"])
+    revision = _text(raw["code_revision"])
+    if arm not in ("INCUMBENT", "CHALLENGER"):
+        raise PaperOutcomeError("invalid_paper_trial_arm")
+    _hex(revision, 20)
+    return PaperTrialBinding(
+        _hex(raw["study_sha256"], 32).hex(), arm,
+        _hex(raw["artifact_sha256"], 32).hex(), revision,
+        _hex(raw["common_roster_sha256"], 32).hex(),
+        _hex(raw["execution_manifest_sha256"], 32).hex(),
+    )
