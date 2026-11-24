@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -81,7 +81,7 @@ def evaluate_hierarchical_shrinkage(
 
 
 def evaluate_numeric_group_shrinkage(
-    groups: dict[str, Sequence[float]], *, policy: HierarchicalPolicy | None = None,
+    groups: Mapping[str, Sequence[float]], *, policy: HierarchicalPolicy | None = None,
 ) -> HierarchicalReport:
     """Shared empirical-Bayes moment estimator for numeric groups.
 
