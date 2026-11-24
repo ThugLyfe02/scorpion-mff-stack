@@ -95,8 +95,8 @@ class PaperSessionStatistic:
     status: str
     expected_routes: int | None
     observed_primary_routes: int
-    observed_chase_routes: int
-    executed_chase_routes: int
+    known_chase_score_routes: int
+    observed_terminal_chase_routes: int
     primary_bounds_bps: tuple[float, float]
     chase_bounds_bps: tuple[float, float]
     primary_raw_mean_bps: float | None
@@ -160,7 +160,7 @@ class PaperSessionCohortReport:
     complete_sessions: int
     known_expected_routes: int
     observed_primary_routes: int
-    executed_chase_routes: int
+    observed_terminal_chase_routes: int
     missing_or_invalid_sessions: int
     observed_route_coverage: float | None
     kish_effective_session_count: float | None
@@ -189,7 +189,7 @@ class _RouteScore:
     regimes: tuple[tuple[str, str], ...]
     primary: float | None
     chase: float | None
-    executed_chase: bool
+    terminal_chase_observed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -578,7 +578,7 @@ def _evaluate_days(
         raise PaperCohortError("session_prefix_mismatch")
     known = sum(day.expected or 0 for day in days)
     observed = sum(len(_observed_values(day, "primary")) for day in days)
-    chases = sum(row.executed_chase for day in days for row in day.scores)
+    chases = sum(row.terminal_chase_observed for day in days for row in day.scores)
     covered = sum(day.expected is not None for day in days)
     complete = sum(day.status in ("COVERED_EMPTY", "COVERED_COMPLETE") for day in days)
     kish, day_share, ticker_share, abs_share = _concentration(days)
@@ -611,7 +611,7 @@ def _evaluate_days(
     session_rows = tuple(PaperSessionStatistic(
         day.date, day.status, day.expected,
         len(_observed_values(day, "primary")), len(_observed_values(day, "chase")),
-        sum(row.executed_chase for row in day.scores),
+        sum(row.terminal_chase_observed for row in day.scores),
         _bounds(day, "primary", policy.clip_bps), _bounds(day, "chase", policy.clip_bps),
         _raw_day_mean(day, "primary"), _raw_day_mean(day, "chase"), day.report_hash, day.reasons,
     ) for day in days)

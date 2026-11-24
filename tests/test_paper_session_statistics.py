@@ -209,8 +209,10 @@ class SignedCohort:
         )
 
     def index(self, bundles: list[SignedBundle] | None = None) -> None:
-        put(self.inputs, {"schema": "scorpion.paper-session-inputs.v1",
-                          "sessions": [b.row for b in (self.bundles if bundles is None else bundles)]})
+        rows = self.bundles if bundles is None else bundles
+        put(self.inputs, {
+            "schema": "scorpion.paper-session-inputs.v1", "sessions": [b.row for b in rows],
+        })
 
     def report(self, as_of: datetime = AS_OF):
         return evaluate_paper_session_cohort(
@@ -379,7 +381,7 @@ def test_signed_cohort_keeps_calendar_and_missing_day(signed_cohort: SignedCohor
     assert result.planned_sessions == result.elapsed_sessions == 4
     assert result.complete_sessions == 3
     assert result.known_expected_routes == 2
-    assert result.observed_primary_routes == 2 and result.executed_chase_routes == 1
+    assert result.observed_primary_routes == 2 and result.observed_terminal_chase_routes == 1
     assert [v.status for v in result.sessions] == [
         "COVERED_COMPLETE", "COVERED_COMPLETE", "COVERED_EMPTY", "MISSING_SESSION",
     ]

@@ -321,3 +321,8 @@ promote. The CLI returns nonzero for blocked/insufficient evidence while printin
 Prospective independent qualification, global hypothesis-budget governance, regime shift
 validation on fresh data, authentic live market feed, signed venue adapter, and complete
 round-trip P&L remain separate prerequisites.
+
+Stage 2 cost-report hashes now use schema scorpion.paper-execution-cost-report.v2 to bind the
+new coverage, identities and regime fields. Prior v1 reports remain reproducible at their old
+commit; they are not silently reinterpreted as complete-session evidence. Terminal chase
+counts include attested zero-fill cancellations, not just orders that actually acquired shares.
