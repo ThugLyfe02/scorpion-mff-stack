@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -181,3 +182,139 @@ def load_snapshot(path: str | Path) -> list[VenuePosition]:
     except json.JSONDecodeError as exc:
         raise ReconcileError(f"venue snapshot {target} is not JSON: {exc}") from None
     return snapshot_from_payload(raw)
+
+
+@dataclass(frozen=True)
+class PaperOrderObservation:
+    """A normalized terminal paper-order observation; never a live order instruction."""
+
+    client_id: str
+    osi: str
+    action: str
+    requested_qty: int
+    limit: Decimal
+    filled_qty: int
+    average_price: Decimal | None
+    state: str
+
+    def __post_init__(self) -> None:
+        if not self.client_id or not self.osi or self.action not in ("buy", "sell"):
+            raise ReconcileError("invalid paper order identity")
+        if (
+            type(self.requested_qty) is not int or self.requested_qty <= 0
+            or type(self.filled_qty) is not int
+            or not 0 <= self.filled_qty <= self.requested_qty
+        ):
+            raise ReconcileError("invalid paper order quantity")
+        if not self.limit.is_finite() or self.limit <= 0:
+            raise ReconcileError("invalid paper order limit")
+        if self.filled_qty:
+            if (
+                self.average_price is None or not self.average_price.is_finite()
+                or self.average_price <= 0
+            ):
+                raise ReconcileError("filled paper order has no valid average price")
+        elif self.average_price is not None:
+            raise ReconcileError("unfilled paper order cannot claim a fill price")
+        if self.state not in (
+            "FILLED", "CANCELLED", "REJECTED", "EXPIRED", "PENDING", "WORKING",
+            "PARTIAL", "UNKNOWN",
+        ):
+            raise ReconcileError("unknown paper order state")
+        if self.state == "FILLED" and self.filled_qty != self.requested_qty:
+            raise ReconcileError("filled paper order has incomplete quantity")
+        if self.state in ("REJECTED", "PENDING", "WORKING") and self.filled_qty:
+            raise ReconcileError("paper order state contradicts fills")
+        if self.state == "PARTIAL" and not 0 < self.filled_qty < self.requested_qty:
+            raise ReconcileError("partial paper order has invalid quantity")
+
+    @property
+    def terminal(self) -> bool:
+        return self.state in ("FILLED", "CANCELLED", "REJECTED", "EXPIRED")
+
+
+def paper_orders_from_payload(payload: object) -> list[PaperOrderObservation]:
+    """Read explicitly normalized rows; never guess vendor field names or order identities."""
+    if not isinstance(payload, list):
+        raise ReconcileError("paper orders must be an array")
+    rows: list[PaperOrderObservation] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            raise ReconcileError("paper order must be an object")
+        try:
+            identity = (row["client_id"], row["osi"], row["action"], row["state"])
+            if not all(isinstance(v, str) and v for v in identity):
+                raise ReconcileError("paper order identity fields must be strings")
+            price = row["average_price"]
+            rows.append(PaperOrderObservation(
+                client_id=row["client_id"], osi=row["osi"], action=row["action"],
+                requested_qty=row["requested_qty"], limit=Decimal(str(row["limit"])),
+                filled_qty=row["filled_qty"],
+                average_price=Decimal(str(price)) if price is not None else None,
+                state=row["state"],
+            ))
+        except (KeyError, InvalidOperation, TypeError) as exc:
+            raise ReconcileError("malformed normalized paper order") from exc
+    return rows
+
+
+def compare_paper_orders(
+    modeled: Iterable[PaperOrderObservation], external: Iterable[PaperOrderObservation],
+) -> dict[str, Any]:
+    """Compare matched terminal orders without treating missing orders as zero fills."""
+    def index(rows: Iterable[PaperOrderObservation]) -> dict[str, PaperOrderObservation]:
+        result: dict[str, PaperOrderObservation] = {}
+        for row in rows:
+            if row.client_id in result:
+                raise ReconcileError("duplicate paper client identity")
+            result[row.client_id] = row
+        return result
+
+    local, venue = index(modeled), index(external)
+    missing = sorted(local.keys() - venue.keys())
+    extra = sorted(venue.keys() - local.keys())
+    issues: list[dict[str, str]] = []
+    equal_fill_samples = 0
+    cost = Decimal(0)
+    for key in sorted(local.keys() & venue.keys()):
+        a, b = local[key], venue[key]
+        reasons: list[str] = []
+        identity_match = (
+            (a.osi, a.action, a.requested_qty, a.limit)
+            == (b.osi, b.action, b.requested_qty, b.limit)
+        )
+        if not identity_match:
+            reasons.append("intent_mismatch")
+        if not a.terminal or not b.terminal:
+            reasons.append("unresolved_order")
+        if a.state != b.state:
+            reasons.append("terminal_state_mismatch")
+        if a.filled_qty != b.filled_qty:
+            reasons.append("fill_quantity_mismatch")
+        if b.average_price is not None and (
+            (b.action == "buy" and b.average_price > b.limit)
+            or (b.action == "sell" and b.average_price < b.limit)
+        ):
+            reasons.append("venue_limit_violation")
+        # Price economics are comparable only on an identical, terminal, filled quantity.
+        if (
+            identity_match and a.terminal and b.terminal and a.filled_qty == b.filled_qty
+            and a.filled_qty > 0 and a.average_price is not None
+            and b.average_price is not None
+        ):
+            equal_fill_samples += 1
+            direction = 1 if a.action == "buy" else -1
+            cost += (b.average_price - a.average_price) * a.filled_qty * 100 * direction
+            if a.average_price != b.average_price:
+                reasons.append("fill_price_difference")
+        if reasons:
+            issues.extend({"client_id": key, "reason": reason} for reason in reasons)
+    return {
+        "modeled_orders": len(local), "external_orders": len(venue),
+        "matched_orders": len(local.keys() & venue.keys()),
+        "missing_order_ids": missing, "extra_order_ids": extra, "issues": issues,
+        "equal_quantity_price_samples": equal_fill_samples,
+        "external_minus_modeled_cost_usd": str(cost) if equal_fill_samples else None,
+        "coverage_complete": bool(local) and not missing and not extra,
+        "exact_parity": bool(local) and not missing and not extra and not issues,
+    }

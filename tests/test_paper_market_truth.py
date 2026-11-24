@@ -10,8 +10,10 @@ import pytest
 
 from scorpion_mff.account import FeeModel
 from scorpion_mff.broker import BrokerError
-from scorpion_mff.paper_capture import run_capture
+from scorpion_mff.execution_book import ExecutionBook
+from scorpion_mff.paper_capture import compare_capture_venue, run_capture
 from scorpion_mff.paper_market import MarketQuote, PaperQuoteBook, QuoteDrivenPaperBroker
+from scorpion_mff.reconcile import ReconcileError
 from scorpion_mff.types import OrderIntent
 
 T = datetime(2026, 11, 23, 15, 0, tzinfo=UTC).timestamp()
@@ -264,3 +266,74 @@ def test_legacy_capture_does_not_invent_net_return(tmp_path: Path) -> None:
     assert report["modeled_realized_usd"] == 15.0
     assert report["modeled_net_realized_usd"] is None
     assert not report["modeled_sample_complete"]
+
+
+def venue_fixture(tmp_path: Path) -> tuple[Path, Path, dict]:
+    run = tmp_path / "reconcile-run"
+    summary = run_capture(
+        strict_capture(), run, source="synthetic model source",
+        allowed_authors=frozenset({"authorized"}), require_market_status=True,
+        fee_model=FeeModel(), max_signal_age_s=10,
+    )
+    book = ExecutionBook.load(run / "modeled_execution.jsonl")
+    payload = {
+        "schema": "scorpion.paper-venue-export.v1", "authority": "PAPER_ONLY",
+        "source": "independent fixture", "input_sha256": summary["input_sha256"],
+        "session_date": summary["session_date"], "as_of_ts": T+2,
+        "complete_order_export": True, "positions": [],
+        "orders": [
+            dict(client_id=o.client_id, osi=OSI, action=o.action,
+                 requested_qty=o.intent.qty, limit=str(o.intent.limit),
+                 filled_qty=o.filled_qty, average_price=str(o.avg_price), state=o.state)
+            for o in book.orders.values()
+        ],
+    }
+    export = tmp_path / "venue.json"
+    export.write_text(json.dumps(payload))
+    return run, export, payload
+
+
+def test_paper_venue_export_exact_match_is_not_live_certification(tmp_path: Path) -> None:
+    run, export, _ = venue_fixture(tmp_path)
+    report = compare_capture_venue(run, export)
+    assert report["exact_parity"]
+    assert report["orders"]["equal_quantity_price_samples"] == 2
+    assert report["orders"]["external_minus_modeled_cost_usd"] == "0.00"
+    assert report["authority"] == "RESEARCH_ONLY"
+    assert not report["certifies_live_fills"]
+
+
+def test_venue_missing_orders_are_not_zero_fills(tmp_path: Path) -> None:
+    run, export, payload = venue_fixture(tmp_path)
+    payload["orders"].pop()
+    export.write_text(json.dumps(payload))
+    report = compare_capture_venue(run, export)
+    assert not report["exact_parity"]
+    assert len(report["orders"]["missing_order_ids"]) == 1
+    assert not report["orders"]["coverage_complete"]
+
+
+def test_venue_price_differences_are_signed_and_positions_reconciled(tmp_path: Path) -> None:
+    run, export, payload = venue_fixture(tmp_path)
+    buy = next(o for o in payload["orders"] if o["action"] == "buy")
+    buy["average_price"] = "1.04"
+    payload["positions"] = [dict(contract_key=OSI, contracts=1)]
+    export.write_text(json.dumps(payload))
+    report = compare_capture_venue(run, export)
+    assert report["orders"]["external_minus_modeled_cost_usd"] == "-1.00"
+    assert not report["positions"]["clean"]
+    assert not report["exact_parity"]
+
+
+def test_venue_scope_and_local_ledger_tamper_refuse(tmp_path: Path) -> None:
+    run, export, payload = venue_fixture(tmp_path)
+    payload["authority"] = "LIVE"
+    export.write_text(json.dumps(payload))
+    with pytest.raises(ReconcileError, match="scope"):
+        compare_capture_venue(run, export)
+    payload["authority"] = "PAPER_ONLY"
+    export.write_text(json.dumps(payload))
+    ledger = run / "modeled_execution.jsonl"
+    ledger.write_bytes(ledger.read_bytes() + b"\n")
+    with pytest.raises(ReconcileError, match="unverified"):
+        compare_capture_venue(run, export)

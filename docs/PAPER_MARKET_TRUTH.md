@@ -51,3 +51,24 @@ is withheld if fees are missing, there are no fills, the book is open, or reconc
 The independently maintained simulator acknowledgement and inventory state must agree with the
 execution ledger; flat cashflow must agree with its gross P&L. A flat empty session is not a
 qualified sample. No data licensing, live fills, real-money readiness or profitable edge is certified.
+
+## External paper comparison (offline, no vendor submission)
+
+The capture summary now binds its modeled ledger bytes and capture end timestamp. Once an
+independent, authorized paper venue provides a normalized export, compare without sending orders:
+
+```sh
+python -m scorpion_mff.paper_capture reconcile --run /private/runs/session-001 \\
+  --venue-export /private/venue.json
+```
+
+Export schema: scorpion.paper-venue-export.v1, authority PAPER_ONLY, source (distinct declared
+source), input_sha256 (capture identity), session_date, as_of_ts (epoch seconds at or after capture
+end, same ET date), complete_order_export=true, orders and positions. Each order must include the
+original client_id, canonical 21-character osi, action (buy/sell), requested_qty, limit,
+filled_qty, average_price (null for no fill), and state. Positions use the existing snapshot
+contract with canonical OSI as contract_key. A vendor mapping must preserve these identities.
+Missing, extra, unresolved and mismatched orders are explicit; price cost is computed only for
+matched equal positive terminal quantities. Position drift reuses the existing comparator.
+Exact parity is a diagnostic, not market truth or deployment approval. Source independence and
+export completeness are declared, not authenticated. A vendor adapter and credentials remain open.

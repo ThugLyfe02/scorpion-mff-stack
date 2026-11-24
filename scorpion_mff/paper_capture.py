@@ -14,7 +14,7 @@ import os
 import sys
 from collections import Counter
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -31,6 +31,15 @@ from .killswitch import KillSwitch
 from .listener import Listener, TapeTransport
 from .paper_market import MarketQuote, PaperQuoteBook, QuoteDrivenPaperBroker
 from .parser import CHANNEL_IDS
+from .reconcile import (
+    PaperOrderObservation,
+    ReconcileError,
+    VenuePosition,
+    compare_paper_orders,
+    paper_orders_from_payload,
+    reconcile,
+    snapshot_from_payload,
+)
 from .types import RawMessage
 
 MODEL = "regular-session-crossing-full-size-pessimistic-limit-v1"
@@ -235,6 +244,11 @@ def run_capture(
         ),
         "open_modeled_positions": book.snapshot()["positions"],
         "execution_digest": book.digest(), "ledger_integrity": integrity,
+        "capture_end_ts": clock.now,
+        "modeled_execution_sha256": hashlib.sha256(
+            (output / "modeled_execution.jsonl").read_bytes()
+            if (output / "modeled_execution.jsonl").exists() else b""
+        ).hexdigest(),
         "simulator_fill_match": fill_match, "simulator_inventory_match": inventory_match,
         "flat_cashflow_match": cashflow_match,
         "session_flat": flat,
@@ -253,7 +267,109 @@ def run_capture(
     return summary
 
 
+def compare_capture_venue(run: Path, export_path: Path) -> dict[str, Any]:
+    """Offline comparison of independent paper observations with a completed local capture.
+
+    The export's provenance is declared, not authenticated. This cannot submit orders
+    or establish that the venue's simulator represents real execution.
+    """
+    summary = json.loads((run / "summary.json").read_text(encoding="utf-8"))
+    ledger_path = run / "modeled_execution.jsonl"
+    ledger_bytes = ledger_path.read_bytes()
+    if (
+        summary.get("authority") != "PAPER_ONLY"
+        or summary.get("ledger_integrity") is not True
+        or summary.get("modeled_execution_sha256") != hashlib.sha256(ledger_bytes).hexdigest()
+    ):
+        raise ReconcileError("unverified modeled capture")
+    book = ExecutionBook.load(
+        ledger_path, day_of=lambda ts: et_date(datetime.fromtimestamp(ts, UTC)).isoformat(),
+    )
+    if (
+        book.digest() != summary.get("execution_digest") or book.torn_lines
+        or book.anomalies or book.unresolved_orders()
+    ):
+        raise ReconcileError("modeled ledger does not reproduce")
+    raw = export_path.read_bytes()
+    export = json.loads(raw)
+    if not isinstance(export, dict):
+        raise ReconcileError("paper venue export must be an object")
+    source = export.get("source")
+    if (
+        export.get("schema") != "scorpion.paper-venue-export.v1"
+        or export.get("authority") != "PAPER_ONLY"
+        or not isinstance(source, str) or not source.strip()
+        or source == summary.get("source_declared_not_authenticated")
+        or export.get("input_sha256") != summary.get("input_sha256")
+        or export.get("session_date") != summary.get("session_date")
+        or export.get("complete_order_export") is not True
+    ):
+        raise ReconcileError("paper venue scope or provenance mismatch")
+    day = date.fromisoformat(summary["session_date"])
+    cutoff = export.get("as_of_ts")
+    if (
+        type(cutoff) not in (int, float) or not math.isfinite(cutoff)
+        or cutoff < summary["capture_end_ts"]
+        or et_date(datetime.fromtimestamp(cutoff, UTC)) != day
+    ):
+        raise ReconcileError("paper venue snapshot outside capture session")
+    modeled = [
+        PaperOrderObservation(
+            client_id=order.client_id,
+            osi=OptionContract.from_contract_key(order.contract_key, day).osi_symbol,
+            action=order.action, requested_qty=order.intent.qty,
+            limit=Decimal(str(order.intent.limit)), filled_qty=order.filled_qty,
+            average_price=Decimal(str(order.avg_price)) if order.filled_qty else None,
+            state=order.state,
+        )
+        for order in book.orders.values()
+    ]
+    external = paper_orders_from_payload(export.get("orders"))
+    # Normalize and validate OSI identities; do not join on ticker or guessed expiry.
+    for order in external:
+        if OptionContract.parse_osi_symbol(order.osi).osi_symbol != order.osi:
+            raise ReconcileError("noncanonical venue contract")
+    venue_positions = snapshot_from_payload(export.get("positions"))
+    for position in venue_positions:
+        canonical = OptionContract.parse_osi_symbol(position.contract_key).osi_symbol
+        if canonical != position.contract_key:
+            raise ReconcileError("noncanonical venue position")
+    # Reuse the established book-drift comparator with canonical OSI identities.
+    local_positions = [
+        replace(position, contract_key=OptionContract.from_contract_key(
+            position.contract_key, day,
+        ).osi_symbol)
+        for position in book.open_positions()
+    ]
+    positions = reconcile(local_positions, [
+        VenuePosition(p.contract_key, p.contracts) for p in venue_positions
+    ])
+    comparison = compare_paper_orders(modeled, external)
+    return {
+        "authority": "RESEARCH_ONLY", "source_declared_not_authenticated": source,
+        "input_sha256": summary["input_sha256"],
+        "modeled_execution_sha256": summary["modeled_execution_sha256"],
+        "venue_export_sha256": hashlib.sha256(raw).hexdigest(),
+        "as_of_ts": cutoff, "orders": comparison, "positions": positions.to_dict(),
+        "exact_parity": comparison["exact_parity"] and positions.clean,
+        "certifies_live_fills": False,
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    args_list = list(sys.argv[1:] if argv is None else argv)
+    if args_list and args_list[0] == "reconcile":
+        compare = argparse.ArgumentParser(description="Compare a completed paper run")
+        compare.add_argument("--run", required=True, type=Path)
+        compare.add_argument("--venue-export", required=True, type=Path)
+        parsed = compare.parse_args(args_list[1:])
+        try:
+            report = compare_capture_venue(parsed.run, parsed.venue_export)
+        except (OSError, ValueError) as exc:
+            print(json.dumps({"error": type(exc).__name__, "verified": False}))
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return 0 if report["exact_parity"] else 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, help="NDJSON path or - for standard input")
     parser.add_argument("--output", required=True, type=Path, help="new private run directory")
@@ -264,7 +380,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--max-signal-age", type=float, help="declared maximum source lag in seconds"
     )
-    args = parser.parse_args(argv)
+    args = parser.parse_args(args_list)
     fee_model = FeeModel.load(args.fee_model, missing_ok=False) if args.fee_model else None
 
     def run(lines: Iterable[str]) -> dict[str, Any]:
