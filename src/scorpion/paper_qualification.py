@@ -744,7 +744,9 @@ def _paired(
     right_private = {identity for _, c in right.costs for identity in (
         c.journal_sha256, c.outcome_export_sha256, c.source_artifact_sha256, c.cost_export_sha256,
     )}
-    if left_private.intersection(right_private):
+    left_market = {c.market_artifact_sha256 for _, c in left.costs}
+    right_market = {c.market_artifact_sha256 for _, c in right.costs}
+    if left_private & (right_private | right_market) or right_private & left_market:
         raise PaperQualificationError("paired_arm_execution_artifact_reuse")
     paired_days: list[_Day] = []
     rows: list[PairedSession] = []
@@ -779,6 +781,22 @@ def _paired(
         paired_days.append(day)
         rows.append(row)
         challenger_costs.extend(costs)
+    return _summarize_paired(
+        study, policy, paired_days, rows, challenger_costs, tuple(roster_rows),
+        tuple(sorted(stable_hash(("revision", key)) for key in seen_roster_revisions)),
+    )
+
+
+def _summarize_paired(
+    study: ProspectiveStudy, policy: PaperCohortPolicy,
+    paired_days: list[_Day], rows: list[PairedSession], challenger_costs: list[float],
+    roster_rows: tuple[tuple[date, str, str], ...], revision_keys: tuple[str, ...],
+) -> PairedEntryAssessment:
+    """Pure statistics seam; public study assessment always verifies original artifacts."""
+    if tuple(day.date for day in paired_days) != study.sessions[:len(paired_days)] or (
+        tuple(row.session_date for row in rows) != tuple(day.date for day in paired_days)
+    ):
+        raise PaperQualificationError("paired_statistics_session_identity_mismatch")
     complete = sum(row.status in ("COVERED_COMPLETE", "COVERED_EMPTY") for row in rows)
     observed = sum(row.matched_observed for row in rows)
     blockers: list[str] = []
@@ -823,9 +841,7 @@ def _paired(
         blockers.append("sequential_adverse_session_alarm")
     return PairedEntryAssessment(
         tuple(rows), endpoint, axes, complete, observed, worst, recent_delta, recent_cost,
-        degradation, tuple(roster_rows),
-        tuple(sorted(stable_hash(("revision", key)) for key in seen_roster_revisions)),
-        tuple(dict.fromkeys(blockers)),
+        degradation, roster_rows, revision_keys, tuple(dict.fromkeys(blockers)),
     )
 
 

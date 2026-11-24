@@ -17,9 +17,11 @@ from scorpion.confidence_sequence import anytime_bounded_mean_confidence_sequenc
 from scorpion.cost_adjusted_policy_value import session_mean_diagnostics
 from scorpion.exec_cli import main
 from scorpion.paper_qualification import (
+    PairedSession,
     PaperQualificationError,
     _root,
     _study,
+    _summarize_paired,
     assess_paper_study,
     common_roster_digest,
     execution_binding_digest,
@@ -36,7 +38,10 @@ from scorpion.paper_session_statistics import (
     evaluate_paper_session_cohort,
     load_verified_paper_cohort,
 )
+from scorpion.provenance import canonical_json, stable_hash
 from scorpion.research_hypothesis_memory import (
+    _finalize_prospective_study,
+    _reserve_prospective_study,
     prospective_registry_status,
     read_finalized_paper_dossier,
     verify_hypothesis_memory,
@@ -1010,3 +1015,87 @@ def test_missing_or_wrong_signer_roster_cannot_qualify(tmp_path: Path) -> None:
     signature.write_text(ctx.reviewer.sign(ROSTER_DOMAIN + path.read_bytes()).hex())
     with pytest.raises(PaperQualificationError, match="common_roster_signature"):
         ctx.assess()
+
+
+def test_paired_statistical_gate_has_positive_and_degradation_paths(tmp_path: Path) -> None:
+    ctx = study_fixture(tmp_path, paired=True)
+    spec = _study(ctx.study, ctx.study_pin, ctx.inputs, _root(ctx.root, ctx.root_pin))
+    # This tests only the mathematical gate with synthetic complete session scores.
+    # All public qualification paths still require signed original artifacts.
+    days = tuple(DAYS[0] + timedelta(days=i) for i in range(120))
+    spec = replace(spec, sessions=days, soak_sessions=10)
+    p = replace(policy(), sessions=days, end_date=days[-1],
+                minimum_sessions=100, minimum_routes=200, minimum_effective_sessions=30)
+    records, summaries = [], []
+    for i, day in enumerate(days):
+        scores = tuple(_RouteScore(
+            f"{i}:{j}", ticker,
+            (("spread", spread), ("quote_age", age), ("decision_latency", latency),
+             ("session", session)),
+            90.0, 0.0, False,
+        ) for j, (ticker, spread, age, latency, session) in enumerate((
+            ("AAA", "TIGHT", "FRESH", "FAST", "OPEN"),
+            ("BBB", "WIDE", "NORMAL", "SLOW", "MIDDAY"),
+        )))
+        records.append(_Day(day, "COVERED_COMPLETE", 2, scores, str(i), ()))
+        summaries.append(PairedSession(day, "COVERED_COMPLETE", 2, 2, 100.0, 10.0, 90.0, ()))
+    result = _summarize_paired(spec, p, records, summaries, [10.0] * 240, (), ())
+    assert not result.blockers
+    assert result.endpoint.anytime_conditional_mean.lower_bound > 0
+    assert result.degradation.status == "NO_ALARM_NOT_PROOF_OF_HEALTH"
+    degraded_records = list(records)
+    degraded_summaries = list(summaries)
+    for i in range(110, 120):
+        degraded_records[i] = replace(
+            records[i], scores=tuple(replace(row, primary=-20.0) for row in records[i].scores),
+        )
+        degraded_summaries[i] = replace(
+            summaries[i], incumbent_cost_mean_bps=10.0, challenger_cost_mean_bps=30.0,
+            raw_improvement_mean_bps=-20.0,
+        )
+    degraded = _summarize_paired(
+        spec, p, degraded_records, degraded_summaries, [10.0] * 220 + [30.0] * 20, (), (),
+    )
+    assert "recent_soak_degradation_or_insufficient" in degraded.blockers
+    assert degraded.recent_soak_mean_improvement_bps == -20
+
+
+def test_cross_study_reuse_is_atomic_and_never_refunds_alpha(tmp_path: Path) -> None:
+    # Private persistence-seam test; signatures are checked by the public API tests.
+    path = tmp_path / "ledger.db"
+    root = "a" * 64
+    raw = b"synthetic persistence-only fixture"
+    signature = "0" * 128
+    proof = stable_hash((hashlib.sha256(raw).hexdigest(), signature))
+    common = dict(root_sha256=root, approval_sha256=proof,
+                  approval_raw_hex=raw.hex(), approval_signature=signature)
+    first = _reserve_prospective_study(
+        path, study_sha256="b" * 64, family_id="first", study_kind="COHORT",
+        alpha_units=25_000_000, sessions=DAYS[:2], expected_chain_hash=GENESIS,
+        now=RESERVE_CLOCK, **common,
+    )
+    second = _reserve_prospective_study(
+        path, study_sha256="c" * 64, family_id="different-alias", study_kind="COHORT",
+        alpha_units=25_000_000, sessions=DAYS[2:], expected_chain_hash=first.ledger_chain_hash,
+        now=RESERVE_CLOCK, **common,
+    )
+    evidence = ("d" * 64,)
+
+    def finish(study: str, chain: str, dossier: str, keys: tuple[str, ...]):
+        return _finalize_prospective_study(
+            path, study_sha256=study, dossier_sha256=dossier, expected_chain_hash=chain,
+            disposition="REJECTED", now=REVIEW_CLOCK, evidence_keys=keys, **common,
+            dossier_json=canonical_json({
+                "dossier_sha256": dossier, "study_sha256": study,
+                "root_sha256": root, "ledger_chain_hash": chain,
+            }),
+        )
+
+    final = finish("b" * 64, second.ledger_chain_hash, "e" * 64, evidence)
+    with pytest.raises(ValueError, match="cross-study evidence reuse"):
+        finish("c" * 64, final.ledger_chain_hash, "f" * 64, evidence)
+    report = prospective_registry_status(
+        path, root_sha256=root, expected_chain_hash=final.ledger_chain_hash,
+    )
+    assert report.finalized_studies == 1 and report.remaining_alpha_units == 0
+    assert verify_hypothesis_memory(path).valid

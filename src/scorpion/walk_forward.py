@@ -331,7 +331,8 @@ def verify_frozen_validation_windows(
             continue
         if not (
             fold.train_through <= fold.training_labels_available_through
-            <= fold.validation_start - embargo < fold.validation_start
+            <= fold.validation_start - embargo
+            and fold.training_labels_available_through < fold.validation_start
             < fold.validation_end <= fold.validation_labels_available_through <= frozen
         ):
             failures.append(f"fold_label_availability_or_embargo:{index}")

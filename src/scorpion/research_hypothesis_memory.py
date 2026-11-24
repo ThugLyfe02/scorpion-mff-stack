@@ -1177,9 +1177,17 @@ def read_finalized_paper_dossier(
         ).fetchone()
         if row is None or row["root_sha256"] != root_sha256:
             raise ValueError("finalized study missing or wrong root")
+        reservation = db.execute(
+            "SELECT * FROM prospective_study_reservations WHERE study_sha256=?", (study_sha256,),
+        ).fetchone()
+        if reservation is None:
+            raise ValueError("finalized study reservation missing")
         dossier: object = json.loads(row["dossier_json"])
         return {
             "dossier": dossier, "disposition": str(row["disposition"]),
+            "reservation_record_hash": str(reservation["record_hash"]),
+            "reservation_approval_raw_hex": str(reservation["approval_raw_hex"]),
+            "reservation_approval_signature": str(reservation["approval_signature"]),
             "approval_sha256": str(row["approval_sha256"]),
             "approval_raw_hex": str(row["approval_raw_hex"]),
             "approval_signature": str(row["approval_signature"]),
