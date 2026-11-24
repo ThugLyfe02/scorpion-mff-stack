@@ -22,11 +22,11 @@ from typing import Any
 
 from .account import FeeModel
 from .calendar import et_date
-from .instruments import OptionContract
 from .engine import Engine, EngineConfig
 from .execution_book import ExecutionBook
 from .fills import FillLog
 from .health import Heartbeat
+from .instruments import OptionContract
 from .killswitch import KillSwitch
 from .listener import Listener, TapeTransport
 from .paper_market import MarketQuote, PaperQuoteBook, QuoteDrivenPaperBroker
@@ -193,7 +193,9 @@ def run_capture(
          for intent, ack in broker.accepted.values()),
         Decimal(0),
     )
-    cashflow_match = not flat or abs(cashflow - Decimal(str(book.realized_total))) <= Decimal("0.01")
+    cashflow_match = (
+        not flat or abs(cashflow - Decimal(str(book.realized_total))) <= Decimal("0.01")
+    )
     integrity = integrity and cashflow_match
     fees = (
         sum(fee_model.fees_for(ack.qty) for _, ack in broker.accepted.values())
@@ -210,7 +212,10 @@ def run_capture(
         blockers.append("no_modeled_fills")
     if reasons["feed_gap"]:
         blockers.append("capture_contains_feed_gap")
-    if reasons["quote:conflicting_quote_timestamp"] or reasons["status:conflicting_status_timestamp"]:
+    if (
+        reasons["quote:conflicting_quote_timestamp"]
+        or reasons["status:conflicting_status_timestamp"]
+    ):
         blockers.append("ambiguous_market_event")
     if not integrity:
         blockers.append("reconciliation_failed")
@@ -256,7 +261,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--author", required=True, action="append", help="allowed signal author ID")
     parser.add_argument("--require-market-status", action="store_true")
     parser.add_argument("--fee-model", type=Path, help="explicit existing fee schedule JSON")
-    parser.add_argument("--max-signal-age", type=float, help="declared maximum source lag in seconds")
+    parser.add_argument(
+        "--max-signal-age", type=float, help="declared maximum source lag in seconds"
+    )
     args = parser.parse_args(argv)
     fee_model = FeeModel.load(args.fee_model, missing_ok=False) if args.fee_model else None
 
