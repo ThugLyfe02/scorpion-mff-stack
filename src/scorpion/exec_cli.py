@@ -307,14 +307,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     alternative_report = sub.add_parser("paper-intent-alternatives")
     alternative_report.add_argument("--journal", type=Path, required=True)
     labels = sub.add_parser("paper-outcome-labels")
-    labels.add_argument("--journal", type=Path, required=True)
-    labels.add_argument("--trust", type=Path, required=True)
-    labels.add_argument("--trust-sha256", required=True)
-    labels.add_argument("--export", type=Path, required=True)
-    labels.add_argument("--source-artifact", type=Path, required=True)
-    labels.add_argument("--collector-signature", type=Path, required=True)
-    labels.add_argument("--reviewer-signature", type=Path, required=True)
-    labels.add_argument("--as-of", required=True)
+    costs = sub.add_parser("paper-execution-costs")
+    for command in (labels, costs):
+        command.add_argument("--journal", type=Path, required=True)
+        command.add_argument("--trust", type=Path, required=True)
+        command.add_argument("--trust-sha256", required=True)
+        command.add_argument("--export", type=Path, required=True)
+        command.add_argument("--source-artifact", type=Path, required=True)
+        command.add_argument("--collector-signature", type=Path, required=True)
+        command.add_argument("--reviewer-signature", type=Path, required=True)
+        command.add_argument("--as-of", required=True)
+    costs.add_argument("--cost-policy", type=Path, required=True)
+    costs.add_argument("--cost-policy-sha256", required=True)
+    costs.add_argument("--cost-export", type=Path, required=True)
+    costs.add_argument("--market-artifact", type=Path, required=True)
+    costs.add_argument("--cost-collector-signature", type=Path, required=True)
+    costs.add_argument("--cost-reviewer-signature", type=Path, required=True)
     rp = sub.add_parser("replay")
     rp.add_argument("--date")
     rp.add_argument("--input", type=Path, default=REPLAY_FIXTURE)
@@ -338,28 +346,42 @@ def main(argv: Sequence[str] | None = None) -> int:
     pull.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
 
-    if args.command == "paper-outcome-labels":
+    if args.command in ("paper-outcome-labels", "paper-execution-costs"):
         from dataclasses import asdict
 
-        from .execution_meta_labels import admit_paper_outcome_labels
+        from .counterfactual import compare_paper_no_chase
+        from .execution_attribution import build_paper_execution_cost_report
+        from .execution_meta_labels import PaperOutcomeAdmission
         from .session_service import JournalError
 
+        def read_signature(path: Path) -> str:
+            with path.open(encoding="utf-8") as handle:
+                return handle.read(257).strip()
+
         try:
-            with args.collector_signature.open(encoding="utf-8") as handle:
-                collector_signature = handle.read(256).strip()
-            with args.reviewer_signature.open(encoding="utf-8") as handle:
-                reviewer_signature = handle.read(256).strip()
-            outcome_report = admit_paper_outcome_labels(
-                args.journal, trust_path=args.trust, expected_trust_sha256=args.trust_sha256,
-                export_path=args.export, source_artifact_path=args.source_artifact,
-                collector_signature=collector_signature, reviewer_signature=reviewer_signature,
-                as_of=datetime.fromisoformat(args.as_of),
+            admission = PaperOutcomeAdmission(
+                args.journal, args.trust, args.trust_sha256, args.export, args.source_artifact,
+                read_signature(args.collector_signature), read_signature(args.reviewer_signature),
+                datetime.fromisoformat(args.as_of),
             )
+            if args.command == "paper-outcome-labels":
+                _print(asdict(admission.verify()))
+                return 0
+            cost_report = build_paper_execution_cost_report(
+                admission, cost_policy_path=args.cost_policy,
+                expected_policy_sha256=args.cost_policy_sha256,
+                cost_export_path=args.cost_export, market_artifact_path=args.market_artifact,
+                collector_signature=read_signature(args.cost_collector_signature),
+                reviewer_signature=read_signature(args.cost_reviewer_signature),
+            )
+            _print({
+                "cost_attribution": asdict(cost_report),
+                "path_conditional_no_chase": asdict(compare_paper_no_chase(cost_report)),
+            })
+            return 1 if cost_report.blockers else 0
         except (OSError, JournalError, ValueError, ImportError) as exc:
             _print({"ok": False, "reason": type(exc).__name__})
             return 1
-        _print(asdict(outcome_report))
-        return 0
     if args.command in ("paper-intent-features", "paper-intent-alternatives"):
         from dataclasses import asdict
 

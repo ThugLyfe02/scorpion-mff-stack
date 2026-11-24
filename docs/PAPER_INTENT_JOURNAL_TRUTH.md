@@ -97,15 +97,15 @@ asset_class=EQUITY, side=BUY, currency=USD, quantity_unit=SHARES,
 submitted_ts_utc, terminal_ts_utc (null for unresolved), fills (fill_id, quantity, price
 as decimal string, filled_ts_utc). Timestamps must be timezone-aware. The original vendor
 artifact is provided separately and hashed. Both parties sign the exact normalized export bytes,
-collector with prefix b"scorpion.paper-outcome-export.v1:collector\\x00" and reviewer with
-b"scorpion.paper-outcome-export.v1:reviewer\\x00" (actual NUL byte); signatures are detached
+collector with prefix b"scorpion.paper-outcome-export.v1:collector\x00" and reviewer with
+b"scorpion.paper-outcome-export.v1:reviewer\x00" (actual NUL byte); signatures are detached
 lowercase hex (64 bytes). No private signing key belongs in Scorpion or Git.
 
 ```sh
-python -m scorpion paper-outcome-labels --journal /private/session.jsonl \\
-  --trust /private/trust.json --trust-sha256 PREAPPROVED_SHA256 \\
-  --export /private/normalized.json --source-artifact /private/vendor-export.json \\
-  --collector-signature /private/collector.sig --reviewer-signature /private/reviewer.sig \\
+python -m scorpion paper-outcome-labels --journal /private/session.jsonl \
+  --trust /private/trust.json --trust-sha256 PREAPPROVED_SHA256 \
+  --export /private/normalized.json --source-artifact /private/vendor-export.json \
+  --collector-signature /private/collector.sig --reviewer-signature /private/reviewer.sig \
   --as-of 2026-11-24T21:00:00+00:00
 ```
 
@@ -120,3 +120,61 @@ provider collection, independently administered keys, external account isolation
 horizons, dataset-wide deduplication and independent model qualification remain prerequisites.
 The current legacy forensic labels are unchanged; these are a separate paper evidence class,
 not a replacement for accepted human labels or the existing execution ledger.
+
+
+## P1 stage 2 — paper entry implementation shortfall and conditional chase attribution
+
+This extends the existing execution_attribution and counterfactual modules, not a parallel
+simulator. The Stage 1 signed outcome export is reverified on every cost report. The new
+cost-policy file must be separately pinned before observations. Schema:
+scorpion.paper-cost-policy.v1, authority RESEARCH_ONLY, trust_sha256, registered_ts_utc,
+horizon_seconds, max_mark_age_ms (<=3000), market_source_id (distinct from outcome source),
+benchmark INITIAL_DECISION_MID, fee_scope ALL_ORDER_CHARGES_AND_REBATES_USD.
+
+A separately dual-attested normalized supplement has schema scorpion.paper-cost-export.v1,
+authority PAPER_ONLY, trust_sha256, cost_policy_sha256, journal_sha256, outcome_export_sha256,
+market_source_id, market_artifact_sha256, complete_fee_export=true, observed_through_ts_utc,
+collected_ts_utc, reviewed_ts_utc, fees and marks arrays. Fees have feature_sha256,
+venue_order_id, fees_usd, rebates_usd (nonnegative decimal strings, explicit zero required).
+Marks have call_id, initial_feature_sha256, ticker, quote_id, target_ts_utc, event_ts_utc,
+received_ts_utc, bid, ask, route_closed (boolean). A mark must be available by the fixed
+parent horizon, fresh, uncrossed, and bound to the original market artifact; that artifact
+must differ from the outcome artifact and normalized exports. Detached signatures use
+the same pinned collector/reviewer identities but domains
+b"scorpion.paper-cost-export.v1:collector\x00" and b"scorpion.paper-cost-export.v1:reviewer\x00"
+(actual NUL). Fee mapping and route closure are signed declarations, not independently
+authenticated vendor facts. The operator must preserve source bytes, independent key custody,
+trusted timestamping and pre-registration outside this process.
+
+```sh
+python -m scorpion paper-execution-costs --journal /private/session.jsonl \
+  --trust /private/trust.json --trust-sha256 TRUST_PIN \
+  --export /private/outcomes.json --source-artifact /private/venue.json \
+  --collector-signature /private/outcome-collector.sig \
+  --reviewer-signature /private/outcome-reviewer.sig --as-of CUTOFF \
+  --cost-policy /private/cost-policy.json --cost-policy-sha256 COST_PIN \
+  --cost-export /private/costs.json --market-artifact /private/market.json \
+  --cost-collector-signature /private/cost-collector.sig \
+  --cost-reviewer-signature /private/cost-reviewer.sig
+```
+
+For buy entries, original parent Q and initial decision midpoint B are fixed.
+For each filled leg i, q_i is observed quantity, N_i exact fill notional and M_i
+the sealed leg midpoint. With horizon midpoint H and net fees F:
+timing = sum(q_i*(M_i-B)); within-leg slippage = sum(N_i-q_i*M_i);
+opportunity = (Q-sum(q_i))*(H-B); shortfall = timing + slippage + F + opportunity.
+Positive shortfall is cost, negative is price improvement; basis points use Q*B.
+The decomposition must equal sum(N_i)-sum(q_i)*B+F+opportunity exactly.
+Order-level gross slippage remains descriptive if fees are absent; route net
+shortfall is withheld if any required outcome, fee, mark, horizon or route closure is missing.
+Partial fills keep the original Q; a reduced chase target never silently erases opportunity cost.
+
+For an observed positive chase following an attested terminal zero-fill initial order,
+the no-chase reference retains the initial fees and marks all Q unfilled at the same H.
+The difference is the observed chase notional minus chase quantity times H plus chase
+net fees. This is a path-conditional reference, not an estimated counterfactual fill,
+causal policy value, liquidation price, realized P&L or live execution. The report never
+authorizes training/promotion and must not feed signed shortfall into the existing
+nonnegative-cost policy-value evaluator as if it were independent net reward.
+Session clustering, prospective experimental design, dataset-wide deduplication,
+exit/round-trip economics and promotion gates remain separate stages. No real orders.
