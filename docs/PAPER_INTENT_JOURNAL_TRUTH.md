@@ -537,3 +537,65 @@ It requires a fresh, uncrossed quote with positive displayed depth and instrumen
 from the official adapter, closes the stream, and returns a sanitized result. No orders
 or continuity certification. Do not put credentials in arguments, chat, Git or logs.
 SCORPION_BROKER_MODE is checked again at runtime; REVIEW_ONLY cannot enable market capture.
+
+
+## P0/P1 — loss-intolerant capture and external round-trip reconciliation
+
+The supervised runtime uses Journal(require_lossless=True). Admitted bytes are bounded by
+the same 64 MiB verified-reader limit, single records by 256 KiB and admitted-but-not-yet-
+checkpointed bytes by 8 MiB. These are conservative pilot limits, not throughput claims.
+A rejected record permanently poisons that strict writer; close drains admitted evidence
+but emits no clean receipt. The durable-prefix recovery procedure is unchanged. Readers
+reject duplicate JSON keys and nonfinite numbers even if the local unkeyed digest matches.
+
+The existing reconciliation module now admits a distinct signed supplement, using the
+Stage 1 trust pin and collector/reviewer keys. The normalized schema scorpion.paper-round-trip.v1
+contains authority PAPER_ONLY, source_id, account_ref, trust_sha256, journal_sha256,
+outcome_export_sha256, source_artifact_sha256, session_date, opening_ts_utc, closing_ts_utc,
+observed_through_ts_utc, collected_ts_utc, reviewed_ts_utc, complete_account_activity=true,
+no_nontrade_cash_movements=true, opening_cash_usd, closing_cash_usd, opening_positions,
+closing_positions, suppressed_chase_feature_ids, exit_orders, fees. Use USD *ledger cash*
+(not buying power), an isolated opening-flat account, and the original session's signed
+entry evidence. Snapshots must bracket the regular session. Positions are ticker and
+positive integral quantity rows. The original separate account/exit artifact is hashed.
+No venue authentication is inferred from two signatures or from exact arithmetic.
+
+Each exit order has call_id, ticker, intent_seq (conditional exit record), venue_order_id,
+requested_quantity, state, submitted_ts_utc, terminal_ts_utc (null if unresolved), limit
+(decimal string or null for a market exit), fills (same per-fill schema as Stage 1),
+asset_class=EQUITY, side=SELL, currency=USD, quantity_unit=SHARES. Only one exit order
+per call is supported; replacement chains and multiple liquidation orders are not silently
+merged. The requested quantity must equal independently observed entry inventory and not
+exceed the conditional intent's quantity. Entry and exit windows, terminal timestamps,
+sell limit compliance and duplicate order/fill identities are checked. A known initial
+positive fill can suppress an otherwise unobserved conditional chase only by explicit
+feature-hash attestation. Missing/rejected/censored and partial exits remain distinct.
+Each fee row is venue_order_id, fees_usd, rebates_usd (explicit zero allowed).
+
+Collector/reviewer sign exact supplement bytes with distinct domains
+b"scorpion.paper-round-trip.v1:collector\x00" and b"scorpion.paper-round-trip.v1:reviewer\x00"
+(actual NUL). All original signed entry evidence is reverified. For the supported flat account:
+
+    reconstructed_cash = opening_cash - sum(entry notionals)
+                         + sum(exit notionals) - sum(net fees)
+
+Reported closing cash must match exactly, and reconstructed remaining shares must match
+the independently reported closing snapshot. Nonflat, incomplete or contradictory activity
+withholds aggregate net economics. Model-vs-venue round-trip differences are restricted
+to equal observed quantities and a locally complete modeled report; they are diagnostic,
+not evidence that either counterfactual route could have been executed. The report has
+no training, promotion, live fill or resume authority.
+
+    python -m scorpion paper-round-trip-reconcile \
+      --journal /private/session.jsonl --trust /private/trust.json --trust-sha256 TRUST_PIN \
+      --export /private/entries.json --source-artifact /private/entry-source.json \
+      --collector-signature /private/entry-collector.sig \
+      --reviewer-signature /private/entry-reviewer.sig --as-of CUTOFF \
+      --round-trip-export /private/round-trip.json \
+      --round-trip-artifact /private/account-activity.json \
+      --round-trip-collector-signature /private/round-trip-collector.sig \
+      --round-trip-reviewer-signature /private/round-trip-reviewer.sig
+
+A missing local session closure or account reconciliation failure is not a trading loss
+or zero return. This offline comparison is not a new execution transport. A supported
+authenticated equity venue adapter and independent activity collection are still required.

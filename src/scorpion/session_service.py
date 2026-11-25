@@ -30,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
+from typing import NoReturn
 
 from .alerts import Page, Pager
 from .broker import ExecutionMode, ExecutionResult, PaperIntentBroker, Quote, ReviewOnlyBroker
@@ -284,7 +285,7 @@ class Journal:
         if self._admission_failure is not None:
             raise JournalError(self._admission_failure)
 
-    def _refuse_admission(self, reason: str) -> None:
+    def _refuse_admission(self, reason: str) -> NoReturn:
         if self._require_lossless:
             self._admission_failure = reason
         raise JournalError(reason)
@@ -304,7 +305,6 @@ class Journal:
                 ).encode("utf-8")
             except (TypeError, ValueError, RecursionError):
                 self._refuse_admission("journal_invalid_record")
-                raise AssertionError("unreachable")
             if len(encoded) > MAX_PAPER_RECORD_BYTES:
                 self._refuse_admission("journal_record_bound")
             if self._admitted_bytes + len(encoded) > self._max_bytes:

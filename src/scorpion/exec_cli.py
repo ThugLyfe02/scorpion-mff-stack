@@ -402,7 +402,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     alternative_report.add_argument("--journal", type=Path, required=True)
     labels = sub.add_parser("paper-outcome-labels")
     costs = sub.add_parser("paper-execution-costs")
-    for command in (labels, costs):
+    round_trip = sub.add_parser("paper-round-trip-reconcile")
+    for command in (labels, costs, round_trip):
         command.add_argument("--journal", type=Path, required=True)
         command.add_argument("--trust", type=Path, required=True)
         command.add_argument("--trust-sha256", required=True)
@@ -417,6 +418,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     costs.add_argument("--market-artifact", type=Path, required=True)
     costs.add_argument("--cost-collector-signature", type=Path, required=True)
     costs.add_argument("--cost-reviewer-signature", type=Path, required=True)
+    round_trip.add_argument("--round-trip-export", type=Path, required=True)
+    round_trip.add_argument("--round-trip-artifact", type=Path, required=True)
+    round_trip.add_argument("--round-trip-collector-signature", type=Path, required=True)
+    round_trip.add_argument("--round-trip-reviewer-signature", type=Path, required=True)
     stats = sub.add_parser("paper-session-statistics")
     stats.add_argument("--cohort", type=Path, required=True)
     stats.add_argument("--cohort-sha256", required=True)
@@ -570,12 +575,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             and cohort_report.chase.status == "BOUNDED_RESEARCH_SUPPORT"
             and cohort_report.regime_robustness == "DESCRIPTIVE_STRESS_OK"
         ) else 1
-    if args.command in ("paper-outcome-labels", "paper-execution-costs"):
+    if args.command in ("paper-outcome-labels", "paper-execution-costs", "paper-round-trip-reconcile"):
         from dataclasses import asdict
 
         from .counterfactual import compare_paper_no_chase
         from .execution_attribution import build_paper_execution_cost_report
         from .execution_meta_labels import PaperOutcomeAdmission
+        from .reconciliation import reconcile_paper_round_trips
         from .session_service import JournalError
 
         def read_signature(path: Path) -> str:
@@ -591,6 +597,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.command == "paper-outcome-labels":
                 _print(asdict(admission.verify()))
                 return 0
+            if args.command == "paper-round-trip-reconcile":
+                round_trip_report = reconcile_paper_round_trips(
+                    admission, supplement_path=args.round_trip_export,
+                    source_artifact_path=args.round_trip_artifact,
+                    collector_signature=read_signature(args.round_trip_collector_signature),
+                    reviewer_signature=read_signature(args.round_trip_reviewer_signature),
+                )
+                _print(asdict(round_trip_report))
+                return 1 if round_trip_report.blockers else 0
             cost_report = build_paper_execution_cost_report(
                 admission, cost_policy_path=args.cost_policy,
                 expected_policy_sha256=args.cost_policy_sha256,
@@ -603,7 +618,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "path_conditional_no_chase": asdict(compare_paper_no_chase(cost_report)),
             })
             return 1 if cost_report.blockers else 0
-        except (OSError, JournalError, ValueError, ImportError) as exc:
+        except (OSError, JournalError, ValueError, ImportError, KeyError, TypeError) as exc:
             _print({"ok": False, "reason": type(exc).__name__})
             return 1
     if args.command in ("paper-intent-features", "paper-intent-alternatives"):

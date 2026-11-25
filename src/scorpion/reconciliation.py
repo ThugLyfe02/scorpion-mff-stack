@@ -219,12 +219,14 @@ class PaperRoundTripReport:
     as_of_ts_utc: datetime
     calls: tuple[PaperRoundTripCall, ...]
     expected_closing_positions: tuple[tuple[str, int], ...]
+    inventory_complete: bool
     reported_closing_positions: tuple[tuple[str, int], ...]
     opening_cash_usd: Decimal
     closing_cash_usd: Decimal
     reconstructed_cash_usd: Decimal | None
     cash_difference_usd: Decimal | None
     matched_quantity_calls: int
+    model_blockers: tuple[str, ...]
     observed_net_round_trip_usd: Decimal | None
     blockers: tuple[str, ...]
     report_sha256: str
@@ -478,7 +480,10 @@ def _reconcile_round_trips(
                 raise PaperOutcomeError("duplicate_round_trip_fill")
             seen_fills.add(identity)
     intents: dict[str, dict[str, object]] = {}
+    entries_by_seq: dict[int, dict[str, object]] = {}
     for row in records:
+        if row.get("kind") == "intent":
+            entries_by_seq[_count(row.get("seq"))] = row
         if row.get("kind") != "conditional_exit_intent":
             continue
         key = _text(row.get("call_id"))
@@ -500,6 +505,7 @@ def _reconcile_round_trips(
     positions: dict[str, int] = {}
     cash = opening_cash
     cash_complete = not blockers
+    inventory_complete = not blockers
     matched = 0
     for key, labels in sorted(grouped.items()):
         active, entry_reasons = _route_entries(labels, suppressed)
@@ -515,6 +521,23 @@ def _reconcile_round_trips(
             entry_cash = sum((row.filled_notional_usd or Decimal(0) for row in active), Decimal(0))
             if qty > first.requested_quantity:
                 raise PaperOutcomeError("round_trip_parent_overfill")
+            for label in active:
+                original = entries_by_seq[label.intent_seq]
+                scheduled_chase = _stamp(original.get("scheduled_chase_ts_utc"))
+                entry_deadline = (
+                    scheduled_chase if label.role == "INITIAL"
+                    else min(scheduled_chase + timedelta(minutes=1),
+                             _stamp(original.get("scheduled_exit_ts_utc")))
+                )
+                terminal = label.terminal_ts_utc
+                submitted = label.submitted_ts_utc
+                if (
+                    terminal is None or submitted is None
+                    or not opened <= submitted <= terminal <= closed
+                ):
+                    raise PaperOutcomeError("entry_outside_account_snapshot_window")
+                if terminal > entry_deadline:
+                    reasons.append("entry_outside_modeled_route_window")
         sold: int | None = None
         proceeds: Decimal | None = None
         exit_order = exits.get(key)
@@ -526,7 +549,7 @@ def _reconcile_round_trips(
             else:
                 result = _check_exit(
                     exit_order, intents[key], active, ticker=ticker, bought=qty,
-                    session_close=hours[1], through=through,
+                    session_close=hours[1], through=closed,
                 )
                 if result is None:
                     reasons.append("exit_outcome_censored")
@@ -548,6 +571,8 @@ def _reconcile_round_trips(
         remaining = qty - sold if qty is not None and sold is not None else None
         if remaining is not None and remaining < 0:
             raise PaperOutcomeError("negative_round_trip_inventory")
+        if remaining is None:
+            inventory_complete = False
         if remaining:
             positions[ticker] = positions.get(ticker, 0) + remaining
             reasons.append("open_external_inventory")
@@ -577,13 +602,13 @@ def _reconcile_round_trips(
             model.bought if model else None, model.sold if model else None,
             model.modeled_net_round_trip_usd if model else None, delta, tuple(reasons),
         ))
-    if not grouped:
-        blockers.add("no_observed_entry_routes")
+    if not grouped or not any(row.entry_quantity for row in rows):
+        blockers.add("no_observed_filled_entry_routes")
     if not cash_complete:
         blockers.add("account_activity_unresolved")
     elif cash != closing_cash:
         blockers.add("cash_reconciliation_mismatch")
-    if not cash_complete or positions != closing:
+    if not inventory_complete or positions != closing:
         blockers.add("position_reconciliation_unresolved_or_mismatch")
     if closing:
         blockers.add("account_not_closing_flat")
@@ -593,16 +618,18 @@ def _reconcile_round_trips(
     material = {
         "schema": "paper-round-trip-report-v1", "journal": outcome.journal_sha256,
         "outcome": outcome.report_sha256, "export": export_hash, "artifact": source_hash,
-        "model": modeled.report_sha256, "as_of": admission.as_of, "calls": rows,
+        "model": modeled.report_sha256, "as_of": outcome.as_of_ts_utc, "calls": rows,
         "expected_positions": positions, "reported_positions": closing,
+        "inventory_complete": inventory_complete,
         "opening_cash": opening_cash, "closing_cash": closing_cash,
         "reconstructed_cash": cash if cash_complete else None,
         "blockers": sorted(blockers),
     }
     return PaperRoundTripReport(
         outcome.journal_sha256, outcome.report_sha256, export_hash, source_hash,
-        modeled.report_sha256, outcome.account_ref, day, admission.as_of, tuple(rows),
-        tuple(sorted(positions.items())), tuple(sorted(closing.items())), opening_cash,
-        closing_cash, cash if cash_complete else None, closing_cash - cash if cash_complete else None,
-        matched, net_total, tuple(sorted(blockers)), stable_hash(material),
+        modeled.report_sha256, outcome.account_ref, day, outcome.as_of_ts_utc, tuple(rows),
+        tuple(sorted(positions.items())), inventory_complete, tuple(sorted(closing.items())),
+        opening_cash, closing_cash, cash if cash_complete else None,
+        closing_cash - cash if cash_complete else None, matched, modeled.blockers,
+        net_total, tuple(sorted(blockers)), stable_hash(material),
     )
