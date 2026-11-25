@@ -23,18 +23,32 @@ def order() -> dict:
     }
 
 
+def activity() -> dict:
+    return {
+        "id": "fixture::fill-1", "activity_type": "FILL", "order_id": "fixture-order",
+        "symbol": "QQQ261124C00719000", "side": "buy", "qty": "2", "cum_qty": "2",
+        "leaves_qty": "0", "price": "1.05", "type": "fill",
+        "transaction_time": "2026-11-24T15:00:01Z",
+    }
+
+
 @pytest.fixture
 def transport(monkeypatch):
     monkeypatch.setenv("SCORPION_ALPACA_PAPER_KEY", "synthetic-paper-key")
     monkeypatch.setenv("SCORPION_ALPACA_PAPER_SECRET", "synthetic-paper-secret")
-    state = {"orders": [order()], "positions": [], "account": {"id": "paper-id"}}
+    state = {
+        "orders": [order()], "positions": [], "account": {"id": "paper-id"},
+        "fills": [activity()],
+    }
     calls = []
 
     def read(request, timeout):
         calls.append(request.full_url)
         assert request.get_method() == "GET"
         assert request.full_url.startswith("https://paper-api.alpaca.markets/v2/")
-        if "/account" in request.full_url:
+        if "/account/activities/FILL?" in request.full_url:
+            value = state["fills"]
+        elif "/account" in request.full_url:
             value = state["account"]
         elif "/orders?" in request.full_url:
             value = state["orders"]
@@ -56,13 +70,16 @@ def test_read_only_export_preserves_normalized_order_identity(tmp_path: Path, tr
     _, calls, read = transport
     dest = tmp_path / "snapshot"
     result = collect(dest, read)
-    assert len(calls) == 6 and result["captured_orders"] == 1
+    assert len(calls) == 8 and result["captured_orders"] == 1
+    assert result["captured_fill_activities"] == 1 and result["fill_activity_reconciled"]
     assert not result["certifies_live_fills"] and not result["snapshot_atomic"]
     normalized = json.loads((dest / "normalized.json").read_text())
     assert normalized["orders"][0]["osi"] == "QQQ   261124C00719000"
     assert normalized["orders"][0]["client_id"] == "intent-id"
     assert normalized["orders"][0]["filled_qty"] == 2
     assert normalized["complete_order_export"]
+    assert normalized["fill_activities"][0]["fill_id"] == "fixture::fill-1"
+    assert (dest / "fill-page-00.json").is_file()
 
 
 @pytest.mark.parametrize("reason", ["account", "truncated", "unsupported", "changed"])
@@ -90,3 +107,64 @@ def test_read_only_export_refuses_unsafe_or_incomplete_scope(tmp_path, transport
     with pytest.raises(ReconcileError):
         collect(dest, read)
     assert not dest.exists()
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "cum", "price", "future", "foreign"])
+def test_detailed_fill_discrepancy_refuses_export(tmp_path, transport, mutation):
+    state, _, read = transport
+    if mutation == "missing":
+        state["fills"] = []
+    elif mutation == "duplicate":
+        state["fills"].append(activity())
+    elif mutation == "cum":
+        state["fills"][0]["cum_qty"] = "1"
+    elif mutation == "price":
+        state["fills"][0]["price"] = "1.04"
+    elif mutation == "future":
+        state["fills"][0]["transaction_time"] = "2026-11-24T21:00:00Z"
+    else:
+        state["fills"][0]["order_id"] = "unknown"
+    with pytest.raises(ReconcileError):
+        collect(tmp_path / "snapshot", read)
+    assert not (tmp_path / "snapshot").exists()
+
+
+def test_fill_activity_partial_progression_reconciles_exact_weighted_price(tmp_path, transport):
+    state, _, read = transport
+    first = dict(activity(), id="fixture::partial", qty="1", cum_qty="1",
+                 leaves_qty="1", price="1.01", type="partial_fill")
+    second = dict(activity(), id="fixture::last", qty="1", price="1.09")
+    state["fills"] = [first, second]
+    result = collect(tmp_path / "snapshot", read)
+    assert result["captured_fill_activities"] == 2
+
+
+def test_activity_pagination_preserves_full_pages_and_rejects_replayed_token(tmp_path, transport):
+    from urllib.parse import parse_qs, urlsplit
+
+    state, _, read = transport
+    state["orders"] = [dict(order(), id=f"order-{i}", client_order_id=f"client-{i}")
+                       for i in range(101)]
+    all_fills = [dict(activity(), id=f"fill::{i}", order_id=f"order-{i}") for i in range(101)]
+    tokens = []
+
+    def paged(request, timeout):
+        if "/activities/FILL?" not in request.full_url:
+            return read(request, timeout)
+        params = parse_qs(urlsplit(request.full_url).query)
+        token = params.get("page_token", [None])[0]
+        tokens.append(token)
+        return json.dumps(all_fills[:100] if token is None else all_fills[100:]).encode()
+
+    result = collect(tmp_path / "snapshot", paged)
+    assert result["captured_fill_activities"] == 101
+    assert tokens == [None, "fill::99", None, "fill::99"]
+    assert (tmp_path / "snapshot" / "fill-page-01.json").is_file()
+
+    def replayed(request, timeout):
+        if "/activities/FILL?" not in request.full_url:
+            return read(request, timeout)
+        return json.dumps(all_fills[:100]).encode()
+
+    with pytest.raises(ReconcileError, match="pagination replay"):
+        collect(tmp_path / "refused", replayed)

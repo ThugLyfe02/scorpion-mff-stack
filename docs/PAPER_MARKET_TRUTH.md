@@ -108,3 +108,21 @@ Use identical client_order_id values for externally submitted paper orders. Miss
 or extra IDs remain discrepancies. Stable double reads are not atomic venue snapshots,
 nor independently signed fills; collector/reviewer admission is still required.
 This adapter is documented-API-based, not verified with authenticated credentials.
+
+
+### Fill-level independent account activity
+
+The read-only collector also retrieves the documented Alpaca account activity FILL endpoint
+(/v2/account/activities/FILL) using bounded ascending page_token pagination. Every raw page
+is retained and the complete normalized activity population is independently read twice,
+alongside order and position snapshots. A 10-page bound, 64 MiB total byte budget and
+60-second collection budget are conservative pilot limits; reaching the page cap is a refusal,
+not proof of completeness. Each fill must match an existing venue order ID, canonical option
+identity, side, submission/update clocks, limit, exact cumulative/leaves quantities and
+the order-level filled quantity and premium average. Rounded venue average discrepancies are
+intentionally refused rather than silently tolerated. Prior-day, fractional, unsupported
+or unmatched orders remain out of scope. This validates reported activity consistency,
+not real execution, settlement, fees, adjusted-contract multiplier, or independent signing.
+The normalized export carries detailed fill IDs and clocks for review. The existing order
+comparator remains compatible with legacy unsigned exports; it does not itself certify
+the added activity fields. All transport tests use synthetic responses.

@@ -30,13 +30,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Context, Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from typing import Any
 
@@ -332,6 +333,9 @@ def compare_paper_orders(
 # live hostname, or credential transmission to a caller-provided URL.
 _ALPACA_ORIGIN = "https://paper-api.alpaca.markets"
 _ALPACA_LIMIT = 500
+_ALPACA_ACTIVITY_PAGE = 100
+_ALPACA_ACTIVITY_MAX_PAGES = 10
+_ALPACA_MAX_TOTAL_BYTES = 64 * 1024 * 1024
 _ALPACA_MAX_RESPONSE = 16 * 1024 * 1024
 
 
@@ -424,6 +428,93 @@ def _alpaca_order(row: object, day: date, cutoff: datetime) -> PaperOrderObserva
         raise ReconcileError("invalid paper venue price") from None
 
 
+@dataclass(frozen=True)
+class PaperFillActivity:
+    fill_id: str
+    venue_order_id: str
+    client_order_id: str
+    osi: str
+    side: str
+    quantity: int
+    cumulative_quantity: int
+    leaves_quantity: int
+    price: Decimal
+    transaction_ts_utc: datetime
+
+
+def _validate_fill_activities(
+    raw_orders: list[Any], orders: list[PaperOrderObservation], activities: list[Any],
+    day: date, cutoff: datetime,
+) -> tuple[PaperFillActivity, ...]:
+    """Cross-check detailed executions against the independent order summaries."""
+    by_id = {raw["id"]: (raw, row) for raw, row in zip(raw_orders, orders, strict=True)}
+    result: list[PaperFillActivity] = []
+    seen: set[str] = set()
+    groups: dict[str, list[PaperFillActivity]] = {}
+    for activity in activities:
+        if not isinstance(activity, dict) or activity.get("activity_type") != "FILL":
+            raise ReconcileError("unexpected account activity")
+        identity, order_id = activity.get("id"), activity.get("order_id")
+        if (
+            not isinstance(identity, str) or not identity or len(identity) > 256
+            or identity in seen or not isinstance(order_id, str) or order_id not in by_id
+        ):
+            raise ReconcileError("duplicate or unmatched fill activity")
+        seen.add(identity)
+        raw, order = by_id[order_id]
+        stamp = _venue_timestamp(activity.get("transaction_time"))
+        if (
+            et_date(stamp) != day or not _venue_timestamp(raw.get("submitted_at"))
+            <= stamp <= _venue_timestamp(raw.get("updated_at")) <= cutoff
+            or _alpaca_osi(activity.get("symbol")) != order.osi
+            or activity.get("side") != order.action
+        ):
+            raise ReconcileError("fill activity identity or clock mismatch")
+        qty = _integer(activity.get("qty"))
+        cum, leaves = _integer(activity.get("cum_qty")), _integer(activity.get("leaves_qty"))
+        try:
+            price = Decimal(str(activity.get("price")))
+        except InvalidOperation:
+            raise ReconcileError("invalid fill activity price") from None
+        if (
+            qty <= 0 or not price.is_finite() or price <= 0 or price > 1_000_000
+            or cum + leaves != order.requested_qty
+            or (activity.get("type") != ("fill" if leaves == 0 else "partial_fill"))
+            or (order.action == "buy" and price > order.limit)
+            or (order.action == "sell" and price < order.limit)
+        ):
+            raise ReconcileError("fill activity quantity or limit conflict")
+        fill = PaperFillActivity(
+            identity, order_id, order.client_id, order.osi, order.action,
+            qty, cum, leaves, price, stamp,
+        )
+        groups.setdefault(order_id, []).append(fill)
+        result.append(fill)
+    with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
+        for order_id, (_, order) in by_id.items():
+            # Cum quantity orders the actual progression, including same-time partials.
+            fills = sorted(groups.get(order_id, []), key=lambda row: row.cumulative_quantity)
+            total = 0
+            premium = Decimal(0)
+            last: datetime | None = None
+            for fill in fills:
+                total += fill.quantity
+                if total != fill.cumulative_quantity or (
+                    last is not None and fill.transaction_ts_utc < last
+                ):
+                    raise ReconcileError("fill activity cumulative sequence mismatch")
+                last = fill.transaction_ts_utc
+                premium += fill.quantity * fill.price
+            if total != order.filled_qty:
+                raise ReconcileError("order and fill activity quantity mismatch")
+            if total and (
+                order.average_price is None or premium != order.average_price * total
+            ):
+                # Never silently round away a venue-average discrepancy.
+                raise ReconcileError("order and fill activity premium mismatch")
+    return tuple(sorted(result, key=lambda row: (row.transaction_ts_utc, row.fill_id)))
+
+
 def collect_alpaca_paper_export(
     *, account_id: str, session_date: date, input_sha256: str, capture_end_ts: float,
     destination: Path, transport: Callable[[urllib.request.Request, float], bytes] = _paper_get,
@@ -444,7 +535,10 @@ def collect_alpaca_paper_export(
     if now.tzinfo is None or now.utcoffset() is None:
         raise ReconcileError("naive paper collection clock")
     now = now.astimezone(UTC)
-    if et_date(now) != session_date or now.timestamp() < capture_end_ts:
+    if (
+        not isinstance(capture_end_ts, (int, float)) or isinstance(capture_end_ts, bool)
+        or not 0 < capture_end_ts <= now.timestamp() or et_date(now) != session_date
+    ):
         raise ReconcileError("paper collection outside capture session")
     # Exclusive after boundary: include midnight by subtracting a microsecond.
     from zoneinfo import ZoneInfo
@@ -460,36 +554,83 @@ def collect_alpaca_paper_export(
         "Accept": "application/json",
     }
 
+    collection_start = time.monotonic()
+    total_bytes = 0
+
     def get(path: str) -> tuple[bytes, Any]:
+        nonlocal total_bytes
+        remaining = 60 - (time.monotonic() - collection_start)
+        if remaining <= 0:
+            raise ReconcileError("paper collection time budget")
         try:
             raw = transport(urllib.request.Request(
                 _ALPACA_ORIGIN + path, headers=headers, method="GET",
-            ), 5.0)
-            if len(raw) > _ALPACA_MAX_RESPONSE:
-                raise ReconcileError("paper response bound")
+            ), min(5.0, remaining))
+            total_bytes += len(raw)
+            if (
+                len(raw) > _ALPACA_MAX_RESPONSE or total_bytes > _ALPACA_MAX_TOTAL_BYTES
+                or time.monotonic() - collection_start > 60
+            ):
+                raise ReconcileError("paper response or collection bound")
             return raw, json.loads(raw)
         except (OSError, ValueError, TypeError):
             raise ReconcileError("paper venue payload unavailable") from None
+
+    def get_fills() -> tuple[list[bytes], list[Any]]:
+        pages: list[bytes] = []
+        items: list[Any] = []
+        seen: set[str] = set()
+        token: str | None = None
+        for _ in range(_ALPACA_ACTIVITY_MAX_PAGES):
+            params = {
+                "after": after, "until": now.isoformat(), "direction": "asc",
+                "page_size": str(_ALPACA_ACTIVITY_PAGE),
+            }
+            if token is not None:
+                params["page_token"] = token
+            page_raw, page = get("/v2/account/activities/FILL?" + urllib.parse.urlencode(params))
+            if not isinstance(page, list) or len(page) > _ALPACA_ACTIVITY_PAGE:
+                raise ReconcileError("invalid fill activity page")
+            pages.append(page_raw)
+            for item in page:
+                identity = item.get("id") if isinstance(item, dict) else None
+                if (
+                    not isinstance(identity, str) or not identity
+                    or len(identity) > 256 or identity in seen
+                ):
+                    raise ReconcileError("fill activity pagination replay")
+                seen.add(identity)
+                items.append(item)
+                token = identity
+            if len(page) < _ALPACA_ACTIVITY_PAGE:
+                return pages, items
+        raise ReconcileError("fill activity page bound reached")
 
     account_raw, account = get("/v2/account")
     if not isinstance(account, dict) or account.get("id") != account_id:
         raise ReconcileError("paper account identity mismatch")
     orders_raw, orders = get("/v2/orders?" + query)
     positions_raw, positions = get("/v2/positions")
+    fill_pages, fills = get_fills()
     repeat_orders_raw, repeat_orders = get("/v2/orders?" + query)
     repeat_positions_raw, repeat_positions = get("/v2/positions")
+    repeat_fill_pages, repeat_fills = get_fills()
     _, account_again = get("/v2/account")
     if not isinstance(account_again, dict) or account_again.get("id") != account_id:
         raise ReconcileError("paper account changed")
     if not isinstance(orders, list) or len(orders) >= _ALPACA_LIMIT:
         raise ReconcileError("paper order export may be truncated")
-    if not isinstance(positions, list) or orders != repeat_orders or positions != repeat_positions:
+    if (
+        not isinstance(positions, list) or orders != repeat_orders
+        or positions != repeat_positions or fills != repeat_fills
+    ):
         raise ReconcileError("paper venue state changed during collection")
     observed = [_alpaca_order(row, session_date, now) for row in orders]
     if len({row.client_id for row in observed}) != len(observed) or len({
         row["id"] for row in orders
     }) != len(orders):
         raise ReconcileError("duplicate paper venue order identity")
+    detailed_fills = _validate_fill_activities(orders, observed, fills, session_date, now)
     normalized_positions: list[dict[str, Any]] = []
     for row in positions:
         if not isinstance(row, dict) or row.get("asset_class") != "us_option":
@@ -512,6 +653,11 @@ def collect_alpaca_paper_export(
         "source": "alpaca-paper-rest", "input_sha256": input_sha256,
         "session_date": session_date.isoformat(), "as_of_ts": now.timestamp(),
         "complete_order_export": True, "positions": normalized_positions,
+        "fill_activity_reconciled": True,
+        "fill_activities": [{
+            **asdict(row), "price": str(row.price),
+            "transaction_ts_utc": row.transaction_ts_utc.isoformat(),
+        } for row in detailed_fills],
         "orders": [{
             **asdict(row), "limit": str(row.limit),
             "average_price": str(row.average_price) if row.average_price is not None else None,
@@ -526,6 +672,8 @@ def collect_alpaca_paper_export(
         ("orders-recheck.json", repeat_orders_raw),
         ("positions-recheck.json", repeat_positions_raw),
         ("normalized.json", json.dumps(normalized, sort_keys=True, allow_nan=False).encode()),
+        *((f"fill-page-{i:02d}.json", raw) for i, raw in enumerate(fill_pages)),
+        *((f"fill-recheck-{i:02d}.json", raw) for i, raw in enumerate(repeat_fill_pages)),
     ):
         with (destination / name).open("xb") as handle:
             os.chmod(destination / name, 0o600)
@@ -538,6 +686,7 @@ def collect_alpaca_paper_export(
         "account_sha256": hashlib.sha256(account_id.encode()).hexdigest(),
         "account_response_sha256": hashlib.sha256(account_raw).hexdigest(),
         "captured_orders": len(observed), "captured_positions": len(normalized_positions),
+        "captured_fill_activities": len(detailed_fills), "fill_activity_reconciled": True,
         "artifacts": artifact_hashes, "as_of_ts": now.timestamp(),
         "certifies_live_fills": False, "snapshot_atomic": False,
     }
