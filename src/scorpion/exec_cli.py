@@ -214,6 +214,7 @@ async def _run_session(args: argparse.Namespace) -> int:
         latch.trip(f"journal_start:{type(exc).__name__}")
         LOGGER.error("paper journal unavailable; no session started")
         return 2
+    capture_market = bool(getattr(args, "capture_market", False))
     session = PaperExecutionSession(
         rules=rules,
         cache=cache,
@@ -221,9 +222,14 @@ async def _run_session(args: argparse.Namespace) -> int:
         pager=pager,
         journal=journal,
         allowed_author_ids=authors or None,
+        strict_runtime=True, capture_market=capture_market,
     )
     monitor = FeedHealthMonitor(cache, session.stale, started_mono_ns=time.monotonic_ns())
-    feed = DatabentoFeed(DatabentoLiveClient(), cache, ("QQQ", "SPY"), on_skew=monitor.observe_skew)
+    feed_client = DatabentoLiveClient()
+    feed = DatabentoFeed(
+        feed_client, cache, ("QQQ", "SPY"), on_skew=monitor.observe_skew,
+        on_observation=session.on_market_observation if capture_market else None,
+    )
     queue: asyncio.Queue[tuple[RawDiscordMessage, int]] = asyncio.Queue(maxsize=512)
     overflow = asyncio.Event()
     open_et, close_et = hours
@@ -269,6 +275,8 @@ async def _run_session(args: argparse.Namespace) -> int:
             "rules_sha256": rules.sha256, "signal_ingress_enabled": not args.no_discord,
             "latch_armed": latch.armed, "safety_integrity_valid": start_safety.valid,
             "safety_event_count": start_safety.events,
+            "market_capture_enabled": capture_market, "market_dataset": feed_client.dataset,
+            "market_schema": feed_client.schema,
         })
         await supervise(
             session,
@@ -298,6 +306,7 @@ async def _run_session(args: argparse.Namespace) -> int:
                 if client is not None and client.first_disconnect_ts_utc else None
             ),
             "ingress_callback_failures": client.callback_failures if client is not None else None,
+            "market_records": session.market_records,
         })
     finally:
         try:
@@ -324,6 +333,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run-session")
     run.add_argument("--no-discord", action="store_true", help="feed/health only (drills)")
+    run.add_argument("--capture-market", action="store_true", help="bounded paper quote capture")
     sub.add_parser("preflight")
     journal_verify = sub.add_parser("verify-paper-journal")
     journal_verify.add_argument("--journal", type=Path, required=True)

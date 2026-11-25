@@ -46,12 +46,15 @@ from .config import (
     StalePolicy,
 )
 from .domain import Effect, EffectKind, EventKind, RawDiscordMessage
-from .execution_model import CallSpec, EntrySchedule, Track, entry_schedule, track_for
+from .execution_model import (
+    CallSpec, EntrySchedule, Track, entry_schedule, strict_paper_schedule, track_for,
+)
 from .fail_safe_control import NoTradeSafetyLatch, SafetyMode
 from .fastpath import QuoteCache
 from .health import FeedHealthMonitor
 from .parser import parse_message
 from .pricing import guarded_entry_limit, reference_price
+from .session_calendar import session_hours
 
 LOGGER = logging.getLogger(__name__)
 _OK_CHANNEL_ID = CHANNELS["options-king"]
@@ -434,6 +437,9 @@ class PaperExecutionSession:
         limits: ExecutionLimits = EXECUTION_LIMITS,
         mode: ExecutionMode = ExecutionMode.PAPER,
         allowed_author_ids: frozenset[str] | None = None,
+        strict_runtime: bool = False,
+        capture_market: bool = False,
+        max_market_records: int = 80_000,
         mono_ns: Callable[[], int] = time.monotonic_ns,
         now_utc: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -448,6 +454,13 @@ class PaperExecutionSession:
         self.limits = limits
         self.mode = mode
         self.allowed_author_ids = allowed_author_ids
+        if capture_market and (journal is None or not strict_runtime or max_market_records <= 0):
+            raise ValueError("market capture requires a strict journaled session")
+        self.strict_runtime = strict_runtime
+        self.capture_market = capture_market
+        self.max_market_records = max_market_records
+        self.market_records = 0
+        self._capture_until: dict[str, datetime] = {}
         self._mono_ns = mono_ns
         self._now_utc = now_utc
         self._broker = PaperIntentBroker() if mode is ExecutionMode.PAPER else ReviewOnlyBroker()
@@ -530,6 +543,20 @@ class PaperExecutionSession:
             seen_time_et=seen_et.strftime("%H:%M"),
         )
         schedule = entry_schedule(raw.source_ts_utc, raw.received_ts_utc, self.rules)
+        if self.strict_runtime:
+            today = self._now_utc().astimezone(MARKET_TZ).date()
+            hours = session_hours(today)
+            if post_et.date() != today or seen_et.date() != today or hours is None:
+                return done("skip:wrong_session", ticker=ticker)
+            if raw.received_ts_utc > self._now_utc():
+                return done("skip:future_receipt", ticker=ticker)
+            try:
+                schedule = strict_paper_schedule(
+                    raw.source_ts_utc, raw.received_ts_utc, self.rules,
+                    session_open=hours[0], session_close=hours[1],
+                )
+            except ValueError:
+                return done("skip:outside_paper_window", ticker=ticker)
         track = track_for(raw.source_ts_utc, self.rules)
         if schedule.late:
             return done("skip:late_gt15min", ticker=ticker, track=track.value, call_id=spec.call_id)
@@ -549,6 +576,13 @@ class PaperExecutionSession:
             return None
         if working.status != ("limit_intent" if chase else "scheduled"):
             return None
+        if self.strict_runtime:
+            due = working.schedule.chase_ts if chase else working.schedule.entry_ts
+            now = self._now_utc()
+            if not due <= now <= due + timedelta(seconds=3):
+                working.status = "skip:entry_timer_outside_budget"
+                self._journal({"kind": "skip", "call_id": call_id, "reason": working.status})
+                return None
         if not self.latch.armed:
             working.status = "blocked:no_trade_latch"
             self._journal({"kind": "skip", "call_id": call_id, "reason": working.status})
@@ -611,6 +645,9 @@ class PaperExecutionSession:
                 "mode": result.mode.value,
                 "rules_sha256": self.rules.sha256,
                 "reference_price": str(anchor),
+                "scheduled_entry_ts_utc": working.schedule.entry_ts.isoformat(),
+                "scheduled_chase_ts_utc": working.schedule.chase_ts.isoformat(),
+                "scheduled_exit_ts_utc": working.schedule.exit_ts.isoformat(),
                 "quote_evidence": (
                     {
                         "bid": str(quote.bid), "ask": str(quote.ask),
@@ -626,7 +663,27 @@ class PaperExecutionSession:
                 "latency_us": elapsed // 1_000,
             }
         )
+        if self.capture_market:
+            until = working.schedule.exit_ts + timedelta(seconds=60)
+            self._capture_until[working.spec.ticker] = max(
+                until, self._capture_until.get(working.spec.ticker, until),
+            )
         return result
+
+    def on_market_observation(self, record: dict[str, object]) -> None:
+        """Bounded loss-intolerant capture for symbols with a recorded intention."""
+        if not self.capture_market:
+            return
+        symbol = record.get("symbol")
+        if symbol is not None:
+            if not isinstance(symbol, str) or symbol not in self._capture_until:
+                return
+            if self._now_utc() > self._capture_until[symbol]:
+                return
+        if self.market_records >= self.max_market_records:
+            raise JournalError("market_capture_record_bound")
+        self._journal(record)
+        self.market_records += 1
 
     def on_exit_due(self, call_id: str) -> ExecutionResult | None:
         working = self.working.get(call_id)
@@ -643,6 +700,7 @@ class PaperExecutionSession:
             "kind": "conditional_exit_intent", "call_id": call_id,
             "status": result.status, "conditional_on": "confirmed_entry_fill",
             "quantity": working.intended_qty,
+            "scheduled_exit_ts_utc": working.schedule.exit_ts.isoformat(),
         })
         return result
 

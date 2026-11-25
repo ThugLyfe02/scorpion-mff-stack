@@ -515,9 +515,17 @@ def load_paper_intent_features(
     """
     from .session_service import read_verified_paper_records
 
+    receipt, records = read_verified_paper_records(Path(path))
+    return paper_features_from_records(receipt, records, max_quote_age_ms=max_quote_age_ms)
+
+
+def paper_features_from_records(
+    receipt: dict[str, object], records: tuple[dict[str, object], ...],
+    *, max_quote_age_ms: int = 3000,
+) -> PaperIntentFeatureReport:
+    """Internal seam for already verified journal bytes, including recovered prefixes."""
     if max_quote_age_ms <= 0:
         raise ValueError("quote age bound must be positive")
-    receipt, records = read_verified_paper_records(Path(path))
     journal_hash = _paper_hash(receipt["sha256"])
     decisions: dict[str, dict[str, object]] = {}
     seen_roles: set[tuple[str, str]] = set()
