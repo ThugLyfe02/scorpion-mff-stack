@@ -6,8 +6,8 @@ are exercised for real. The token must never appear in an error.
 from __future__ import annotations
 
 import json
-import time
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest

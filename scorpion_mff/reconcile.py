@@ -523,7 +523,8 @@ def collect_alpaca_paper_export(
     artifact_hashes: dict[str, str] = {}
     for name, raw in (
         ("orders.json", orders_raw), ("positions.json", positions_raw),
-        ("orders-recheck.json", repeat_orders_raw), ("positions-recheck.json", repeat_positions_raw),
+        ("orders-recheck.json", repeat_orders_raw),
+        ("positions-recheck.json", repeat_positions_raw),
         ("normalized.json", json.dumps(normalized, sort_keys=True, allow_nan=False).encode()),
     ):
         with (destination / name).open("xb") as handle:

@@ -822,7 +822,7 @@ class HttpQuoteProvider:
     def __post_init__(self) -> None:
         if (
             not all(math.isfinite(t) for t in (self.timeout_s, self.cache_s, self.max_age_s))
-            or not 0 < self.timeout_s <= 10 or not 0 <= self.cache_s
+            or not 0 < self.timeout_s <= 10 or self.cache_s < 0
             or not 0 < self.max_age_s <= 3
         ):
             raise QuoteError("invalid quote timing configuration")
@@ -866,9 +866,11 @@ class HttpQuoteProvider:
         url = self._url(contract_key)
         now, monotonic = time.time(), time.monotonic()
         cached = self._cache.get(contract_key)
-        if cached and 0 <= monotonic - cached[0] <= self.cache_s:
-            if 0 <= now - cached[1].ts <= self.max_age_s:
-                return cached[1]
+        if (
+            cached and 0 <= monotonic - cached[0] <= self.cache_s
+            and 0 <= now - cached[1].ts <= self.max_age_s
+        ):
+            return cached[1]
         self._cache.pop(contract_key, None)
         req = urllib.request.Request(url, headers={
             "Accept": "application/json",
