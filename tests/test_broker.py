@@ -6,6 +6,7 @@ are exercised for real. The token must never appear in an error.
 from __future__ import annotations
 
 import json
+import time
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -176,7 +177,8 @@ def test_quote_provider_refuses_when_unconfigured():
 
 def test_quote_provider_reads_dotted_paths():
     def transport(request, timeout):
-        return 200, {"results": [{"bid_price": "1.01", "ask_price": "1.05"}]}
+        return 200, {"contract_key": "QQQ|CALL|719|0DTE", "ts": time.time(),
+                     "results": [{"bid_price": "1.01", "ask_price": "1.05"}]}
 
     provider = HttpQuoteProvider(template="http://x/{key}", bid_path="results.0.bid_price",
                                  ask_path="results.0.ask_price", transport=transport)
@@ -195,9 +197,54 @@ def test_quote_provider_caches_within_the_window():
 
     def transport(request, timeout):
         calls.append(request.full_url)
-        return 200, {"bid": 1.0, "ask": 1.1}
+        return 200, {"bid": 1.0, "ask": 1.1, "ts": time.time(), "contract_key": "K"}
 
     provider = HttpQuoteProvider(template="http://x/{key}", transport=transport, cache_s=60)
     provider.quote("K")
     provider.quote("K")
     assert len(calls) == 1
+
+
+def test_quote_credentials_never_inherit_broker_token(monkeypatch):
+    monkeypatch.setenv("MFF_RH_TOKEN", TOKEN)
+    monkeypatch.delenv("MFF_QUOTE_TOKEN", raising=False)
+    provider = HttpQuoteProvider(template="https://quotes.example/{key}",
+                                 allowed_origin="https://quotes.example")
+    assert not provider.token and TOKEN not in repr(provider)
+    assert provider.configured
+    provider.template = "https://other.example/{key}"
+    assert not provider.configured
+    with pytest.raises(QuoteError, match="origin"):
+        provider.quote("K")
+
+
+@pytest.mark.parametrize("changes", [
+    {"ts": 1}, {"ts": float("nan")}, {"bid": True}, {"bid": 2}, {"contract_key": "OTHER"},
+    {"ts": None},
+])
+def test_quote_refuses_bad_event_price_and_identity(changes):
+    payload = {"bid": 1, "ask": 1.1, "ts": time.time(), "contract_key": "K"}
+    payload.update(changes)
+    provider = HttpQuoteProvider(template="https://quotes.example/{key}",
+                                 allowed_origin="https://quotes.example",
+                                 transport=lambda r, t: (200, payload))
+    with pytest.raises(QuoteError):
+        provider.quote("K")
+
+
+def test_quote_source_timestamp_does_not_renew_on_cache_expiry(monkeypatch):
+    t = [100.0]
+    monkeypatch.setattr("scorpion_mff.broker.time.time", lambda: t[0])
+    monkeypatch.setattr("scorpion_mff.broker.time.monotonic", lambda: t[0])
+    provider = HttpQuoteProvider(
+        template="https://quotes.example/{key}", allowed_origin="https://quotes.example",
+        cache_s=0.1, transport=lambda r, _: (
+            200, {"bid": 1, "ask": 1.1, "ts": 100, "contract_key": "K"},
+        ),
+    )
+    assert provider.quote("K").ts == 100
+    t[0] = 101
+    assert provider.quote("K").ts == 100
+    t[0] = 104
+    with pytest.raises(QuoteError, match="stale"):
+        provider.quote("K")

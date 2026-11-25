@@ -72,3 +72,15 @@ Missing, extra, unresolved and mismatched orders are explicit; price cost is com
 matched equal positive terminal quantities. Position drift reuses the existing comparator.
 Exact parity is a diagnostic, not market truth or deployment approval. Source independence and
 export completeness are declared, not authenticated. A vendor adapter and credentials remain open.
+
+## HTTP quote boundary
+
+The generic HTTP quote provider no longer inherits the brokerage token. Set
+MFF_QUOTE_TOKEN separately and pin MFF_QUOTE_ORIGIN to the HTTPS origin of the
+authorized feed. The template must contain one {key} placeholder, and response
+fields (MFF_QUOTE_KEY_PATH and MFF_QUOTE_TS_PATH) must echo the exact contract
+key and provide an epoch-seconds or timezone-aware source timestamp. No redirects,
+proxy inheritance, receipt-time freshness substitution, crossed prices or stale
+cache renewals. Default field paths contract_key and ts are not vendor claims;
+configure them only from authenticated vendor documentation. Test transport
+injection remains a local fixture seam, not a production bypass.
