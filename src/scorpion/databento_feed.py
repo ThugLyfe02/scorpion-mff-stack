@@ -9,7 +9,7 @@ import logging
 import os
 import random
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -296,7 +296,9 @@ class DatabentoLiveClient:
                 dataset=self.dataset, schema=self.schema, symbols=list(symbols), snapshot=False
             )
 
-    async def stream(self, symbols: Sequence[str], *, snapshot: bool) -> AsyncIterator[FeedMessage]:
+    async def stream(
+        self, symbols: Sequence[str], *, snapshot: bool,
+    ) -> AsyncGenerator[FeedMessage, None]:
         import databento  # optional live dependency
 
         # Databento snapshots are MBO-only; MBP reconnects never imply restored continuity.

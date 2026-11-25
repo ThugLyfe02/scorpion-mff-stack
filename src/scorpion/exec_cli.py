@@ -317,7 +317,7 @@ async def _run_session(args: argparse.Namespace) -> int:
         start_safety = await asyncio.to_thread(latch.latch.verify_integrity, latch.component)
         journal.submit({
             "kind": "session_start", "session_date": today.isoformat(),
-            "ts_utc": datetime.now(UTC).isoformat(), "mode": "PAPER",
+            "ts_utc": datetime.now(UTC).isoformat(), "mode": mode.value,
             "rules_sha256": rules.sha256, "signal_ingress_enabled": not args.no_discord,
             "latch_armed": latch.armed, "safety_integrity_valid": start_safety.valid,
             "safety_event_count": start_safety.events,
@@ -337,7 +337,7 @@ async def _run_session(args: argparse.Namespace) -> int:
         end_safety = await asyncio.to_thread(latch.latch.verify_integrity, latch.component)
         journal.submit({
             "kind": "session_end", "session_date": today.isoformat(),
-            "ts_utc": datetime.now(UTC).isoformat(), "mode": "PAPER",
+            "ts_utc": datetime.now(UTC).isoformat(), "mode": mode.value,
             "rules_sha256": rules.sha256, "feed_disconnects": feed.stats.disconnects,
             "feed_messages": feed.stats.messages, "ingress_overflow": overflow.is_set(),
             "pending_ingress": queue.qsize(), "latch_armed": latch.armed,
