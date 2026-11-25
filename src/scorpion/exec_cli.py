@@ -18,6 +18,7 @@ import shutil
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -167,6 +168,43 @@ def preflight_checks(
     return results, True
 
 
+async def _probe_live_quote(client: object, symbol: str, timeout_s: float) -> dict[str, object]:
+    """Bounded operator-initiated live entitlement check; no order path."""
+    from .databento_feed import DatabentoLiveClient
+
+    if not isinstance(client, DatabentoLiveClient):
+        raise ValueError("expected Databento live adapter")
+    if not symbol.isascii() or not 1 <= len(symbol) <= 12 or not symbol.replace(".", "").isalnum():
+        raise ValueError("invalid probe symbol")
+    if not 0 < timeout_s <= 60:
+        raise ValueError("invalid live probe timeout")
+    async with asyncio.timeout(timeout_s):
+        async with aclosing(client.stream([symbol], snapshot=False)) as stream:
+            async for row in stream:
+                if row.symbol != symbol:
+                    continue
+                age_ns = time.time_ns() - row.ts_event_ns
+                if (
+                    row.bid is None or row.ask is None
+                    or not row.bid.is_finite() or not row.ask.is_finite()
+                    or not 0 < row.bid <= row.ask
+                    or not 0 <= age_ns <= 3_000_000_000
+                    or row.bid_size is None or row.ask_size is None
+                    or row.bid_size <= 0 or row.ask_size <= 0
+                    or not row.publisher_id or not row.instrument_id
+                ):
+                    continue
+                return {
+                    "ok": True, "authority": "RESEARCH_ONLY",
+                    "dataset": client.dataset, "schema": client.schema, "symbol": symbol,
+                    "event_age_ms": age_ns / 1_000_000, "publisher_id": row.publisher_id,
+                    "instrument_id": row.instrument_id,
+                    "usable_displayed_depth": True, "certifies_continuity": False,
+                    "authorizes_orders": False,
+                }
+    raise RuntimeError("live stream ended without usable quote")
+
+
 # --------------------------------------------------------------------------------- run-session
 
 
@@ -209,6 +247,14 @@ async def _run_session(args: argparse.Namespace) -> int:
         LOGGER.error("paper session requires Discord token and explicit author allowlist")
         return 2
     try:
+        mode = ExecutionMode(os.environ.get("SCORPION_BROKER_MODE", "PAPER"))
+    except ValueError:
+        LOGGER.error("unsupported execution mode; paper session refused")
+        return 2
+    if getattr(args, "capture_market", False) and mode is not ExecutionMode.PAPER:
+        LOGGER.error("market capture requires PAPER mode")
+        return 2
+    try:
         journal = Journal(state_dir() / "journal" / f"{today.isoformat()}.jsonl")
     except (OSError, JournalError) as exc:
         latch.trip(f"journal_start:{type(exc).__name__}")
@@ -222,7 +268,7 @@ async def _run_session(args: argparse.Namespace) -> int:
         pager=pager,
         journal=journal,
         allowed_author_ids=authors or None,
-        strict_runtime=True, capture_market=capture_market,
+        strict_runtime=True, capture_market=capture_market, mode=mode,
     )
     monitor = FeedHealthMonitor(cache, session.stale, started_mono_ns=time.monotonic_ns())
     feed_client = DatabentoLiveClient()
@@ -334,6 +380,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     run = sub.add_parser("run-session")
     run.add_argument("--no-discord", action="store_true", help="feed/health only (drills)")
     run.add_argument("--capture-market", action="store_true", help="bounded paper quote capture")
+    probe = sub.add_parser("paper-feed-probe")
+    probe.add_argument("--symbol", default="SPY")
+    probe.add_argument("--timeout", type=float, default=20.0)
+    probe.add_argument("--authorize-subscription", action="store_true", required=True)
     sub.add_parser("preflight")
     journal_verify = sub.add_parser("verify-paper-journal")
     journal_verify.add_argument("--journal", type=Path, required=True)
@@ -415,6 +465,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     pull.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
 
+    if args.command == "paper-feed-probe":
+        from .databento_feed import DatabentoLiveClient
+
+        try:
+            probe_report = asyncio.run(_probe_live_quote(
+                DatabentoLiveClient(), args.symbol.upper(), args.timeout,
+            ))
+        except Exception as exc:
+            _print({"ok": False, "reason": type(exc).__name__, "authorizes_orders": False})
+            return 1
+        _print(probe_report)
+        return 0
     if args.command in (
         "paper-study-reserve", "paper-study-assess", "paper-study-finalize",
         "paper-study-status", "paper-study-dossier",

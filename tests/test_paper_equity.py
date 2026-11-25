@@ -1,11 +1,16 @@
 """Synthetic capture fixtures exercise causality, depth conservation and crash evidence."""
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from scorpion.config import load_forward_rules
+from scorpion.databento_feed import DatabentoLiveClient, FeedMessage
+from scorpion.exec_cli import _probe_live_quote
 from scorpion.execution_model import strict_paper_schedule
 from scorpion.paper_equity import replay_equity_market_journal
 from scorpion.recovery import recover_paper_session_journal
@@ -153,3 +158,24 @@ def test_strict_schedule_minute_rounding_and_early_close() -> None:
     post = early - timedelta(minutes=30)
     schedule = strict_paper_schedule(post, post, RULES, session_open=OPEN, session_close=early)
     assert schedule.exit_ts == early - timedelta(minutes=5)
+
+
+def test_live_probe_requires_fresh_displayed_depth_and_closes_stream(monkeypatch) -> None:
+    closed = []
+
+    class FixtureClient(DatabentoLiveClient):
+        async def stream(self, symbols, *, snapshot):
+            assert not snapshot and symbols == ["SPY"]
+            try:
+                yield FeedMessage("SPY", Decimal("10"), Decimal("10.1"), None, 1)
+                yield FeedMessage("SPY", Decimal("10"), Decimal("10.1"), None, 100, 5, 6, 1, 2)
+            finally:
+                closed.append(True)
+
+    monkeypatch.setattr("scorpion.exec_cli.time.time_ns", lambda: 101)
+    report = asyncio.run(_probe_live_quote(FixtureClient(), "SPY", 1))
+    assert report["ok"] and report["usable_displayed_depth"]
+    assert not report["certifies_continuity"] and not report["authorizes_orders"]
+    assert closed == [True]
+    with pytest.raises(ValueError):
+        asyncio.run(_probe_live_quote(FixtureClient(), "SPY", 0))

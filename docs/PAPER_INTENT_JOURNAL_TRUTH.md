@@ -523,3 +523,17 @@ They reconstruct modeled inventory as of the durable prefix, retain unresolved q
 and always withhold aggregate qualification. No automatic resume, broker action or latch
 clear is authorized. Provider authentication, real tape continuity, load testing and actual
 venue reconciliation remain operational prerequisites.
+
+
+### Live entitlement probe
+
+Historical metadata access is not proof of live entitlement. During the regular session,
+an operator may explicitly authorize a bounded subscription:
+
+    python -m scorpion paper-feed-probe --symbol SPY --timeout 20 --authorize-subscription
+
+This may incur market-data subscription charges according to the account's contract.
+It requires a fresh, uncrossed quote with positive displayed depth and instrument identity
+from the official adapter, closes the stream, and returns a sanitized result. No orders
+or continuity certification. Do not put credentials in arguments, chat, Git or logs.
+SCORPION_BROKER_MODE is checked again at runtime; REVIEW_ONLY cannot enable market capture.
