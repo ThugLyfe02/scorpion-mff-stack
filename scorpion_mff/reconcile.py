@@ -772,8 +772,8 @@ def verify_alpaca_paper_collection(folder: Path) -> bytes:
             "positions-recheck.json", "normalized.json"}
     if not isinstance(hashes, dict) or not core <= hashes.keys():
         raise ReconcileError("collection artifacts missing")
-    first_names = []
-    repeat_names = []
+    first_names: list[str] = []
+    repeat_names: list[str] = []
     for prefix, names in (("fill-page-", first_names), ("fill-recheck-", repeat_names)):
         for i in range(_ALPACA_ACTIVITY_MAX_PAGES):
             name = f"{prefix}{i:02d}.json"
