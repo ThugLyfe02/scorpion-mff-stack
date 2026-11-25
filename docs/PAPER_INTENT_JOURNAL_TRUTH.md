@@ -480,3 +480,46 @@ control-state compare-and-swap remain unchanged. Old preparation certificates mu
 under the new fingerprint/policy version. Read-only audit connections are explicitly closed,
 and use read transactions to reduce inconsistent intra-audit observations. The regression tests
 exercise a real WAL checkpoint plus a changed queue and a breached WAL threshold.
+
+
+## P0 operational capture and conservative equity depth replay
+
+The actual run-session service now checks regular-session date, minute-rounded entry,
+timer lateness (3 seconds), and an early-close-aware exit cap. The historical frozen
+OHLC evaluator and golden CSV remain unchanged. Strict scheduling is a prospective
+wall-clock approximation, not an assertion of historical fill parity.
+
+Explicitly enable bounded market capture with:
+    
+    python -m scorpion run-session --capture-market
+
+Use authorized Discord bot credentials/author IDs and a licensed Databento subscription.
+No real orders are sent. The existing journal captures admitted top-of-book observations
+only for symbols with a recorded intent through scheduled exit + 60s, plus global gaps.
+At 80,000 market records or writer backpressure, supervision refuses rather than silently
+sampling. This is an intentionally bounded pilot, not a full-session market archive.
+The XNAS.ITCH MBP-1 book is single-venue, not NBBO, and continuity is not independently proven.
+
+    python -m scorpion paper-market-replay --journal /private/session.jsonl
+
+The replay requires a verified journal, strict schedule and valid intent features, exact
+quote event and receipt clocks, sizes and instrument identities. It never executes a fill
+from a quote before its intent. Initial modeled buys require ask through the frozen threshold;
+chase uses an immediately marketable quote during its first minute and is suppressed if
+any initial quantity filled. A shared per-symbol budget consumes displayed depth; at unchanged
+prices only increases in displayed size add liquidity. Exit models bid-side execution only
+after the recorded conditional exit, for actual modeled inventory, within a 60-second
+window. Partial fills preserve residual inventory. Gaps/withdrawals halt further simulated
+fills; unresolved positions, missing coverage, late readiness, and incomplete lifecycle
+withhold aggregate net round-trip economics. The frozen round-trip bps is a modeled cost
+assumption, not observed fees. Quotes do not prove execution/queue priority, market status
+or complete tape capture. The reports are never accepted as Stage 1 outcome labels.
+
+    python -m scorpion recover-paper-journal --journal /private/session.jsonl --out /private/recovery
+    python -m scorpion paper-market-replay --recovered /private/recovery
+
+Recovered prefixes revalidate the checkpoint, prefix, unverified tail and source hashes.
+They reconstruct modeled inventory as of the durable prefix, retain unresolved quantities,
+and always withhold aggregate qualification. No automatic resume, broker action or latch
+clear is authorized. Provider authentication, real tape continuity, load testing and actual
+venue reconciliation remain operational prerequisites.

@@ -337,6 +337,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub.add_parser("preflight")
     journal_verify = sub.add_parser("verify-paper-journal")
     journal_verify.add_argument("--journal", type=Path, required=True)
+    market_replay = sub.add_parser("paper-market-replay")
+    market_source = market_replay.add_mutually_exclusive_group(required=True)
+    market_source.add_argument("--journal", type=Path)
+    market_source.add_argument("--recovered", type=Path)
     recovery = sub.add_parser("recover-paper-journal")
     recovery.add_argument("--journal", type=Path, required=True)
     recovery.add_argument("--out", type=Path, required=True)
@@ -565,6 +569,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         _print(report)
         return 0
+    if args.command == "paper-market-replay":
+        from dataclasses import asdict
+        from decimal import InvalidOperation
+
+        from .paper_equity import replay_equity_market_journal
+        from .session_service import JournalError
+
+        try:
+            result = replay_equity_market_journal(
+                args.recovered or args.journal, recovered=args.recovered is not None,
+            )
+        except (OSError, ValueError, JournalError, InvalidOperation, KeyError, TypeError) as exc:
+            _print({"ok": False, "reason": type(exc).__name__})
+            return 1
+        _print(asdict(result))
+        return 1 if result.blockers else 0
     if args.command == "verify-paper-journal":
         from .session_service import JournalError, verify_paper_journal
 

@@ -239,7 +239,11 @@ def _replay(
         last_record = stamp
         if stamp.astimezone(MARKET_TZ).date() != day:
             raise ValueError("journal session date mismatch")
-        if kind in ("market_gap", "latch") or row.get("action") == "blocked:conflicting_signal_create":
+        if (
+            kind in ("market_gap", "latch")
+            or row.get("action") == "blocked:conflicting_signal_create"
+            or row.get("reason") == "blocked:no_trade_latch"
+        ):
             blockers.add("market_or_safety_continuity_lost")
             halted = True
             books.clear()
@@ -388,11 +392,24 @@ def _replay(
         or end.get("ingress_overflow") is not False or end.get("pending_ingress") != 0
         or end.get("ingress_callback_failures") != 0
         or end.get("safety_integrity_valid") is not True
+        or start.get("signal_ingress_enabled") is not True
+        or end.get("feed_first_usable_recv_wall_ns") is None
+        or end.get("ingress_scope_ready_ts_utc") is None
+        or end.get("ingress_first_disconnect_ts_utc") is not None
         or start.get("safety_integrity_valid") is not True
         or start.get("safety_event_count") != end.get("safety_event_count")
         or last_record is None or last_record < hours[1]
     ):
         blockers.add("incomplete_capture_lifecycle")
+    if end.get("kind") == "session_end" and (
+        end.get("feed_first_usable_recv_wall_ns") is not None
+        and end.get("ingress_scope_ready_ts_utc") is not None
+    ):
+        if (
+            _paper_int(end["feed_first_usable_recv_wall_ns"]) > _ns(hours[0])
+            or _paper_timestamp(end["ingress_scope_ready_ts_utc"]) > hours[0]
+        ):
+            blockers.add("late_market_or_ingress_readiness")
     results: list[ModeledCall] = []
     inventory: dict[str, int] = {}
     for key, call in sorted(calls.items()):
