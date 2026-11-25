@@ -346,7 +346,7 @@ def _paper_get(request: urllib.request.Request, timeout: float) -> bytes:
     try:
         with opener.open(request, timeout=timeout) as reply:
             raw = reply.read(_ALPACA_MAX_RESPONSE + 1)
-            if len(raw) > _ALPACA_MAX_RESPONSE:
+            if not isinstance(raw, bytes) or len(raw) > _ALPACA_MAX_RESPONSE:
                 raise ReconcileError("paper venue response bound")
             return raw
     except (urllib.error.URLError, TimeoutError, OSError):
@@ -541,9 +541,9 @@ def collect_alpaca_paper_export(
         "artifacts": artifact_hashes, "as_of_ts": now.timestamp(),
         "certifies_live_fills": False, "snapshot_atomic": False,
     }
-    with (destination / "collection.json").open("x", encoding="utf-8") as handle:
+    with (destination / "collection.json").open("x", encoding="utf-8") as manifest:
         os.chmod(destination / "collection.json", 0o600)
-        json.dump(report, handle, sort_keys=True)
-        handle.flush()
-        os.fsync(handle.fileno())
+        json.dump(report, manifest, sort_keys=True)
+        manifest.flush()
+        os.fsync(manifest.fileno())
     return report
