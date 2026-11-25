@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import sqlite3
@@ -224,7 +225,8 @@ def build_operator_observability_snapshot(
     warnings: list[str] = []
 
     uri = f"file:{db_path.resolve().as_posix()}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as db:
+    with contextlib.closing(sqlite3.connect(uri, uri=True)) as db:
+        db.execute("BEGIN")
         runtime_halted, halt_reason = _runtime_halt(db)
         components = tuple(
             _component_status(db, db_path, component) for component in _component_names(db)

@@ -20,10 +20,11 @@ class Quote:
     ask: Decimal
     observed_ts_utc: datetime
     last: Decimal | None = None
-    # Provider event time (ns since epoch, wall clock) and local receive time on the monotonic
-    # clock. Ages are computed only from recv_mono_ns; wall clocks are never compared for age.
+    # Provider event time and local monotonic receive time. At ingestion, the measured
+    # provider-to-local age is captured once; subsequent ageing uses the monotonic clock.
     ts_event_ns: int | None = None
     recv_mono_ns: int | None = None
+    source_age_ns: int = 0
 
 
 @dataclass(frozen=True, slots=True)

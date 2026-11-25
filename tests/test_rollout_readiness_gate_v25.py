@@ -1,3 +1,4 @@
+import contextlib
 import json
 import sqlite3
 from dataclasses import replace
@@ -27,6 +28,7 @@ from scorpion.production_gate import (
 )
 from scorpion.production_readiness import (
     ProductionReadinessPolicy,
+    bottleneck_state_fingerprint,
     issue_rollout_readiness_certificate,
 )
 from scorpion.promotion_evidence_schema import PromotionEvidenceValidationReport
@@ -566,3 +568,30 @@ def test_readiness_expiry_blocks_prepare_and_activation(tmp_path):
         )
     assert machine.get(prepared.rollout_id).state is RolloutState.EXPIRED
     assert registry.get(candidate.release_id).state is ReleaseState.CANDIDATE
+
+
+def test_checkpoint_placement_preserves_semantic_state_but_not_raw_audit(tmp_path):
+    path = tmp_path / "checkpoint.db"
+    # Keep a writer open across the observation so WAL placement is controllable.
+    Store(path)
+    with contextlib.closing(sqlite3.connect(str(path))) as writer:
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        _seed_liveness(path, NOW)
+        before = audit_production_bottlenecks(path, now=NOW)
+        assert before.snapshot.wal_bytes > 0
+        result = writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        assert result[0] == 0
+        after = audit_production_bottlenecks(path, now=NOW)
+        assert after.snapshot.wal_bytes == 0
+        assert before.report_hash != after.report_hash
+        assert bottleneck_state_fingerprint(before) == bottleneck_state_fingerprint(after)
+        _seed_liveness(path, NOW, utilization=0.20)
+        changed = audit_production_bottlenecks(path, now=NOW)
+        assert bottleneck_state_fingerprint(changed) != bottleneck_state_fingerprint(after)
+        # A physical WAL that breaches its configured risk threshold still emits
+        # a warning and changes the semantic fingerprint.
+        pressure = audit_production_bottlenecks(
+            path, now=NOW, policy=ProductionBottleneckAuditPolicy(maximum_wal_bytes=0),
+        )
+        assert any(f.code == "wal_growth" for f in pressure.findings)
+        assert bottleneck_state_fingerprint(pressure) != bottleneck_state_fingerprint(changed)
