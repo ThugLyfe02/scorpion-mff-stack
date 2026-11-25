@@ -298,7 +298,7 @@ class DatabentoLiveClient:
 
     async def stream(
         self, symbols: Sequence[str], *, snapshot: bool,
-    ) -> AsyncGenerator[FeedMessage, None]:
+    ) -> AsyncGenerator[FeedMessage]:
         import databento  # optional live dependency
 
         # Databento snapshots are MBO-only; MBP reconnects never imply restored continuity.
