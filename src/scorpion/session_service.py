@@ -47,7 +47,12 @@ from .config import (
 )
 from .domain import Effect, EffectKind, EventKind, RawDiscordMessage
 from .execution_model import (
-    CallSpec, EntrySchedule, Track, entry_schedule, strict_paper_schedule, track_for,
+    CallSpec,
+    EntrySchedule,
+    Track,
+    entry_schedule,
+    strict_paper_schedule,
+    track_for,
 )
 from .fail_safe_control import NoTradeSafetyLatch, SafetyMode
 from .fastpath import QuoteCache

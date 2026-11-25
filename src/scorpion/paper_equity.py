@@ -353,9 +353,11 @@ def _replay(
                 if call.ticker != symbol:
                     continue
                 for order in (call.initial, call.chase, call.exit):
-                    if order and order.filled < order.quantity:
-                        if order.seq < seq and order.submitted_ns < event <= wall < order.deadline_ns:
-                            candidates.append((key, call, order))
+                    if (
+                        order and order.filled < order.quantity and order.seq < seq
+                        and order.submitted_ns < event <= wall < order.deadline_ns
+                    ):
+                        candidates.append((key, call, order))
             for key, call, order in sorted(candidates, key=lambda item: item[2].seq):
                 order.observations += 1
                 if order.role == "EXIT":
@@ -404,12 +406,11 @@ def _replay(
     if end.get("kind") == "session_end" and (
         end.get("feed_first_usable_recv_wall_ns") is not None
         and end.get("ingress_scope_ready_ts_utc") is not None
+    ) and (
+        _paper_int(end["feed_first_usable_recv_wall_ns"]) > _ns(hours[0])
+        or _paper_timestamp(end["ingress_scope_ready_ts_utc"]) > hours[0]
     ):
-        if (
-            _paper_int(end["feed_first_usable_recv_wall_ns"]) > _ns(hours[0])
-            or _paper_timestamp(end["ingress_scope_ready_ts_utc"]) > hours[0]
-        ):
-            blockers.add("late_market_or_ingress_readiness")
+        blockers.add("late_market_or_ingress_readiness")
     results: list[ModeledCall] = []
     inventory: dict[str, int] = {}
     for key, call in sorted(calls.items()):
