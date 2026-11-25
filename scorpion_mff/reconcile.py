@@ -27,13 +27,21 @@ to leave a position it is in.
 
 from __future__ import annotations
 
+import hashlib
 import json
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import asdict, dataclass
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from .calendar import et_date
+from .instruments import OptionContract
 from .types import Position
 
 
@@ -318,3 +326,223 @@ def compare_paper_orders(
         "coverage_complete": bool(local) and not missing and not extra,
         "exact_parity": bool(local) and not missing and not extra and not issues,
     }
+
+
+# Read-only Alpaca paper REST collection. No POST, DELETE, configurable endpoint,
+# live hostname, or credential transmission to a caller-provided URL.
+_ALPACA_ORIGIN = "https://paper-api.alpaca.markets"
+_ALPACA_LIMIT = 500
+_ALPACA_MAX_RESPONSE = 16 * 1024 * 1024
+
+
+class _NoPaperRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str,
+                         headers: Any, newurl: str) -> None:
+        return None
+
+
+def _paper_get(request: urllib.request.Request, timeout: float) -> bytes:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoPaperRedirect())
+    try:
+        with opener.open(request, timeout=timeout) as reply:
+            raw = reply.read(_ALPACA_MAX_RESPONSE + 1)
+            if len(raw) > _ALPACA_MAX_RESPONSE:
+                raise ReconcileError("paper venue response bound")
+            return raw
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise ReconcileError("paper venue read failed") from None
+
+
+def _integer(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ReconcileError("noninteger venue quantity")
+    try:
+        number = Decimal(str(value))
+    except InvalidOperation:
+        raise ReconcileError("noninteger venue quantity") from None
+    if not number.is_finite() or number != number.to_integral_value() or not 0 <= number <= 10**9:
+        raise ReconcileError("noninteger venue quantity")
+    return int(number)
+
+
+def _venue_timestamp(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ReconcileError("missing venue timestamp")
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ReconcileError("invalid venue timestamp") from None
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        raise ReconcileError("naive venue timestamp")
+    return stamp.astimezone(UTC)
+
+
+def _alpaca_osi(value: object) -> str:
+    if not isinstance(value, str):
+        raise ReconcileError("missing option symbol")
+    # Alpaca compact OCC symbols use the fixed 15-character date/side/strike suffix.
+    if not 16 <= len(value) <= 21 or any(c.isspace() for c in value):
+        raise ReconcileError("invalid compact option symbol")
+    try:
+        return OptionContract.parse_osi_symbol(value[:-15].ljust(6) + value[-15:]).osi_symbol
+    except ValueError:
+        raise ReconcileError("unsupported option identity") from None
+
+
+def _alpaca_order(row: object, day: date, cutoff: datetime) -> PaperOrderObservation:
+    if not isinstance(row, dict):
+        raise ReconcileError("invalid paper venue order")
+    if (
+        row.get("asset_class") != "us_option" or row.get("type") != "limit"
+        or row.get("order_class") not in (None, "", "simple")
+        or row.get("legs") not in (None, [])
+        or row.get("replaced_by") is not None or row.get("replaces") is not None
+    ):
+        raise ReconcileError("unsupported paper order scope or replacement")
+    submitted = _venue_timestamp(row.get("submitted_at"))
+    updated = _venue_timestamp(row.get("updated_at"))
+    if et_date(submitted) != day or not submitted <= updated <= cutoff:
+        raise ReconcileError("paper venue order outside observation cutoff")
+    state_map = {
+        "filled": "FILLED", "canceled": "CANCELLED", "expired": "EXPIRED",
+        "rejected": "REJECTED", "new": "WORKING", "accepted": "PENDING",
+        "pending_new": "PENDING", "partially_filled": "PARTIAL",
+    }
+    state = state_map.get(str(row.get("status")), "UNKNOWN")
+    client_id = row.get("client_order_id")
+    if not isinstance(client_id, str) or not client_id or not row.get("id"):
+        raise ReconcileError("missing paper venue order identity")
+    try:
+        quantity = _integer(row.get("filled_qty"))
+        avg = row.get("filled_avg_price")
+        return PaperOrderObservation(
+            client_id, _alpaca_osi(row.get("symbol")), str(row.get("side")),
+            _integer(row.get("qty")), Decimal(str(row.get("limit_price"))),
+            quantity, Decimal(str(avg)) if avg is not None else None, state,
+        )
+    except InvalidOperation:
+        raise ReconcileError("invalid paper venue price") from None
+
+
+def collect_alpaca_paper_export(
+    *, account_id: str, session_date: date, input_sha256: str, capture_end_ts: float,
+    destination: Path, transport: Callable[[urllib.request.Request, float], bytes] = _paper_get,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> dict[str, Any]:
+    """Fetch a stable, bounded account snapshot and normalize for existing comparator.
+
+    Dedicated options paper account only. A capped or changing export is refused;
+    repeated reads are not a claim of atomicity or independently verified fills.
+    """
+    key = os.environ.get("SCORPION_ALPACA_PAPER_KEY", "").strip()
+    secret = os.environ.get("SCORPION_ALPACA_PAPER_SECRET", "").strip()
+    if not key or not secret or not account_id:
+        raise ReconcileError("paper-specific credentials and account pin required")
+    if len(input_sha256) != 64 or any(c not in "0123456789abcdef" for c in input_sha256):
+        raise ReconcileError("invalid capture identity")
+    now = clock()
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ReconcileError("naive paper collection clock")
+    now = now.astimezone(UTC)
+    if et_date(now) != session_date or now.timestamp() < capture_end_ts:
+        raise ReconcileError("paper collection outside capture session")
+    # Exclusive after boundary: include midnight by subtracting a microsecond.
+    from zoneinfo import ZoneInfo
+
+    start = datetime.combine(session_date, datetime.min.time(), tzinfo=ZoneInfo("America/New_York"))
+    after = (start - timedelta(microseconds=1)).astimezone(UTC).isoformat()
+    query = urllib.parse.urlencode({
+        "status": "all", "limit": _ALPACA_LIMIT, "after": after,
+        "until": now.isoformat(), "direction": "asc", "nested": "false",
+    })
+    headers = {
+        "APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret,
+        "Accept": "application/json",
+    }
+
+    def get(path: str) -> tuple[bytes, Any]:
+        try:
+            raw = transport(urllib.request.Request(
+                _ALPACA_ORIGIN + path, headers=headers, method="GET",
+            ), 5.0)
+            if len(raw) > _ALPACA_MAX_RESPONSE:
+                raise ReconcileError("paper response bound")
+            return raw, json.loads(raw)
+        except (OSError, ValueError, TypeError):
+            raise ReconcileError("paper venue payload unavailable") from None
+
+    account_raw, account = get("/v2/account")
+    if not isinstance(account, dict) or account.get("id") != account_id:
+        raise ReconcileError("paper account identity mismatch")
+    orders_raw, orders = get("/v2/orders?" + query)
+    positions_raw, positions = get("/v2/positions")
+    repeat_orders_raw, repeat_orders = get("/v2/orders?" + query)
+    repeat_positions_raw, repeat_positions = get("/v2/positions")
+    _, account_again = get("/v2/account")
+    if not isinstance(account_again, dict) or account_again.get("id") != account_id:
+        raise ReconcileError("paper account changed")
+    if not isinstance(orders, list) or len(orders) >= _ALPACA_LIMIT:
+        raise ReconcileError("paper order export may be truncated")
+    if not isinstance(positions, list) or orders != repeat_orders or positions != repeat_positions:
+        raise ReconcileError("paper venue state changed during collection")
+    observed = [_alpaca_order(row, session_date, now) for row in orders]
+    if len({row.client_id for row in observed}) != len(observed) or len({
+        row["id"] for row in orders
+    }) != len(orders):
+        raise ReconcileError("duplicate paper venue order identity")
+    normalized_positions: list[dict[str, Any]] = []
+    for row in positions:
+        if not isinstance(row, dict) or row.get("asset_class") != "us_option":
+            raise ReconcileError("paper account contains unsupported positions")
+        if row.get("side") != "long":
+            raise ReconcileError("paper account contains unsupported short position")
+        normalized_positions.append(VenuePosition(
+            _alpaca_osi(row.get("symbol")), _integer(row.get("qty")),
+        ).to_dict())
+    if len({row["contract_key"] for row in normalized_positions}) != len(normalized_positions):
+        raise ReconcileError("duplicate paper venue position")
+    finished = clock()
+    if finished.tzinfo is None or finished.utcoffset() is None or (
+        not now <= finished <= now + timedelta(seconds=60)
+        or et_date(finished) != session_date
+    ):
+        raise ReconcileError("paper snapshot collection time exceeded")
+    normalized = {
+        "schema": "scorpion.paper-venue-export.v1", "authority": "PAPER_ONLY",
+        "source": "alpaca-paper-rest", "input_sha256": input_sha256,
+        "session_date": session_date.isoformat(), "as_of_ts": now.timestamp(),
+        "complete_order_export": True, "positions": normalized_positions,
+        "orders": [{
+            **asdict(row), "limit": str(row.limit),
+            "average_price": str(row.average_price) if row.average_price is not None else None,
+        } for row in observed],
+    }
+    # Preserve exact response bytes privately. Account payload is sensitive; retain
+    # only the validated account-ID digest rather than balances or account PII.
+    destination.mkdir(mode=0o700, parents=True, exist_ok=False)
+    artifact_hashes: dict[str, str] = {}
+    for name, raw in (
+        ("orders.json", orders_raw), ("positions.json", positions_raw),
+        ("orders-recheck.json", repeat_orders_raw), ("positions-recheck.json", repeat_positions_raw),
+        ("normalized.json", json.dumps(normalized, sort_keys=True, allow_nan=False).encode()),
+    ):
+        with (destination / name).open("xb") as handle:
+            os.chmod(destination / name, 0o600)
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        artifact_hashes[name] = hashlib.sha256(raw).hexdigest()
+    report = {
+        "authority": "RESEARCH_ONLY", "source": "alpaca-paper-rest",
+        "account_sha256": hashlib.sha256(account_id.encode()).hexdigest(),
+        "account_response_sha256": hashlib.sha256(account_raw).hexdigest(),
+        "captured_orders": len(observed), "captured_positions": len(normalized_positions),
+        "artifacts": artifact_hashes, "as_of_ts": now.timestamp(),
+        "certifies_live_fills": False, "snapshot_atomic": False,
+    }
+    with (destination / "collection.json").open("x", encoding="utf-8") as handle:
+        os.chmod(destination / "collection.json", 0o600)
+        json.dump(report, handle, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return report

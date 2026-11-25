@@ -812,7 +812,9 @@ class HttpQuoteProvider:
     transport: Callable[[urllib.request.Request, float], tuple[int, dict[str, Any]]] | None = None
     allowed_origin: str = field(default_factory=lambda: os.environ.get("MFF_QUOTE_ORIGIN", ""))
     timestamp_path: str = field(default_factory=lambda: os.environ.get("MFF_QUOTE_TS_PATH", "ts"))
-    key_path: str = field(default_factory=lambda: os.environ.get("MFF_QUOTE_KEY_PATH", "contract_key"))
+    key_path: str = field(
+        default_factory=lambda: os.environ.get("MFF_QUOTE_KEY_PATH", "contract_key")
+    )
     max_age_s: float = 3.0
     _cache: dict[str, tuple[float, Quote]] = field(default_factory=dict, repr=False)
     _watermark: dict[str, Quote] = field(default_factory=dict, repr=False)
@@ -912,7 +914,9 @@ class HttpQuoteProvider:
         if self.transport is not None:
             return self.transport(request, self.timeout_s)
         try:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoQuoteRedirect())
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}), _NoQuoteRedirect(),
+            )
             with opener.open(request, timeout=self.timeout_s) as resp:
                 raw = resp.read(1024 * 1024 + 1)
                 if len(raw) > 1024 * 1024:

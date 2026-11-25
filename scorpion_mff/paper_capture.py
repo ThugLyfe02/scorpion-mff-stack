@@ -35,6 +35,7 @@ from .reconcile import (
     PaperOrderObservation,
     ReconcileError,
     VenuePosition,
+    collect_alpaca_paper_export,
     compare_paper_orders,
     paper_orders_from_payload,
     reconcile,
@@ -358,6 +359,27 @@ def compare_capture_venue(run: Path, export_path: Path) -> dict[str, Any]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args_list = list(sys.argv[1:] if argv is None else argv)
+    if args_list and args_list[0] == "collect-alpaca-paper":
+        collect = argparse.ArgumentParser(description="Read-only dedicated options paper account")
+        collect.add_argument("--run", required=True, type=Path)
+        collect.add_argument("--out", required=True, type=Path)
+        collect.add_argument("--account-id", required=True)
+        parsed = collect.parse_args(args_list[1:])
+        try:
+            summary = json.loads((parsed.run / "summary.json").read_text(encoding="utf-8"))
+            if summary.get("authority") != "PAPER_ONLY" or not summary.get("ledger_integrity"):
+                raise ReconcileError("invalid modeled capture")
+            report = collect_alpaca_paper_export(
+                account_id=parsed.account_id,
+                session_date=date.fromisoformat(summary["session_date"]),
+                input_sha256=summary["input_sha256"], capture_end_ts=summary["capture_end_ts"],
+                destination=parsed.out,
+            )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(json.dumps({"error": type(exc).__name__, "verified": False}))
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return 0
     if args_list and args_list[0] == "reconcile":
         compare = argparse.ArgumentParser(description="Compare a completed paper run")
         compare.add_argument("--run", required=True, type=Path)

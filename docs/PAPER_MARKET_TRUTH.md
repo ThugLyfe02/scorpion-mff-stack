@@ -84,3 +84,27 @@ proxy inheritance, receipt-time freshness substitution, crossed prices or stale
 cache renewals. Default field paths contract_key and ts are not vendor claims;
 configure them only from authenticated vendor documentation. Test transport
 injection remains a local fixture seam, not a production bypass.
+
+
+## Authorized external paper evidence pilot (Alpaca)
+
+The collector uses only GET requests to the fixed https://paper-api.alpaca.markets
+/v2/account, /v2/orders and /v2/positions endpoints. Set SCORPION_ALPACA_PAPER_KEY and
+SCORPION_ALPACA_PAPER_SECRET locally, use a dedicated options paper account, and provide
+its exact account ID. It does not create, replace or cancel orders. It requires a
+single-session capture and same-day post-capture collection; rejects a capped (500)
+order response rather than guessing completeness, changed readbacks, non-option or
+multi-leg/replaced/non-limit orders and unexpected short positions. The original order
+and position response bytes and normalized comparison export are preserved privately.
+Account response bytes are not saved; account and response digests are retained.
+
+    python -m scorpion_mff.paper_capture collect-alpaca-paper \
+      --run /private/capture --out /private/venue-export --account-id PAPER_ACCOUNT_ID
+
+    python -m scorpion_mff.paper_capture reconcile \
+      --run /private/capture --venue-export /private/venue-export/normalized.json
+
+Use identical client_order_id values for externally submitted paper orders. Missing
+or extra IDs remain discrepancies. Stable double reads are not atomic venue snapshots,
+nor independently signed fills; collector/reviewer admission is still required.
+This adapter is documented-API-based, not verified with authenticated credentials.
