@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from types import SimpleNamespace
+
+import pytest
 
 from scorpion.broker import Quote, StaleQuote
-from scorpion.databento_feed import DatabentoFeed, FeedMessage
+from scorpion.databento_feed import DatabentoFeed, DatabentoLiveClient, FeedCaptureError, FeedMessage
 from scorpion.fastpath import QuoteCache
 
 WALL = 1_790_000_000_000_000_000
@@ -152,3 +156,70 @@ def test_clock_regression_is_not_a_healthy_symbol_age() -> None:
     feed._apply(message(WALL - 200 * MS))
     clock.mono -= MS
     assert cache.age_ms("XYZ") is None
+
+
+def test_observation_sink_binds_depth_and_fails_closed() -> None:
+    clock, cache, _ = build()
+    records: list[dict[str, object]] = []
+    feed = DatabentoFeed(
+        Client(), cache, ["XYZ"], wall_ns=lambda: clock.wall, mono_ns=lambda: clock.mono,
+        on_observation=records.append,
+    )
+    row = FeedMessage("XYZ", Decimal("10"), Decimal("10.02"), None, WALL, 12, 8, 1, 2, 3)
+    feed._apply(row)
+    feed._apply(row)
+    assert len(records) == 1
+    assert records[0]["ask_size"] == 8 and records[0]["provider_sequence"] == 3
+    feed._apply(FeedMessage("XYZ", Decimal("10"), Decimal("10.02"), None, WALL, 12, 9))
+    assert records[-1]["reason"] == "timestamp_conflict"
+
+    def broken(_: dict[str, object]) -> None:
+        raise OSError("fixture failure")
+
+    failing = DatabentoFeed(
+        Client(), QuoteCache(), ["XYZ"], wall_ns=lambda: WALL, on_observation=broken,
+        max_disconnects=1,
+    )
+    with pytest.raises(FeedCaptureError):
+        asyncio.run(failing.run())
+
+
+def test_live_adapter_mbp_never_requests_mbo_snapshot_and_never_prices_order_action(
+    monkeypatch,
+) -> None:
+    subscriptions = []
+    class FakeLive:
+        symbology_map = {2: "XYZ"}
+
+        def __init__(self, **kwargs):
+            assert kwargs["slow_reader_behavior"] == "warn"
+
+        def subscribe(self, **kwargs):
+            subscriptions.append(kwargs)
+
+        async def __aiter__(self):
+            yield SimpleNamespace(
+                instrument_id=2, publisher_id=1, sequence=8, ts_event=WALL, action="A",
+                price=90_000_000_000, levels=[SimpleNamespace(
+                    bid_px=10_000_000_000, ask_px=10_020_000_000, bid_sz=20, ask_sz=12,
+                )],
+            )
+            yield type("ErrorMsg", (), {})()
+
+        def stop(self):
+            pass
+
+    monkeypatch.setenv("DATABENTO_API_KEY", "synthetic-test-key")
+    monkeypatch.setitem(sys.modules, "databento", SimpleNamespace(Live=FakeLive))
+
+    async def consume():
+        adapter = DatabentoLiveClient()
+        stream = adapter.stream(["XYZ"], snapshot=True)
+        row = await anext(stream)
+        assert row.last is None and row.ask_size == 12
+        adapter.add_symbols(["OTHER"])
+        with pytest.raises(RuntimeError, match="provider_error"):
+            await anext(stream)
+
+    asyncio.run(consume())
+    assert subscriptions and all(row["snapshot"] is False for row in subscriptions)

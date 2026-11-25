@@ -36,3 +36,14 @@ concentration by session. An empty match produces no estimate. Minimum matched t
 coverage are descriptive evidence gates, not statistical significance or a promotion criterion.
 This is a latency intervention on historical modeled outcomes, not a live signal half-life estimate.
 No strategy, execution policy, risk limit or permission changes based on this report.
+
+## Live adapter contract and bounded market observations
+
+Databento live docs specify that snapshot subscriptions are MBO-only. MBP-1/CMBP-1
+now subscribe without snapshot requests, and reconnect remains a gap rather than a
+continuity certificate. Provider errors and slow-reader warning events force reconnect.
+Only trade actions can populate last price. Optional observation callback receives admitted
+book prices, sizes, event/receipt clocks, venue sequence and instrument identity, plus
+withdrawal/gap records. Callback failures propagate to supervision instead of being hidden
+by transport retries. Filtered venue sequence is diagnostic, not a gap-free sequence proof.
+No paid subscription or real credential was exercised in CI.
