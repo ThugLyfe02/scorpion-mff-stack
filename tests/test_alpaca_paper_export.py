@@ -1,13 +1,18 @@
 """Read-only paper exporter; all transport fixtures are synthetic."""
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
 
-from scorpion_mff.reconcile import ReconcileError, collect_alpaca_paper_export
+from scorpion_mff.reconcile import (
+    ReconcileError,
+    collect_alpaca_paper_export,
+    verify_alpaca_paper_collection,
+)
 
 DAY = date(2026, 11, 24)
 NOW = datetime(2026, 11, 24, 20, tzinfo=UTC)
@@ -168,3 +173,39 @@ def test_activity_pagination_preserves_full_pages_and_rejects_replayed_token(tmp
 
     with pytest.raises(ReconcileError, match="pagination replay"):
         collect(tmp_path / "refused", replayed)
+
+
+def test_collection_reproduces_raw_evidence_and_refuses_rewritten_normalized_export(
+    tmp_path, transport,
+):
+    _, _, read = transport
+    dest = tmp_path / "snapshot"
+    collect(dest, read)
+    assert verify_alpaca_paper_collection(dest) == (dest / "normalized.json").read_bytes()
+    raw = json.loads((dest / "normalized.json").read_text())
+    raw["orders"][0]["average_price"] = "1.04"
+    changed = json.dumps(raw, sort_keys=True).encode()
+    (dest / "normalized.json").write_bytes(changed)
+    with pytest.raises(ReconcileError, match="identity"):
+        verify_alpaca_paper_collection(dest)
+    manifest = json.loads((dest / "collection.json").read_text())
+    manifest["artifacts"]["normalized.json"] = hashlib.sha256(changed).hexdigest()
+    (dest / "collection.json").write_text(json.dumps(manifest))
+    with pytest.raises(ReconcileError, match="does not reproduce"):
+        verify_alpaca_paper_collection(dest)
+
+
+def test_collection_refuses_missing_pages_and_path_traversal(tmp_path, transport):
+    _, _, read = transport
+    dest = tmp_path / "snapshot"
+    collect(dest, read)
+    manifest = json.loads((dest / "collection.json").read_text())
+    manifest["artifacts"]["../secret"] = "0" * 64
+    (dest / "collection.json").write_text(json.dumps(manifest))
+    with pytest.raises(ReconcileError, match="roster"):
+        verify_alpaca_paper_collection(dest)
+    del manifest["artifacts"]["../secret"]
+    del manifest["artifacts"]["fill-page-00.json"]
+    (dest / "collection.json").write_text(json.dumps(manifest))
+    with pytest.raises(ReconcileError, match="roster"):
+        verify_alpaca_paper_collection(dest)

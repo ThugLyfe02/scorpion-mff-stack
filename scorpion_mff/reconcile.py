@@ -515,6 +515,54 @@ def _validate_fill_activities(
     return tuple(sorted(result, key=lambda row: (row.transaction_ts_utc, row.fill_id)))
 
 
+def _normalize_collection(
+    *, orders: object, positions: object, fills: object, repeat_orders: object,
+    repeat_positions: object, repeat_fills: object, session_date: date,
+    now: datetime, input_sha256: str, account_sha256: str,
+) -> dict[str, Any]:
+    if not isinstance(orders, list) or len(orders) >= _ALPACA_LIMIT:
+        raise ReconcileError("paper order export may be truncated")
+    if (
+        not isinstance(positions, list) or not isinstance(fills, list)
+        or orders != repeat_orders or positions != repeat_positions or fills != repeat_fills
+    ):
+        raise ReconcileError("paper venue state changed during collection")
+    observed = [_alpaca_order(row, session_date, now) for row in orders]
+    if len({row.client_id for row in observed}) != len(observed) or len({
+        row["id"] for row in orders
+    }) != len(orders):
+        raise ReconcileError("duplicate paper venue order identity")
+    detailed_fills = _validate_fill_activities(orders, observed, fills, session_date, now)
+    normalized_positions: list[dict[str, Any]] = []
+    for row in positions:
+        if not isinstance(row, dict) or row.get("asset_class") != "us_option":
+            raise ReconcileError("paper account contains unsupported positions")
+        if row.get("side") != "long":
+            raise ReconcileError("paper account contains unsupported short position")
+        normalized_positions.append(VenuePosition(
+            _alpaca_osi(row.get("symbol")), _integer(row.get("qty")),
+        ).to_dict())
+    if len({row["contract_key"] for row in normalized_positions}) != len(normalized_positions):
+        raise ReconcileError("duplicate paper venue position")
+    normalized = {
+        "schema": "scorpion.paper-venue-export.v1", "authority": "PAPER_ONLY",
+        "source": "alpaca-paper-rest", "input_sha256": input_sha256,
+        "account_sha256": account_sha256,
+        "session_date": session_date.isoformat(), "as_of_ts": now.timestamp(),
+        "complete_order_export": True, "positions": normalized_positions,
+        "fill_activity_reconciled": True,
+        "fill_activities": [{
+            **asdict(row), "price": str(row.price),
+            "transaction_ts_utc": row.transaction_ts_utc.isoformat(),
+        } for row in detailed_fills],
+        "orders": [{
+            **asdict(row), "limit": str(row.limit),
+            "average_price": str(row.average_price) if row.average_price is not None else None,
+        } for row in observed],
+    }
+    return normalized
+
+
 def collect_alpaca_paper_export(
     *, account_id: str, session_date: date, input_sha256: str, capture_end_ts: float,
     destination: Path, transport: Callable[[urllib.request.Request, float], bytes] = _paper_get,
@@ -618,51 +666,19 @@ def collect_alpaca_paper_export(
     _, account_again = get("/v2/account")
     if not isinstance(account_again, dict) or account_again.get("id") != account_id:
         raise ReconcileError("paper account changed")
-    if not isinstance(orders, list) or len(orders) >= _ALPACA_LIMIT:
-        raise ReconcileError("paper order export may be truncated")
-    if (
-        not isinstance(positions, list) or orders != repeat_orders
-        or positions != repeat_positions or fills != repeat_fills
-    ):
-        raise ReconcileError("paper venue state changed during collection")
-    observed = [_alpaca_order(row, session_date, now) for row in orders]
-    if len({row.client_id for row in observed}) != len(observed) or len({
-        row["id"] for row in orders
-    }) != len(orders):
-        raise ReconcileError("duplicate paper venue order identity")
-    detailed_fills = _validate_fill_activities(orders, observed, fills, session_date, now)
-    normalized_positions: list[dict[str, Any]] = []
-    for row in positions:
-        if not isinstance(row, dict) or row.get("asset_class") != "us_option":
-            raise ReconcileError("paper account contains unsupported positions")
-        if row.get("side") != "long":
-            raise ReconcileError("paper account contains unsupported short position")
-        normalized_positions.append(VenuePosition(
-            _alpaca_osi(row.get("symbol")), _integer(row.get("qty")),
-        ).to_dict())
-    if len({row["contract_key"] for row in normalized_positions}) != len(normalized_positions):
-        raise ReconcileError("duplicate paper venue position")
     finished = clock()
     if finished.tzinfo is None or finished.utcoffset() is None or (
         not now <= finished <= now + timedelta(seconds=60)
         or et_date(finished) != session_date
     ):
         raise ReconcileError("paper snapshot collection time exceeded")
-    normalized = {
-        "schema": "scorpion.paper-venue-export.v1", "authority": "PAPER_ONLY",
-        "source": "alpaca-paper-rest", "input_sha256": input_sha256,
-        "session_date": session_date.isoformat(), "as_of_ts": now.timestamp(),
-        "complete_order_export": True, "positions": normalized_positions,
-        "fill_activity_reconciled": True,
-        "fill_activities": [{
-            **asdict(row), "price": str(row.price),
-            "transaction_ts_utc": row.transaction_ts_utc.isoformat(),
-        } for row in detailed_fills],
-        "orders": [{
-            **asdict(row), "limit": str(row.limit),
-            "average_price": str(row.average_price) if row.average_price is not None else None,
-        } for row in observed],
-    }
+    account_sha256 = hashlib.sha256(account_id.encode()).hexdigest()
+    normalized = _normalize_collection(
+        orders=orders, positions=positions, fills=fills, repeat_orders=repeat_orders,
+        repeat_positions=repeat_positions, repeat_fills=repeat_fills,
+        session_date=session_date, now=now, input_sha256=input_sha256,
+        account_sha256=account_sha256,
+    )
     # Preserve exact response bytes privately. Account payload is sensitive; retain
     # only the validated account-ID digest rather than balances or account PII.
     destination.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -682,11 +698,15 @@ def collect_alpaca_paper_export(
             os.fsync(handle.fileno())
         artifact_hashes[name] = hashlib.sha256(raw).hexdigest()
     report = {
+        "schema": "scorpion.alpaca-paper-collection.v2",
         "authority": "RESEARCH_ONLY", "source": "alpaca-paper-rest",
-        "account_sha256": hashlib.sha256(account_id.encode()).hexdigest(),
+        "account_sha256": account_sha256, "input_sha256": input_sha256,
+        "session_date": session_date.isoformat(),
         "account_response_sha256": hashlib.sha256(account_raw).hexdigest(),
-        "captured_orders": len(observed), "captured_positions": len(normalized_positions),
-        "captured_fill_activities": len(detailed_fills), "fill_activity_reconciled": True,
+        "captured_orders": len(normalized["orders"]),
+        "captured_positions": len(normalized["positions"]),
+        "captured_fill_activities": len(normalized["fill_activities"]),
+        "fill_activity_reconciled": True,
         "artifacts": artifact_hashes, "as_of_ts": now.timestamp(),
         "certifies_live_fills": False, "snapshot_atomic": False,
     }
@@ -696,3 +716,133 @@ def collect_alpaca_paper_export(
         manifest.flush()
         os.fsync(manifest.fileno())
     return report
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 64
+        and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+def _collection_json(raw: bytes) -> Any:
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise ReconcileError("duplicate collection JSON key")
+            result[key] = value
+        return result
+
+    def constant(_: str) -> None:
+        raise ReconcileError("nonfinite collection JSON")
+
+    try:
+        return json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
+    except (ValueError, RecursionError) as exc:
+        raise ReconcileError("invalid collection JSON") from exc
+
+
+def verify_alpaca_paper_collection(folder: Path) -> bytes:
+    """Reproduce normalized observations from the stored original pages.
+
+    The returned immutable normalized bytes are what the comparator consumes.
+    The manifest is unkeyed local integrity evidence, not independent attestation.
+    """
+    with (folder / "collection.json").open("rb") as handle:
+        manifest_raw = handle.read(65537)
+    if len(manifest_raw) > 65536:
+        raise ReconcileError("collection manifest bound")
+    manifest = _collection_json(manifest_raw)
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema") != "scorpion.alpaca-paper-collection.v2"
+        or manifest.get("authority") != "RESEARCH_ONLY"
+        or manifest.get("source") != "alpaca-paper-rest"
+        or manifest.get("fill_activity_reconciled") is not True
+        or manifest.get("snapshot_atomic") is not False
+        or manifest.get("certifies_live_fills") is not False
+        or not all(_is_sha256(manifest.get(key)) for key in (
+            "account_sha256", "input_sha256", "account_response_sha256",
+        ))
+    ):
+        raise ReconcileError("collection scope invalid")
+    hashes = manifest.get("artifacts")
+    core = {"orders.json", "positions.json", "orders-recheck.json",
+            "positions-recheck.json", "normalized.json"}
+    if not isinstance(hashes, dict) or not core <= hashes.keys():
+        raise ReconcileError("collection artifacts missing")
+    first_names = []
+    repeat_names = []
+    for prefix, names in (("fill-page-", first_names), ("fill-recheck-", repeat_names)):
+        for i in range(_ALPACA_ACTIVITY_MAX_PAGES):
+            name = f"{prefix}{i:02d}.json"
+            if name not in hashes:
+                break
+            names.append(name)
+    if not first_names or not repeat_names or set(hashes) != core | set(first_names + repeat_names):
+        raise ReconcileError("collection page roster invalid")
+    if not all(_is_sha256(digest) for digest in hashes.values()):
+        raise ReconcileError("invalid collection artifact digest")
+    blobs: dict[str, bytes] = {}
+    total = 0
+    for name, digest in hashes.items():
+        # Only the exact allowlisted basenames above can reach a filesystem read.
+        path = folder / name
+        if path.is_symlink():
+            raise ReconcileError("collection artifact symlink refused")
+        with path.open("rb") as handle:
+            raw = handle.read(_ALPACA_MAX_RESPONSE + 1)
+        total += len(raw)
+        if (
+            len(raw) > _ALPACA_MAX_RESPONSE or total > _ALPACA_MAX_TOTAL_BYTES
+            or hashlib.sha256(raw).hexdigest() != digest
+        ):
+            raise ReconcileError("collection artifact identity or size mismatch")
+        blobs[name] = raw
+
+    def activities(names: list[str]) -> list[Any]:
+        items: list[Any] = []
+        for i, name in enumerate(names):
+            page = _collection_json(blobs[name])
+            if (
+                not isinstance(page, list)
+                or (i < len(names) - 1 and len(page) != _ALPACA_ACTIVITY_PAGE)
+                or (i == len(names) - 1 and len(page) >= _ALPACA_ACTIVITY_PAGE)
+            ):
+                raise ReconcileError("collection activity page incomplete")
+            items.extend(page)
+        return items
+
+    try:
+        day = date.fromisoformat(manifest["session_date"])
+        cutoff = manifest["as_of_ts"]
+        if isinstance(cutoff, bool) or not isinstance(cutoff, (int, float)):
+            raise ValueError
+        now = datetime.fromtimestamp(cutoff, UTC)
+    except (ValueError, TypeError, KeyError, OSError, OverflowError):
+        raise ReconcileError("invalid collection clock") from None
+    if et_date(now) != day:
+        raise ReconcileError("collection session date mismatch")
+    normalized = _normalize_collection(
+        orders=_collection_json(blobs["orders.json"]),
+        positions=_collection_json(blobs["positions.json"]),
+        fills=activities(first_names),
+        repeat_orders=_collection_json(blobs["orders-recheck.json"]),
+        repeat_positions=_collection_json(blobs["positions-recheck.json"]),
+        repeat_fills=activities(repeat_names),
+        session_date=day, now=now, input_sha256=manifest["input_sha256"],
+        account_sha256=manifest["account_sha256"],
+    )
+    if normalized != _collection_json(blobs["normalized.json"]):
+        raise ReconcileError("collection normalized evidence does not reproduce")
+    for key, count in (
+        ("captured_orders", len(normalized["orders"])),
+        ("captured_positions", len(normalized["positions"])),
+        ("captured_fill_activities", len(normalized["fill_activities"])),
+    ):
+        if type(manifest.get(key)) is not int or manifest[key] != count:
+            raise ReconcileError("collection count mismatch")
+    if (folder / "collection.json").read_bytes() != manifest_raw:
+        raise ReconcileError("collection manifest changed during verification")
+    return blobs["normalized.json"]

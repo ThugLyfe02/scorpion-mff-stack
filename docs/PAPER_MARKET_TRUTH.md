@@ -126,3 +126,16 @@ not real execution, settlement, fees, adjusted-contract multiplier, or independe
 The normalized export carries detailed fill IDs and clocks for review. The existing order
 comparator remains compatible with legacy unsigned exports; it does not itself certify
 the added activity fields. All transport tests use synthetic responses.
+
+
+For the stronger local reproducibility path, use the whole v2 collection directory:
+
+    python -m scorpion_mff.paper_capture reconcile       --run /private/capture --venue-collection /private/venue-export
+
+Every manifest-listed raw artifact is byte-verified against a bounded basename allowlist,
+both activity-page rosters are checked, and the same normalization function rebuilds all
+orders, fills and positions. The comparator consumes those exact verified normalized bytes.
+An edited normalized file is refused even if its unkeyed hash is recomputed but its original
+source evidence disagrees. The legacy --venue-export command remains usable, but only the
+collection route reports fill_activity_reproduced_from_collection=true. The local manifest
+is not a signature, remote authentication certificate, or proof of actual paper execution.

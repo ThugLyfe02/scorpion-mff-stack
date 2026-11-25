@@ -40,6 +40,7 @@ from .reconcile import (
     paper_orders_from_payload,
     reconcile,
     snapshot_from_payload,
+    verify_alpaca_paper_collection,
 )
 from .types import RawMessage
 
@@ -268,7 +269,9 @@ def run_capture(
     return summary
 
 
-def compare_capture_venue(run: Path, export_path: Path) -> dict[str, Any]:
+def compare_capture_venue(
+    run: Path, export_path: Path | None = None, *, collection: Path | None = None,
+) -> dict[str, Any]:
     """Offline comparison of independent paper observations with a completed local capture.
 
     The export's provenance is declared, not authenticated. This cannot submit orders
@@ -291,7 +294,16 @@ def compare_capture_venue(run: Path, export_path: Path) -> dict[str, Any]:
         or book.anomalies or book.unresolved_orders()
     ):
         raise ReconcileError("modeled ledger does not reproduce")
-    raw = export_path.read_bytes()
+    if (export_path is None) == (collection is None):
+        raise ReconcileError("provide one venue evidence input")
+    if collection is not None:
+        raw = verify_alpaca_paper_collection(collection)
+    else:
+        assert export_path is not None
+        with export_path.open("rb") as handle:
+            raw = handle.read(16 * 1024 * 1024 + 1)
+        if len(raw) > 16 * 1024 * 1024:
+            raise ReconcileError("venue export size bound")
     export = json.loads(raw)
     if not isinstance(export, dict):
         raise ReconcileError("paper venue export must be an object")
@@ -353,6 +365,7 @@ def compare_capture_venue(run: Path, export_path: Path) -> dict[str, Any]:
         "venue_export_sha256": hashlib.sha256(raw).hexdigest(),
         "as_of_ts": cutoff, "orders": comparison, "positions": positions.to_dict(),
         "exact_parity": comparison["exact_parity"] and positions.clean,
+        "fill_activity_reproduced_from_collection": collection is not None,
         "certifies_live_fills": False,
     }
 
@@ -383,10 +396,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args_list and args_list[0] == "reconcile":
         compare = argparse.ArgumentParser(description="Compare a completed paper run")
         compare.add_argument("--run", required=True, type=Path)
-        compare.add_argument("--venue-export", required=True, type=Path)
+        evidence = compare.add_mutually_exclusive_group(required=True)
+        evidence.add_argument("--venue-export", type=Path)
+        evidence.add_argument("--venue-collection", type=Path)
         parsed = compare.parse_args(args_list[1:])
         try:
-            report = compare_capture_venue(parsed.run, parsed.venue_export)
+            report = compare_capture_venue(
+                parsed.run, parsed.venue_export, collection=parsed.venue_collection,
+            )
         except (OSError, ValueError) as exc:
             print(json.dumps({"error": type(exc).__name__, "verified": False}))
             return 2
