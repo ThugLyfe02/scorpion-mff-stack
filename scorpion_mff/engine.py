@@ -372,11 +372,19 @@ class Engine:
         if key and key in self.positions:
             return self.positions[key]
 
-        named_something = bool(signal.ticker or signal.side)
+        # Never downgrade a stated strike or expiry to ticker/side matching.
+        # A different contract in the same underlying is not the requested exit.
+        named_something = bool(
+            signal.ticker or signal.side or signal.strike is not None or signal.expiry
+        )
         if named_something:
             matches = [p for p in self.open_positions
                        if (not signal.ticker or p.ticker == signal.ticker)
-                       and (signal.side is None or p.side is signal.side)]
+                       and (signal.side is None or p.side is signal.side)
+                       and (signal.strike is None
+                            or p.contract_key.split("|")[2] == f"{signal.strike:g}")
+                       and (not signal.expiry or signal.expiry == "?"
+                            or p.contract_key.split("|")[3] == signal.expiry)]
             if len(matches) == 1:
                 return matches[0]
             # Zero matches (a contract we do not hold) or several (ambiguous): never
@@ -639,7 +647,7 @@ class Engine:
     def _on_add(self, signal: Signal, quote: Quote | None, ts: float,
                 latency_ms: int | None) -> list[OrderIntent]:
         position = self._resolve(signal)
-        key = signal.contract_key or (position.contract_key if position else "")
+        key = position.contract_key if position is not None else signal.contract_key
         if position is None:
             return self._skip(signal, ts, "add_without_position", latency_ms, key)
         if position.contract_key in self.exit_in_flight:
@@ -708,7 +716,7 @@ class Engine:
     def _on_trim(self, signal: Signal, quote: Quote | None, ts: float,
                  latency_ms: int | None) -> list[OrderIntent]:
         position = self._resolve(signal)
-        key = signal.contract_key or (position.contract_key if position else "")
+        key = position.contract_key if position is not None else signal.contract_key
         if position is None:
             if self._ambiguous_exit(signal):
                 return self._alert(signal, ts, "ambiguous_exit:named_no_contract", latency_ms)
@@ -743,7 +751,7 @@ class Engine:
     def _on_close(self, signal: Signal, quote: Quote | None, ts: float,
                   latency_ms: int | None) -> list[OrderIntent]:
         position = self._resolve(signal)
-        key = signal.contract_key or (position.contract_key if position else "")
+        key = position.contract_key if position is not None else signal.contract_key
         if position is None:
             if self._ambiguous_exit(signal):
                 return self._alert(signal, ts, "ambiguous_exit:named_no_contract", latency_ms)

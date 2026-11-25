@@ -788,68 +788,148 @@ class QuoteError(RuntimeError):
     """The quote feed could not price a contract. The engine fails closed."""
 
 
+class _NoQuoteRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str,
+                         headers: Any, newurl: str) -> None:
+        return None
+
+
 @dataclass
 class HttpQuoteProvider:
-    """Bid/ask for a contract key from a URL template YOU supply.
+    """Explicitly mapped quote endpoint with isolated credentials and source freshness.
 
-    Deliberately not hard-coded to a vendor schema: the Robinhood options-quote
-    response shape is not invented here. You set
-
-        MFF_QUOTE_URL_TEMPLATE=https://.../quotes?symbol={key}
-        MFF_QUOTE_BID_PATH=results.0.bid_price
-        MFF_QUOTE_ASK_PATH=results.0.ask_price
-
-    and this reads those dotted paths out of the JSON. Unconfigured, `quote()`
-    raises QuoteError and the engine rejects the entry with `no_quote` - an
-    unpriceable signal must never become a guessed limit price.
+    The supplied template and separately configured HTTPS origin must agree.
+    The vendor must echo the requested contract identity and an exchange timestamp.
+    No local receipt clock is substituted for missing source evidence.
     """
 
     template: str = field(default_factory=lambda: os.environ.get("MFF_QUOTE_URL_TEMPLATE", ""))
     bid_path: str = field(default_factory=lambda: os.environ.get("MFF_QUOTE_BID_PATH", "bid"))
     ask_path: str = field(default_factory=lambda: os.environ.get("MFF_QUOTE_ASK_PATH", "ask"))
-    token: str = field(default_factory=lambda: os.environ.get("MFF_RH_TOKEN", ""))
+    token: str = field(default_factory=lambda: os.environ.get("MFF_QUOTE_TOKEN", ""), repr=False)
     timeout_s: float = 3.0
-    cache_s: float = 5.0
+    cache_s: float = 3.0
     transport: Callable[[urllib.request.Request, float], tuple[int, dict[str, Any]]] | None = None
-    _cache: dict[str, tuple[float, Quote]] = field(default_factory=dict)
+    allowed_origin: str = field(default_factory=lambda: os.environ.get("MFF_QUOTE_ORIGIN", ""))
+    timestamp_path: str = field(default_factory=lambda: os.environ.get("MFF_QUOTE_TS_PATH", "ts"))
+    key_path: str = field(
+        default_factory=lambda: os.environ.get("MFF_QUOTE_KEY_PATH", "contract_key")
+    )
+    max_age_s: float = 3.0
+    _cache: dict[str, tuple[float, Quote]] = field(default_factory=dict, repr=False)
+    _watermark: dict[str, Quote] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        if (
+            not all(math.isfinite(t) for t in (self.timeout_s, self.cache_s, self.max_age_s))
+            or not 0 < self.timeout_s <= 10 or self.cache_s < 0
+            or not 0 < self.max_age_s <= 3
+        ):
+            raise QuoteError("invalid quote timing configuration")
+
+    def _url(self, contract_key: str) -> str:
+        if self.template.count("{key}") != 1:
+            raise QuoteError("quote template requires exactly one key placeholder")
+        url = self.template.replace("{key}", urllib.parse.quote(contract_key, safe=""))
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            pinned = urllib.parse.urlsplit(self.allowed_origin)
+            if parsed.username or parsed.password or parsed.fragment:
+                raise ValueError
+            # Injected transport is only a local test seam; network path is HTTPS-only.
+            if self.transport is None or self.allowed_origin:
+                if (
+                    parsed.scheme != "https" or pinned.scheme != "https"
+                    or not parsed.hostname or parsed.hostname != pinned.hostname
+                    or (parsed.port or 443) != (pinned.port or 443)
+                    or pinned.username or pinned.password or pinned.query or pinned.fragment
+                    or pinned.path not in ("", "/")
+                ):
+                    raise ValueError
+            elif parsed.scheme not in ("http", "https") or not parsed.hostname:
+                raise ValueError
+        except ValueError:
+            raise QuoteError("quote origin mismatch") from None
+        return url
 
     @property
     def configured(self) -> bool:
-        return bool(self.template)
+        try:
+            self._url("probe")
+        except QuoteError:
+            return False
+        return True
 
     def quote(self, contract_key: str) -> Quote | None:
-        now = time.time()
-        cached = self._cache.get(contract_key)
-        if cached and now - cached[0] <= self.cache_s:
-            return cached[1]
         if not self.template:
-            raise QuoteError("no quote feed configured (set MFF_QUOTE_URL_TEMPLATE)")
-        url = self.template.replace("{key}", urllib.parse.quote(contract_key))
+            raise QuoteError("no quote feed configured")
+        url = self._url(contract_key)
+        now, monotonic = time.time(), time.monotonic()
+        cached = self._cache.get(contract_key)
+        if (
+            cached and 0 <= monotonic - cached[0] <= self.cache_s
+            and 0 <= now - cached[1].ts <= self.max_age_s
+        ):
+            return cached[1]
+        self._cache.pop(contract_key, None)
         req = urllib.request.Request(url, headers={
             "Accept": "application/json",
             **({"Authorization": f"Bearer {self.token}"} if self.token else {}),
-        })
+        }, method="GET")
         status, body = self._send(req)
         if not (200 <= status < 300):
             raise QuoteError(f"quote feed HTTP {status}")
-        bid = _dig(body, self.bid_path)
-        ask = _dig(body, self.ask_path)
-        if bid is None or ask is None:
-            raise QuoteError(f"quote fields missing ({self.bid_path}/{self.ask_path})")
-        quote = Quote(bid=float(bid), ask=float(ask))
-        self._cache[contract_key] = (now, quote)
+        if _dig(body, self.key_path) != contract_key:
+            raise QuoteError("quote contract identity mismatch")
+        bid, ask, source = (_dig(body, path) for path in (
+            self.bid_path, self.ask_path, self.timestamp_path,
+        ))
+        try:
+            if any(isinstance(x, bool) or x is None for x in (bid, ask, source)):
+                raise ValueError
+            b, a = float(bid), float(ask)
+            if isinstance(source, str) and ("T" in source or " " in source):
+                stamp = datetime.fromisoformat(source.replace("Z", "+00:00"))
+                if stamp.tzinfo is None or stamp.utcoffset() is None:
+                    raise ValueError
+                event = stamp.timestamp()
+            else:
+                event = float(source)
+            if not all(math.isfinite(x) for x in (b, a, event)) or not 0 < b <= a:
+                raise ValueError
+        except (ValueError, TypeError, OverflowError):
+            raise QuoteError("invalid quote price or source clock") from None
+        if not 0 <= time.time() - event <= self.max_age_s:
+            raise QuoteError("stale or future source quote")
+        quote = Quote(bid=b, ask=a, ts=event)
+        prior = self._watermark.get(contract_key)
+        if prior and (event < prior.ts or (event == prior.ts and quote != prior)):
+            raise QuoteError("reordered or conflicting source quote")
+        if prior is not None and event == prior.ts:
+            # A repeated quote cannot renew its cache admission time.
+            return prior
+        self._watermark[contract_key] = quote
+        self._cache[contract_key] = (time.monotonic(), quote)
         return quote
 
     def _send(self, request: urllib.request.Request) -> tuple[int, dict[str, Any]]:
         if self.transport is not None:
             return self.transport(request, self.timeout_s)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_s) as resp:
-                raw = resp.read().decode("utf-8", "replace")
-                return resp.status, (json.loads(raw) if raw else {})
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}), _NoQuoteRedirect(),
+            )
+            with opener.open(request, timeout=self.timeout_s) as resp:
+                raw = resp.read(1024 * 1024 + 1)
+                if len(raw) > 1024 * 1024:
+                    raise QuoteError("quote response exceeds bound")
+                body = json.loads(raw)
+                if not isinstance(body, dict):
+                    raise QuoteError("invalid quote response")
+                return resp.status, body
         except urllib.error.HTTPError as exc:
             return exc.code, {}
-        except (urllib.error.URLError, TimeoutError, OSError):
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
             return 0, {}
 
 
