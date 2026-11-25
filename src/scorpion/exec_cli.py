@@ -255,7 +255,9 @@ async def _run_session(args: argparse.Namespace) -> int:
         LOGGER.error("market capture requires PAPER mode")
         return 2
     try:
-        journal = Journal(state_dir() / "journal" / f"{today.isoformat()}.jsonl")
+        journal = Journal(
+            state_dir() / "journal" / f"{today.isoformat()}.jsonl", require_lossless=True,
+        )
     except (OSError, JournalError) as exc:
         latch.trip(f"journal_start:{type(exc).__name__}")
         LOGGER.error("paper journal unavailable; no session started")

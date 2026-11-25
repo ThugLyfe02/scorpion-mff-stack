@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from decimal import Decimal
@@ -17,6 +18,7 @@ from scorpion.session_service import (
     JournalError,
     journal_checkpoint_path,
     journal_receipt_path,
+    read_verified_paper_records,
     verify_paper_journal,
 )
 
@@ -180,3 +182,45 @@ def test_sealed_copy_keeps_clean_close_distinct_from_recovery(tmp_path: Path) ->
     assert report["status"] == "SEALED_COPY"
     assert report["unverified_tail_bytes"] == 0
     assert not report["resume_authorized"]
+
+
+@pytest.mark.parametrize("bad", [
+    b'{"seq":1,"seq":1,"kind":"x"}\n',
+    b'{"seq":1,"kind":"x","nested":{"a":1,"a":2}}\n',
+    b'{"seq":1,"kind":"x","value":NaN}\n',
+    b'{"seq":1,"kind":"x","value":1e999}\n',
+])
+def test_ambiguous_record_refused_even_with_matching_unkeyed_receipt(tmp_path, bad):
+    path = tmp_path / "ambiguous.jsonl"
+    path.write_bytes(bad)
+    journal_receipt_path(path).write_text(json.dumps({
+        "schema": "scorpion.paper-intent-journal-receipt.v1", "authority": "PAPER_INTENT_ONLY",
+        "records": 1, "bytes": len(bad), "sha256": hashlib.sha256(bad).hexdigest(),
+    }))
+    with pytest.raises(JournalError):
+        read_verified_paper_records(path)
+
+
+def test_lossless_capacity_fault_preserves_prefix_without_clean_receipt(tmp_path):
+    path = tmp_path / "bounded.jsonl"
+    journal = Journal(path, max_bytes=100, require_lossless=True)
+    journal.submit({"kind": "first"})
+    with pytest.raises(JournalError, match="total_byte_bound"):
+        journal.submit({"kind": "oversize", "value": "x" * 100})
+    with pytest.raises(JournalError, match="total_byte_bound"):
+        journal.submit({"kind": "retry"})
+    with pytest.raises(JournalError, match="total_byte_bound"):
+        journal.close()
+    assert not journal_receipt_path(path).exists()
+    recovered = recover_paper_session_journal(path, tmp_path / "recovered")
+    assert recovered["status"] == "VERIFIED_PREFIX_QUARANTINED"
+    assert recovered["verified_prefix"]["records"] == 1
+
+
+def test_pending_byte_budget_bounds_memory_even_before_record_count(tmp_path):
+    journal = Journal(tmp_path / "bounded.jsonl", max_pending_bytes=80)
+    with pytest.raises(JournalError, match="pending_byte_bound"):
+        journal.submit({"kind": "oversized", "value": "x" * 100})
+    journal.submit({"kind": "ok"})
+    journal.close()
+    assert verify_paper_journal(journal.path)["records"] == 1

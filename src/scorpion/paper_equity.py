@@ -24,10 +24,15 @@ from .config import FORWARD_RULES_SHA256, MARKET_TZ, STALE_POLICY, load_forward_
 from .execution_model import EntrySchedule, strict_paper_schedule
 from .provenance import stable_hash
 from .session_calendar import session_hours
-from .session_service import journal_identity_bytes, read_verified_paper_records
+from .session_service import (
+    MAX_PAPER_JOURNAL_BYTES,
+    decode_paper_record,
+    journal_identity_bytes,
+    read_verified_paper_records,
+)
 
 MODEL = "equity-displayed-depth-v1"
-_MAX_BYTES = 64 * 1024 * 1024
+_MAX_BYTES = MAX_PAPER_JOURNAL_BYTES
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,7 +182,7 @@ def _read_prefix(folder: Path) -> tuple[dict[str, object], tuple[dict[str, objec
         or manifest.get("unverified_tail_bytes") != len(tail)
     ):
         raise ValueError("recovered evidence identity mismatch")
-    return identity, tuple(json.loads(line) for line in prefix.splitlines())
+    return identity, tuple(decode_paper_record(line) for line in prefix.splitlines())
 
 
 def replay_equity_market_journal(

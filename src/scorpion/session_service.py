@@ -68,6 +68,10 @@ _OK_CHANNEL_ID = CHANNELS["options-king"]
 # --------------------------------------------------------------------------- journal (off-path)
 
 
+MAX_PAPER_JOURNAL_BYTES = 64 * 1024 * 1024
+MAX_PAPER_RECORD_BYTES = 256 * 1024
+
+
 class JournalError(RuntimeError):
     """The paper evidence stream cannot be trusted to persist."""
 
@@ -80,7 +84,41 @@ def journal_checkpoint_path(path: Path) -> Path:
     return path.with_name(path.name + ".checkpoint.json")
 
 
-def _journal_identity(lines: Iterable[bytes]) -> dict[str, object]:
+def decode_paper_record(line: bytes) -> dict[str, object]:
+    """Reject ambiguous JSON even if a caller recomputes an unkeyed receipt."""
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in items:
+            if key in result:
+                raise JournalError("journal_duplicate_json_key")
+            result[key] = value
+        return result
+
+    def constant(_: str) -> object:
+        raise JournalError("journal_nonfinite_json")
+
+    def finite_float(value: str) -> float:
+        result = float(value)
+        if not math.isfinite(result):
+            raise JournalError("journal_nonfinite_json")
+        return result
+
+    if len(line) > MAX_PAPER_RECORD_BYTES:
+        raise JournalError("journal_record_bound")
+    try:
+        row = json.loads(
+            line, object_pairs_hook=pairs, parse_constant=constant, parse_float=finite_float,
+        )
+    except (ValueError, RecursionError) as exc:
+        raise JournalError("journal_invalid_json") from exc
+    if not isinstance(row, dict):
+        raise JournalError("journal_expected_object")
+    return row
+
+
+def _journal_identity(
+    lines: Iterable[bytes], *, records: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     digest = hashlib.sha256()
     count = 0
     size = 0
@@ -88,7 +126,7 @@ def _journal_identity(lines: Iterable[bytes]) -> dict[str, object]:
         for line in lines:
             if not line.endswith(b"\n"):
                 raise JournalError("journal_incomplete_record")
-            row = json.loads(line)
+            row = decode_paper_record(line)
             count += 1
             if (
                 not isinstance(row, dict) or type(row.get("seq")) is not int
@@ -96,7 +134,11 @@ def _journal_identity(lines: Iterable[bytes]) -> dict[str, object]:
             ):
                 raise JournalError("journal_sequence_mismatch")
             size += len(line)
+            if size > MAX_PAPER_JOURNAL_BYTES:
+                raise JournalError("journal_read_bound_exceeded")
             digest.update(line)
+            if records is not None:
+                records.append(row)
     except (OSError, ValueError) as exc:
         raise JournalError(f"journal_read:{type(exc).__name__}") from exc
     return {
@@ -116,15 +158,23 @@ def journal_identity(path: Path) -> dict[str, object]:
     """Verify the framing and sequence while computing an exact-byte identity."""
     try:
         with path.open("rb") as handle:
-            return _journal_identity(handle)
+            return _journal_identity(iter(lambda: handle.readline(MAX_PAPER_RECORD_BYTES + 1), b""))
     except OSError as exc:
         raise JournalError(f"journal_read:{type(exc).__name__}") from exc
+
+
+def _read_receipt(path: Path) -> dict[str, object]:
+    with journal_receipt_path(path).open("rb") as handle:
+        raw = handle.read(65537)
+        if len(raw) > 65536:
+            raise JournalError("journal_receipt_bound")
+        return decode_paper_record(raw)
 
 
 def verify_paper_journal(path: Path) -> dict[str, object]:
     """A receipt proves clean journal close and byte identity, not market fills."""
     try:
-        receipt = json.loads(journal_receipt_path(path).read_text(encoding="utf-8"))
+        receipt = _read_receipt(path)
     except (OSError, ValueError) as exc:
         raise JournalError("journal_receipt_missing_or_invalid") from exc
     actual = journal_identity(path)
@@ -134,24 +184,24 @@ def verify_paper_journal(path: Path) -> dict[str, object]:
 
 
 def read_verified_paper_records(
-    path: Path, *, max_bytes: int = 64 * 1024 * 1024,
+    path: Path, *, max_bytes: int = MAX_PAPER_JOURNAL_BYTES,
 ) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
     """Read exactly the verified bytes once; consumers cannot race a second journal read."""
-    if max_bytes <= 0:
-        raise ValueError("journal read limit must be positive")
+    if not 0 < max_bytes <= MAX_PAPER_JOURNAL_BYTES:
+        raise ValueError("journal read limit outside supported bound")
     try:
-        receipt = json.loads(journal_receipt_path(path).read_text(encoding="utf-8"))
+        receipt = _read_receipt(path)
         with path.open("rb") as handle:
             raw = handle.read(max_bytes + 1)
     except (OSError, ValueError) as exc:
         raise JournalError("journal_receipt_missing_or_invalid") from exc
     if len(raw) > max_bytes:
         raise JournalError("journal_read_bound_exceeded")
-    identity = journal_identity_bytes(raw)
+    records: list[dict[str, object]] = []
+    identity = _journal_identity(io.BytesIO(raw), records=records)
     if receipt != identity:
         raise JournalError("journal_receipt_mismatch")
-    records = tuple(json.loads(line) for line in io.BytesIO(raw))
-    return identity, records
+    return identity, tuple(records)
 
 
 def _fsync_directory(path: Path) -> None:
@@ -197,9 +247,20 @@ class Journal:
         on_durable: Callable[[int, int], None] | None = None,
         batch: int = 64,
         max_pending: int = 8192,
+        max_bytes: int = MAX_PAPER_JOURNAL_BYTES,
+        max_pending_bytes: int = 8 * 1024 * 1024,
+        require_lossless: bool = False,
     ) -> None:
-        if batch <= 0 or max_pending <= 0:
-            raise ValueError("journal batch and queue bound must be positive")
+        if batch <= 0 or max_pending <= 0 or not 0 < max_bytes <= MAX_PAPER_JOURNAL_BYTES:
+            raise ValueError("invalid journal batch or capacity")
+        if not 0 < max_pending_bytes <= MAX_PAPER_JOURNAL_BYTES:
+            raise ValueError("invalid pending byte capacity")
+        self._max_bytes = max_bytes
+        self._max_pending_bytes = max_pending_bytes
+        self._require_lossless = require_lossless
+        self._admitted_bytes = 0
+        self._durable_bytes = 0
+        self._admission_failure: str | None = None
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._queue: queue.Queue[tuple[int, bytes] | None] = queue.Queue(maxsize=max_pending)
@@ -220,6 +281,13 @@ class Journal:
     def check(self) -> None:
         if self._failure is not None:
             raise JournalError(self._failure)
+        if self._admission_failure is not None:
+            raise JournalError(self._admission_failure)
+
+    def _refuse_admission(self, reason: str) -> None:
+        if self._require_lossless:
+            self._admission_failure = reason
+        raise JournalError(reason)
 
     def submit(self, record: dict[str, object]) -> int:
         with self._lock:
@@ -234,13 +302,21 @@ class Journal:
                     json.dumps({**record, "seq": next_seq}, sort_keys=True, default=str,
                                allow_nan=False) + "\n"
                 ).encode("utf-8")
-            except (TypeError, ValueError) as exc:
-                raise JournalError("journal_invalid_record") from exc
+            except (TypeError, ValueError, RecursionError):
+                self._refuse_admission("journal_invalid_record")
+                raise AssertionError("unreachable")
+            if len(encoded) > MAX_PAPER_RECORD_BYTES:
+                self._refuse_admission("journal_record_bound")
+            if self._admitted_bytes + len(encoded) > self._max_bytes:
+                self._refuse_admission("journal_total_byte_bound")
+            if self._admitted_bytes - self._durable_bytes + len(encoded) > self._max_pending_bytes:
+                self._refuse_admission("journal_pending_byte_bound")
             try:
                 self._queue.put_nowait((next_seq, encoded))
-            except queue.Full as exc:
-                raise JournalError("journal_backpressure") from exc
+            except queue.Full:
+                self._refuse_admission("journal_backpressure")
             self._seq = next_seq
+            self._admitted_bytes += len(encoded)
             return next_seq
 
     def _run(self) -> None:
@@ -287,6 +363,8 @@ class Journal:
                         "sha256": digest.hexdigest(),
                     }
                     _write_checkpoint(self.path, checkpoint)
+                    with self._lock:
+                        self._durable_bytes = size
                     if self._on_durable is not None:
                         durable_ns = time.perf_counter_ns()
                         for seq in written:
@@ -303,10 +381,12 @@ class Journal:
         if timeout_s <= 0:
             raise ValueError("journal close timeout must be positive")
         with self._lock:
-            self.check()
+            if self._failure is not None:
+                raise JournalError(self._failure)
             if self._closed:
                 if self._thread.is_alive():
                     raise JournalError("journal_close_incomplete")
+                self.check()
                 verify_paper_journal(self.path)
                 return
             self._closed = True
@@ -316,11 +396,13 @@ class Journal:
         except queue.Full as exc:
             raise JournalError("journal_close_backpressure") from exc
         self._thread.join(max(0.0, deadline - time.monotonic()))
-        self.check()
         if self._thread.is_alive():
             raise JournalError("journal_close_timeout")
+        # A loss-intolerant admission fault drains the durable prefix but never seals it.
+        self.check()
         if (
             self._completed is None or self._completed["records"] != self._seq
+            or self._completed["bytes"] != self._admitted_bytes
             or journal_identity(self.path) != self._completed
         ):
             raise JournalError("journal_close_identity_mismatch")
