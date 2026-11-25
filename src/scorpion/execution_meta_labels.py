@@ -458,6 +458,21 @@ def _verify_signatures(
         raise PaperOutcomeError("paper_export_signature_invalid") from exc
 
 
+def _parse_paper_fills(value: object) -> tuple[tuple[str, int, Decimal, datetime], ...]:
+    if not isinstance(value, list):
+        raise PaperOutcomeError("invalid_fill_list")
+    fills: list[tuple[str, int, Decimal, datetime]] = []
+    for fill in value:
+        if not isinstance(fill, dict):
+            raise PaperOutcomeError("invalid_paper_fill")
+        _fields(fill, {"fill_id", "quantity", "price", "filled_ts_utc"})
+        fills.append((
+            _text(fill["fill_id"]), _count(fill["quantity"]),
+            _price(fill["price"]), _stamp(fill["filled_ts_utc"]),
+        ))
+    return tuple(fills)
+
+
 def _parse_order(value: object) -> _PaperOrder:
     if not isinstance(value, dict):
         raise PaperOutcomeError("invalid_paper_order")
@@ -471,24 +486,14 @@ def _parse_order(value: object) -> _PaperOrder:
         or value["currency"] != "USD" or value["quantity_unit"] != "SHARES"
     ):
         raise PaperOutcomeError("paper_order_asset_scope_mismatch")
-    if not isinstance(value["fills"], list):
-        raise PaperOutcomeError("invalid_fill_list")
-    fills: list[tuple[str, int, Decimal, datetime]] = []
-    for fill in value["fills"]:
-        if not isinstance(fill, dict):
-            raise PaperOutcomeError("invalid_paper_fill")
-        _fields(fill, {"fill_id", "quantity", "price", "filled_ts_utc"})
-        fills.append((
-            _text(fill["fill_id"]), _count(fill["quantity"]),
-            _price(fill["price"]), _stamp(fill["filled_ts_utc"]),
-        ))
+    fills = _parse_paper_fills(value["fills"])
     order = _PaperOrder(
         _hex(value["feature_sha256"], 32).hex(), _text(value["venue_order_id"]),
         _text(value["call_id"]), _text(value["ticker"]), _text(value["role"]),
         _count(value["intent_seq"]), _count(value["requested_quantity"]),
         _price(value["limit"]), _text(value["state"]), _stamp(value["submitted_ts_utc"]),
         None if value["terminal_ts_utc"] is None else _stamp(value["terminal_ts_utc"]),
-        tuple(fills),
+        fills,
     )
     if order.role not in ("INITIAL", "CHASE"):
         raise PaperOutcomeError("invalid_paper_order_role")
@@ -734,4 +739,16 @@ class PaperOutcomeAdmission:
             trust, raw, collector_signature, reviewer_signature,
             collector_domain=b"scorpion.paper-cost-export.v1:collector\x00",
             reviewer_domain=b"scorpion.paper-cost-export.v1:reviewer\x00",
+        )
+
+
+    def verify_round_trip_supplement(
+        self, raw: bytes, collector_signature: str, reviewer_signature: str,
+    ) -> None:
+        """Distinct signature domain: an entry/cost export cannot authorize exit evidence."""
+        trust = _parse_trust(_bounded_bytes(self.trust_path, 65536), self.expected_trust_sha256)
+        _verify_signatures(
+            trust, raw, collector_signature, reviewer_signature,
+            collector_domain=b"scorpion.paper-round-trip.v1:collector\x00",
+            reviewer_domain=b"scorpion.paper-round-trip.v1:reviewer\x00",
         )
