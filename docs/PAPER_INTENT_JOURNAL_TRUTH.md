@@ -599,3 +599,25 @@ no training, promotion, live fill or resume authority.
 A missing local session closure or account reconciliation failure is not a trading loss
 or zero return. This offline comparison is not a new execution transport. A supported
 authenticated equity venue adapter and independent activity collection are still required.
+
+
+### Fixed-tape execution stress frontier
+
+The v2 equity replay retains the frozen strategy and explicit modeled-only authority.
+Order matching now indexes active orders by symbol in admission order, dropping filled
+and deadline-expired orders instead of scanning every historical call on every quote.
+Reports expose actual candidate-order visits and the old algorithm's equivalent global
+call-scan count; these are operation counts, not a measured latency speedup.
+The default scenario uses zero additional delay and 100% displayed depth.
+
+    python -m scorpion paper-market-stress --journal /private/session.jsonl
+
+Read one verified capture and evaluate 12 fixed combinations: additional arrival delay
+0/50/250/1000 ms and displayed-depth participation 100/50/25%. No limit, original parent
+quantity, decision record or order deadline is retuned. The haircut is applied before
+depth admission; unchanged size does not replenish consumed liquidity. Delayed exits can
+remain unresolved. The report preserves all scenario denominators, counts quantity changes,
+and compares net deltas only for equal positive flat quantities on locally unblocked
+model runs. Different quantities remain distinct outcomes, not a selection-adjusted gain.
+Neither a grid winner nor any modeled cost difference is a promotion candidate. Filtered
+single-venue quote continuity, queue priority and actual fill probability remain unproven.

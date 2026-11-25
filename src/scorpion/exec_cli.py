@@ -393,6 +393,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     market_source = market_replay.add_mutually_exclusive_group(required=True)
     market_source.add_argument("--journal", type=Path)
     market_source.add_argument("--recovered", type=Path)
+    market_stress = sub.add_parser("paper-market-stress")
+    market_stress.add_argument("--journal", type=Path, required=True)
     recovery = sub.add_parser("recover-paper-journal")
     recovery.add_argument("--journal", type=Path, required=True)
     recovery.add_argument("--out", type=Path, required=True)
@@ -575,7 +577,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             and cohort_report.chase.status == "BOUNDED_RESEARCH_SUPPORT"
             and cohort_report.regime_robustness == "DESCRIPTIVE_STRESS_OK"
         ) else 1
-    if args.command in ("paper-outcome-labels", "paper-execution-costs", "paper-round-trip-reconcile"):
+    if args.command in (
+        "paper-outcome-labels", "paper-execution-costs", "paper-round-trip-reconcile",
+    ):
         from dataclasses import asdict
 
         from .counterfactual import compare_paper_no_chase
@@ -648,14 +652,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         _print(report)
         return 0
-    if args.command == "paper-market-replay":
+    if args.command in ("paper-market-replay", "paper-market-stress"):
         from dataclasses import asdict
         from decimal import InvalidOperation
 
-        from .paper_equity import replay_equity_market_journal
+        from .paper_equity import equity_execution_stress, replay_equity_market_journal
         from .session_service import JournalError
 
         try:
+            if args.command == "paper-market-stress":
+                stress_report = equity_execution_stress(args.journal)
+                _print(asdict(stress_report))
+                return 1 if any(row.blockers for row in stress_report.scenarios) else 0
             result = replay_equity_market_journal(
                 args.recovered or args.journal, recovered=args.recovered is not None,
             )

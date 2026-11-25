@@ -31,8 +31,23 @@ from .session_service import (
     read_verified_paper_records,
 )
 
-MODEL = "equity-displayed-depth-v1"
+MODEL = "equity-displayed-depth-v2"
 _MAX_BYTES = MAX_PAPER_JOURNAL_BYTES
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayAssumptions:
+    additional_order_delay_ms: int = 0
+    displayed_depth_bps: int = 10_000
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.additional_order_delay_ms) is not int
+            or not 0 <= self.additional_order_delay_ms <= 5000
+            or type(self.displayed_depth_bps) is not int
+            or not 0 < self.displayed_depth_bps <= 10_000
+        ):
+            raise ValueError("invalid modeled execution assumptions")
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +101,10 @@ class EquityPaperReport:
     certifies_venue_fills: bool = False
     resume_authorized: bool = False
     authorizes_live_orders: bool = False
+    assumptions: ReplayAssumptions = ReplayAssumptions()
+    candidate_order_checks: int = 0
+    prior_global_call_scan_count: int = 0
+    continuity_certified: bool = False
 
 
 @dataclass(slots=True)
@@ -187,15 +206,17 @@ def _read_prefix(folder: Path) -> tuple[dict[str, object], tuple[dict[str, objec
 
 def replay_equity_market_journal(
     path: Path, *, recovered: bool = False,
+    assumptions: ReplayAssumptions = ReplayAssumptions(),
 ) -> EquityPaperReport:
     """Replay sealed capture or quarantined durable prefix, never resume broker effects."""
     receipt, rows = _read_prefix(path) if recovered else read_verified_paper_records(path)
     with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
-        return _replay(receipt, rows, recovered=recovered)
+        return _replay(receipt, rows, recovered=recovered, assumptions=assumptions)
 
 
 def _replay(
     receipt: dict[str, object], rows: tuple[dict[str, object], ...], *, recovered: bool,
+    assumptions: ReplayAssumptions = ReplayAssumptions(),
 ) -> EquityPaperReport:
     rules = load_forward_rules()
     if rules.sha256 != FORWARD_RULES_SHA256:
@@ -218,6 +239,10 @@ def _replay(
         raise ValueError("invalid captured intent evidence")
     by_seq = {row.intent_seq: row for row in features.rows}
     calls: dict[str, _Call] = {}
+    active: dict[str, list[tuple[str, _Call, _Order]]] = {}
+    exit_seen: set[str] = set()
+    candidate_checks = prior_call_scans = 0
+    delay_ns = assumptions.additional_order_delay_ms * 1_000_000
     books: dict[str, _Liquidity] = {}
     watermarks: dict[str, int] = {}
     fills: list[ModeledFill] = []
@@ -287,10 +312,13 @@ def _replay(
             if not chase:
                 if key in calls:
                     raise ValueError("duplicate initial intention")
-                calls[key] = _Call(
+                created = _Call(
                     feature.ticker, schedule, qty,
-                    _Order(seq, "INITIAL", _ns(stamp), _ns(schedule.chase_ts), qty, limit),
+                    _Order(seq, "INITIAL", _ns(stamp) + delay_ns,
+                           _ns(schedule.chase_ts), qty, limit),
                 )
+                calls[key] = created
+                active.setdefault(feature.ticker, []).append((key, created, created.initial))
             else:
                 call = calls.get(key)
                 if call is None or call.chase is not None or call.ticker != feature.ticker:
@@ -302,15 +330,17 @@ def _replay(
                     call.reasons.append("initial_window_unobserved")
                     continue
                 call.chase = _Order(
-                    seq, "CHASE", _ns(stamp),
+                    seq, "CHASE", _ns(stamp) + delay_ns,
                     min(_ns(schedule.chase_ts + timedelta(minutes=1)), _ns(schedule.exit_ts)),
                     min(qty, call.target), limit,
                 )
+                active.setdefault(call.ticker, []).append((key, call, call.chase))
         elif kind == "conditional_exit_intent":
             key = _paper_text(row.get("call_id"))
             call = calls.get(key)
-            if call is None or call.exit is not None:
+            if call is None or key in exit_seen:
                 raise ValueError("conditional exit identity mismatch")
+            exit_seen.add(key)
             if (
                 row.get("status") != "PAPER_INTENT_ONLY"
                 or row.get("conditional_on") != "confirmed_entry_fill"
@@ -320,7 +350,8 @@ def _replay(
                 raise ValueError("conditional exit scope mismatch")
             deadline = min(_ns(call.schedule.exit_ts + timedelta(seconds=60)), close_ns)
             if call.bought and _ns(stamp) < deadline:
-                call.exit = _Order(seq, "EXIT", _ns(stamp), deadline, call.bought, None)
+                call.exit = _Order(seq, "EXIT", _ns(stamp) + delay_ns, deadline, call.bought, None)
+                active.setdefault(call.ticker, []).append((key, call, call.exit))
         elif kind == "market_quote":
             symbol = _paper_text(row.get("symbol"))
             event = _paper_int(row.get("ts_event_ns"))
@@ -349,21 +380,24 @@ def _replay(
                 raise ValueError("market depth identity invalid")
             if halted or not _ns(hours[0]) <= event < close_ns:
                 continue
+            bsz = bsz * assumptions.displayed_depth_bps // 10_000
+            asz = asz * assumptions.displayed_depth_bps // 10_000
             liquidity = _depth(books.get(symbol), event, bid, ask, bsz, asz,
                                publisher, instrument)
             books[symbol] = liquidity
-            # One shared displayed-depth budget per symbol, consumed in journal admission order.
-            candidates: list[tuple[str, _Call, _Order]] = []
-            for key, call in calls.items():
-                if call.ticker != symbol:
+            # The prior implementation scanned every historical call for each quote.
+            # Admission order is already FIFO; expire completed/deadline-passed orders
+            # and visit only this instrument's working set. Shared depth stays global.
+            prior_call_scans += len(calls)
+            working = active.get(symbol, [])
+            candidate_checks += len(working)
+            retained: list[tuple[str, _Call, _Order]] = []
+            for key, call, order in working:
+                if order.filled >= order.quantity or wall >= order.deadline_ns:
                     continue
-                for order in (call.initial, call.chase, call.exit):
-                    if (
-                        order and order.filled < order.quantity and order.seq < seq
-                        and order.submitted_ns < event <= wall < order.deadline_ns
-                    ):
-                        candidates.append((key, call, order))
-            for key, call, order in sorted(candidates, key=lambda item: item[2].seq):
+                retained.append((key, call, order))
+                if not order.seq < seq or not order.submitted_ns < event <= wall:
+                    continue
                 order.observations += 1
                 if order.role == "EXIT":
                     qty = min(order.quantity - order.filled, call.bought - call.sold,
@@ -391,6 +425,7 @@ def _replay(
                         key, symbol, order.role, "SELL" if order.role == "EXIT" else "BUY",
                         qty, price, order.seq, seq, event,
                     ))
+            active[symbol] = [item for item in retained if item[2].filled < item[2].quantity]
 
     end = rows[-1]
     if (
@@ -454,9 +489,92 @@ def _replay(
     material = {
         "model": MODEL, "journal_sha256": identity, "input_kind": kind,
         "fills": fills, "calls": results, "blockers": sorted(blockers), "aggregate": aggregate,
+        "assumptions": assumptions, "candidate_order_checks": candidate_checks,
+        "prior_global_call_scan_count": prior_call_scans,
     }
     return EquityPaperReport(
         identity, kind, MODEL, "XNAS.ITCH", "mbp-1", tuple(fills), tuple(results),
         market_count, tuple(sorted(inventory.items())), aggregate,
-        tuple(sorted(blockers)), stable_hash(material),
+        tuple(sorted(blockers)), stable_hash(material), assumptions=assumptions,
+        candidate_order_checks=candidate_checks, prior_global_call_scan_count=prior_call_scans,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class EquityStressScenario:
+    assumptions: ReplayAssumptions
+    modeled_report_sha256: str
+    calls: int
+    parent_target_shares: int
+    bought_shares: int
+    sold_shares: int
+    unresolved_shares: int
+    modeled_net_round_trip_usd: Decimal | None
+    matched_flat_positive_quantity_calls: int
+    differing_quantity_calls: int
+    matched_net_delta_usd: Decimal | None
+    blockers: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class EquityStressReport:
+    journal_sha256: str
+    baseline_report_sha256: str
+    scenarios: tuple[EquityStressScenario, ...]
+    report_sha256: str
+    authority: str = "RESEARCH_ONLY"
+    estimand: str = "FIXED_TAPE_MODEL_SENSITIVITY_NOT_REAL_EXECUTION_OR_CAUSAL_VALUE"
+    authorizes_training: bool = False
+    authorizes_promotion: bool = False
+
+
+def equity_execution_stress(path: Path) -> EquityStressReport:
+    """A fixed 12-scenario stress grid on one verified tape, no optimized parameter selection.
+
+    Changes are only assumed additional order arrival delay and usable displayed
+    depth. The recorded signal, order limit, parent target and deadlines remain
+    unchanged. Route selection may change due to the conditional chase.
+    """
+    receipt, rows = read_verified_paper_records(path)
+    grid = tuple(ReplayAssumptions(delay, depth)
+                 for depth in (10_000, 5000, 2500) for delay in (0, 50, 250, 1000))
+    with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
+        baseline = _replay(receipt, rows, recovered=False, assumptions=grid[0])
+        baseline_calls = {row.call_id: row for row in baseline.calls}
+        scenarios: list[EquityStressScenario] = []
+        for assumptions in grid:
+            report = baseline if assumptions == grid[0] else _replay(
+                receipt, rows, recovered=False, assumptions=assumptions,
+            )
+            calls = {row.call_id: row for row in report.calls}
+            if calls.keys() != baseline_calls.keys():
+                raise ValueError("stress parent population changed")
+            matched: list[Decimal] = []
+            differing = 0
+            for key, row in calls.items():
+                prior = baseline_calls[key]
+                if (prior.bought, prior.sold) != (row.bought, row.sold):
+                    differing += 1
+                    continue
+                if (
+                    not baseline.blockers and not report.blockers
+                    and row.bought > 0 and row.open_quantity == prior.open_quantity == 0
+                    and row.modeled_net_round_trip_usd is not None
+                    and prior.modeled_net_round_trip_usd is not None
+                ):
+                    matched.append(row.modeled_net_round_trip_usd - prior.modeled_net_round_trip_usd)
+            scenarios.append(EquityStressScenario(
+                assumptions, report.report_sha256, len(calls),
+                sum(row.initial_target for row in calls.values()),
+                sum(row.bought for row in calls.values()), sum(row.sold for row in calls.values()),
+                sum(row.open_quantity for row in calls.values()), report.modeled_net_round_trip_usd,
+                len(matched), differing, sum(matched, Decimal(0)) if matched else None,
+                report.blockers,
+            ))
+        identity = {
+            "schema": "paper-equity-stress-v1", "journal_sha256": baseline.journal_sha256,
+            "baseline_report_sha256": baseline.report_sha256, "scenarios": scenarios,
+        }
+        return EquityStressReport(
+            baseline.journal_sha256, baseline.report_sha256, tuple(scenarios), stable_hash(identity),
+        )

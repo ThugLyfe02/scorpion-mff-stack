@@ -17,7 +17,11 @@ from scorpion.databento_feed import DatabentoLiveClient, FeedMessage
 from scorpion.exec_cli import _probe_live_quote
 from scorpion.execution_meta_labels import PaperOutcomeAdmission, PaperOutcomeError
 from scorpion.execution_model import strict_paper_schedule
-from scorpion.paper_equity import replay_equity_market_journal
+from scorpion.paper_equity import (
+    ReplayAssumptions,
+    equity_execution_stress,
+    replay_equity_market_journal,
+)
 from scorpion.reconciliation import reconcile_paper_round_trips
 from scorpion.recovery import recover_paper_session_journal
 from scorpion.session_service import Journal, journal_receipt_path, read_verified_paper_records
@@ -34,7 +38,8 @@ def ns(t: datetime) -> int:
     return int(t.timestamp()) * 1_000_000_000 + t.microsecond * 1000
 
 
-def fixture(path: Path, *, gap: bool = False, close: bool = True) -> Path:
+def fixture(path: Path, *, gap: bool = False, close: bool = True,
+            unrelated: int = 0) -> Path:
     journal = Journal(path)
     journal.submit({
         "kind": "session_start", "session_date": DAY, "mode": "PAPER",
@@ -72,11 +77,12 @@ def fixture(path: Path, *, gap: bool = False, close: bool = True) -> Path:
 
     count = 0
 
-    def quote(t: datetime, bid: str, ask: str, bid_size: int, ask_size: int) -> None:
+    def quote(t: datetime, bid: str, ask: str, bid_size: int, ask_size: int,
+              symbol: str = "XYZ") -> None:
         nonlocal count
         count += 1
         journal.submit({
-            "kind": "market_quote", "symbol": "XYZ", "ts_utc": t.isoformat(),
+            "kind": "market_quote", "symbol": symbol, "ts_utc": t.isoformat(),
             "ts_event_ns": ns(t), "recv_wall_ns": ns(t), "recv_mono_ns": ns(t) - ns(OPEN),
             "bid": bid, "ask": ask, "bid_size": bid_size, "ask_size": ask_size,
             "publisher_id": 1, "instrument_id": 2, "provider_sequence": count,
@@ -88,6 +94,8 @@ def fixture(path: Path, *, gap: bool = False, close: bool = True) -> Path:
     # Identical newer quote cannot refill the consumed displayed queue.
     quote(t + timedelta(seconds=1), "9.90", "9.99", 10, 4)
     quote(t + timedelta(seconds=2), "9.90", "9.99", 10, 6)
+    for index in range(unrelated):
+        quote(t + timedelta(seconds=3, microseconds=index + 1), "1", "2", 10, 10, "OTHER")
     intent(True)
     quote(SCHEDULE.chase_ts + timedelta(seconds=1), "9.90", "9.99", 10, 20)
     if gap:
@@ -366,3 +374,36 @@ def test_round_trip_refuses_corrupted_account_or_exit(round_trip_fixture, mutati
         payload["opening_positions"] = [{"ticker": "XYZ", "quantity": 1}]
     with pytest.raises(PaperOutcomeError, match=reason):
         build()
+
+
+def test_fixed_stress_grid_preserves_denominator_and_reveals_delay_risk(tmp_path):
+    path = fixture(tmp_path / "journal.jsonl")
+    result = equity_execution_stress(path)
+    assert result == equity_execution_stress(path)
+    assert len(result.scenarios) == 12
+    by_policy = {row.assumptions: row for row in result.scenarios}
+    base = by_policy[ReplayAssumptions()]
+    half = by_policy[ReplayAssumptions(0, 5000)]
+    delayed = by_policy[ReplayAssumptions(1000, 10_000)]
+    assert base.parent_target_shares == half.parent_target_shares == delayed.parent_target_shares
+    assert base.bought_shares == 6 and base.modeled_net_round_trip_usd == Decimal("2.94")
+    assert half.bought_shares == half.sold_shares == 3
+    assert half.modeled_net_round_trip_usd == Decimal("1.47")
+    assert half.differing_quantity_calls == 1 and half.matched_net_delta_usd is None
+    assert delayed.unresolved_shares > 0 and delayed.modeled_net_round_trip_usd is None
+    assert not result.authorizes_training and not result.authorizes_promotion
+
+
+def test_active_symbol_index_avoids_unrelated_call_scan(tmp_path):
+    baseline = replay_equity_market_journal(fixture(tmp_path / "base.jsonl"))
+    stressed = replay_equity_market_journal(fixture(tmp_path / "many.jsonl", unrelated=1000))
+    assert baseline.calls == stressed.calls
+    assert stressed.candidate_order_checks == baseline.candidate_order_checks
+    assert stressed.prior_global_call_scan_count - baseline.prior_global_call_scan_count == 1000
+    assert stressed.market_records - baseline.market_records == 1000
+
+
+@pytest.mark.parametrize("delay,depth", [(-1, 10000), (5001, 10000), (0, 0), (0, 10001)])
+def test_stress_refuses_invalid_assumptions(delay, depth):
+    with pytest.raises(ValueError):
+        ReplayAssumptions(delay, depth)
