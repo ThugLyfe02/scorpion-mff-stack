@@ -261,6 +261,7 @@ class Journal:
         self._require_lossless = require_lossless
         self._admitted_bytes = 0
         self._durable_bytes = 0
+        self._durable_sequence = 0
         self._admission_failure: str | None = None
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -284,6 +285,11 @@ class Journal:
             raise JournalError(self._failure)
         if self._admission_failure is not None:
             raise JournalError(self._admission_failure)
+
+    @property
+    def durable_sequence(self) -> int:
+        with self._lock:
+            return self._durable_sequence
 
     def _refuse_admission(self, reason: str) -> NoReturn:
         if self._require_lossless:
@@ -365,6 +371,7 @@ class Journal:
                     _write_checkpoint(self.path, checkpoint)
                     with self._lock:
                         self._durable_bytes = size
+                        self._durable_sequence = count
                     if self._on_durable is not None:
                         durable_ns = time.perf_counter_ns()
                         for seq in written:
@@ -527,6 +534,7 @@ class PaperExecutionSession:
         strict_runtime: bool = False,
         capture_market: bool = False,
         max_market_records: int = 80_000,
+        on_intent: Callable[[int, dict[str, object]], None] | None = None,
         mono_ns: Callable[[], int] = time.monotonic_ns,
         now_utc: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -546,6 +554,7 @@ class PaperExecutionSession:
         self.strict_runtime = strict_runtime
         self.capture_market = capture_market
         self.max_market_records = max_market_records
+        self._on_intent = on_intent
         self.market_records = 0
         self._capture_until: dict[str, datetime] = {}
         self._mono_ns = mono_ns
@@ -813,7 +822,11 @@ class PaperExecutionSession:
     def _journal(self, record: dict[str, object]) -> None:
         if self.journal is not None:
             record.setdefault("ts_utc", self._now_utc().isoformat())
-            self.journal.submit(record)
+            seq = self.journal.submit(record)
+            if self._on_intent is not None and record.get("kind") in (
+                "intent", "conditional_exit_intent",
+            ):
+                self._on_intent(seq, record)
 
 
 def _decision_record(decision: Decision) -> dict[str, object]:
@@ -858,6 +871,9 @@ async def supervise(
     stop_at_utc: datetime,
     tick_s: float = 1.0,
     ingest_run: Callable[[], object] | None = None,
+    worker_run: Callable[[], object] | None = None,
+    worker_heartbeat: Callable[[], None] | None = None,
+    worker_stop: Callable[[], None] | None = None,
 ) -> None:
     """Run feed, ingress, consumer, health (1 Hz) and pager in one TaskGroup.
 
@@ -898,8 +914,12 @@ async def supervise(
         while True:
             await asyncio.to_thread(session.latch.refresh)
             session.health_tick(monitor, session_open=session_open())
+            if worker_heartbeat is not None:
+                worker_heartbeat()
             sd_notify("WATCHDOG=1")
             if now_utc() >= stop_at_utc:
+                if worker_stop is not None:
+                    worker_stop()
                 raise _SessionComplete
             await asyncio.sleep(tick_s)
 
@@ -913,6 +933,8 @@ async def supervise(
                 tg.create_task(required_component(feed_run, "feed"), name="databento-feed")
             if ingest_run is not None:
                 tg.create_task(required_component(ingest_run, "ingress"), name="discord-ingest")
+            if worker_run is not None:
+                tg.create_task(required_component(worker_run, "paper-worker"), name="paper-worker")
             tg.create_task(consume(), name="call-ingest-decision")
             tg.create_task(health(), name="health-1hz")
             tg.create_task(session.pager.run(), name="pager")

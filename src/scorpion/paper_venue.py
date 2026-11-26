@@ -464,6 +464,7 @@ def dispatch_paper_intent(
     ledger: PaperDeliveryLedger, venue: AlpacaEquityPaperVenue, *,
     journal: Path, seq: int, expected_head: str, latch_path: Path,
     exit_limit: Decimal | None = None, clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    supervisor_guard: Callable[[], bool] = lambda: True,
 ) -> PaperDeliveryReport:
     """Explicit invocation. Persist first, send once, never retry a side effect.
 
@@ -472,6 +473,8 @@ def dispatch_paper_intent(
     """
     if venue.account_id != ledger.policy.account_id or not _latch_ok(latch_path):
         raise PaperDeliveryError("paper safety or account gate closed")
+    if not supervisor_guard():
+        raise PaperDeliveryError("paper supervisor admission closed")
     snapshot = venue.snapshot(ledger.policy.session_date)
     if not venue.market_open(clock()):
         raise PaperDeliveryError("venue market closed")
@@ -483,11 +486,13 @@ def dispatch_paper_intent(
     # Recheck the actual safety state immediately before reserving and sending.
     if not _latch_ok(latch_path):
         raise PaperDeliveryError("paper safety gate closed")
+    if not supervisor_guard():
+        raise PaperDeliveryError("paper supervisor admission closed")
     reserved = ledger.reserve_dispatch(req, snapshot, now=clock(), expected_head=expected_head)
     key = req.client_id(ledger.policy)
     # If the process stops here or the check fails, the reservation is deliberately
     # uncertain. Operator recovery must inspect the venue; no automatic retry.
-    if not _latch_ok(latch_path) or clock() >= req.deadline:
+    if not supervisor_guard() or not _latch_ok(latch_path) or clock() >= req.deadline:
         return reserved
     # Never submit a changed or stale durable intent after crossing the dispatch boundary.
     try:
@@ -501,7 +506,7 @@ def dispatch_paper_intent(
         return reserved
     final_clock = clock()
     if (
-        not _latch_ok(latch_path) or final_clock >= req.deadline
+        not supervisor_guard() or not _latch_ok(latch_path) or final_clock >= req.deadline
         or (req.admit_until is not None and final_clock > req.admit_until)
     ):
         return reserved
@@ -513,7 +518,7 @@ def dispatch_paper_intent(
             observation, now=clock(), expected_head=reserved.chain_sha256, source_sha256=digest,
         )
     except (PaperDeliveryError, OSError, ValueError):
-        return ledger.status()
+        return ledger.status(expected_head=reserved.chain_sha256)
 
 
 def recover_paper_orders(

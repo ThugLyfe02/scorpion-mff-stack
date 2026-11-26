@@ -215,6 +215,7 @@ async def _run_session(args: argparse.Namespace) -> int:
     from .fastpath import QuoteCache
     from .health import FeedHealthMonitor
     from .ingest.discord import DiscordSignalClient
+    from .paper_worker import SupervisedPaperWorker, load_worker_authorization
     from .session_calendar import session_hours
     from .session_service import (
         Journal,
@@ -254,6 +255,18 @@ async def _run_session(args: argparse.Namespace) -> int:
     if getattr(args, "capture_market", False) and mode is not ExecutionMode.PAPER:
         LOGGER.error("market capture requires PAPER mode")
         return 2
+    worker_values = (
+        args.paper_worker_config, args.paper_worker_sha256, args.paper_risk_policy,
+        args.paper_ledger,
+    )
+    worker_enabled = args.authorize_paper_worker
+    if (
+        (worker_enabled and (not all(worker_values) or args.no_discord
+                             or not args.capture_market or mode is not ExecutionMode.PAPER))
+        or (not worker_enabled and any(worker_values))
+    ):
+        LOGGER.error("worker requires explicit authorization, pins, ingress, capture and PAPER")
+        return 2
     try:
         journal = Journal(
             state_dir() / "journal" / f"{today.isoformat()}.jsonl", require_lossless=True,
@@ -262,6 +275,23 @@ async def _run_session(args: argparse.Namespace) -> int:
         latch.trip(f"journal_start:{type(exc).__name__}")
         LOGGER.error("paper journal unavailable; no session started")
         return 2
+    worker = None
+    if worker_enabled:
+        try:
+            authorization = load_worker_authorization(
+                args.paper_worker_config, args.paper_worker_sha256,
+            )
+            worker = SupervisedPaperWorker(
+                authorization=authorization, risk_path=args.paper_risk_policy,
+                ledger_path=args.paper_ledger, source=journal,
+                audit_path=state_dir() / "paper-worker" / f"{today.isoformat()}.jsonl",
+                latch_path=latch_path(),
+            )
+        except Exception as exc:
+            latch.trip(f"worker_start:{type(exc).__name__}")
+            journal.close()
+            LOGGER.error("worker initialization refused")
+            return 2
     capture_market = bool(getattr(args, "capture_market", False))
     session = PaperExecutionSession(
         rules=rules,
@@ -271,6 +301,7 @@ async def _run_session(args: argparse.Namespace) -> int:
         journal=journal,
         allowed_author_ids=authors or None,
         strict_runtime=True, capture_market=capture_market, mode=mode,
+        on_intent=worker.offer if worker is not None else None,
     )
     monitor = FeedHealthMonitor(cache, session.stale, started_mono_ns=time.monotonic_ns())
     feed_client = DatabentoLiveClient()
@@ -335,6 +366,9 @@ async def _run_session(args: argparse.Namespace) -> int:
             stop_at_utc=stop_time_utc(close_et),
             on_new_symbol=feed.add_symbol,
             ingest_run=ingest_run,
+            worker_run=worker.run if worker is not None else None,
+            worker_heartbeat=worker.heartbeat if worker is not None else None,
+            worker_stop=worker.stop_admission if worker is not None else None,
         )
         end_safety = await asyncio.to_thread(latch.latch.verify_integrity, latch.component)
         journal.submit({
@@ -382,6 +416,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     run = sub.add_parser("run-session")
     run.add_argument("--no-discord", action="store_true", help="feed/health only (drills)")
     run.add_argument("--capture-market", action="store_true", help="bounded paper quote capture")
+    run.add_argument("--authorize-paper-worker", action="store_true")
+    run.add_argument("--paper-worker-config", type=Path)
+    run.add_argument("--paper-worker-sha256")
+    run.add_argument("--paper-risk-policy", type=Path)
+    run.add_argument("--paper-ledger", type=Path)
     probe = sub.add_parser("paper-feed-probe")
     probe.add_argument("--symbol", default="SPY")
     probe.add_argument("--timeout", type=float, default=20.0)
