@@ -201,11 +201,10 @@ class SupervisedPaperWorker:
         if set(report.blockers) & {
             "unexpected_external_order", "external_position_mismatch",
             "external_cash_residual_exceeds_buffer", "venue_trading_blocked",
-        }:
-            if not self._admission_fault.is_set():
-                self._admission_fault.set()
-                if self._trip is not None:
-                    self._trip("worker_account_reconciliation_fault")
+        } and not self._admission_fault.is_set():
+            self._admission_fault.set()
+            if self._trip is not None:
+                self._trip("worker_account_reconciliation_fault")
         self._record(
             kind, blockers=report.blockers, orders=len(report.orders),
             states=tuple((o.client_id, o.state) for o in report.orders),
