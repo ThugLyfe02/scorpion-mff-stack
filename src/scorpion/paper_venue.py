@@ -13,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -545,8 +546,6 @@ def cancel_paper_order(
     status = ledger.claim_cancel(client_id, expected_head=reconciled.chain_sha256, now=clock())
     record = next(row for row in status.orders if row.client_id == client_id)
     assert record.observation is not None
-    try:
+    with suppress(PaperDeliveryError, OSError):
         venue.cancel_once(record.observation.venue_id)
-    except (PaperDeliveryError, OSError):
-        pass
     return status

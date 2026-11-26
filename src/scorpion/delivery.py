@@ -884,14 +884,13 @@ class PaperDeliveryLedger:
                 raise PaperDeliveryError("paper call symbol conflict")
             if req.role == "INITIAL" and related:
                 raise PaperDeliveryError("paper initial route already exists")
-            if req.role == "CHASE":
-                if (
-                    len(related) != 1 or related[0].request.role != "INITIAL"
-                    or related[0].observation is None
-                    or related[0].observation.state not in ("CANCELLED", "EXPIRED")
-                    or related[0].filled != 0 or req.quantity > related[0].request.quantity
-                ):
-                    raise PaperDeliveryError("chase requires terminal confirmed zero initial fill")
+            if req.role == "CHASE" and (
+                len(related) != 1 or related[0].request.role != "INITIAL"
+                or related[0].observation is None
+                or related[0].observation.state not in ("CANCELLED", "EXPIRED")
+                or related[0].filled != 0 or req.quantity > related[0].request.quantity
+            ):
+                raise PaperDeliveryError("chase requires terminal confirmed zero initial fill")
             if req.role == "EXIT":
                 if (
                     not related or any(o.request.role == "EXIT" or o.observation is None
