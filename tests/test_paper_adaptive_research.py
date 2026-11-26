@@ -10,6 +10,7 @@ from scorpion.paper_adaptive_research import (
     robust_session_envelope,
     split_session_envelope,
 )
+from scorpion.paper_research_information import beta_experiment_value, experiment_value_envelope
 
 
 def test_split_rank_refuses_underpowered_calibration():
@@ -90,3 +91,18 @@ def test_coverage_and_budget_are_explicit_and_deterministic():
     assert result.used_units <= 8
     assert result == allocate_diagnostic_research(**kwargs)[1]
     assert len({d.event_id for d in result.decisions}) == len(result.decisions)
+
+
+def test_exact_beta_experiment_value_and_missing_completion_sensitivity():
+    assert beta_experiment_value(1, 1, 1, 0.5) == pytest.approx(1/12)
+    assert beta_experiment_value(1, 1, 5, 0.5) >= beta_experiment_value(1, 1, 1, 0.5)
+    value = experiment_value_envelope(
+        endpoint="execution", sessions=4, confirmed_adverse=1, ambiguous=2,
+        observations=5, threshold=0.4,
+    )
+    assert value.prior_completion_scenarios == 12
+    assert 0 <= value.minimum_expected_value <= value.maximum_expected_value <= 0.24
+    for a, b in ((1, 1), (2, 2), (1, 3), (3, 1)):
+        for missing_bad in range(3):
+            point = beta_experiment_value(a+1+missing_bad, b+3-missing_bad, 5, 0.4)
+            assert value.minimum_expected_value <= point <= value.maximum_expected_value

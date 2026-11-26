@@ -523,3 +523,28 @@ def test_supervisor_record_binding_refuses_changed_candidate(tmp_path, ledger, a
         )
     assert remote["posts"] == 0
     assert not obj.status(expected_head=head).orders
+
+
+def test_campaign_probe_is_read_only_and_measures_combined_budget(
+    tmp_path, ledger, adapter, monkeypatch,
+):
+    from scorpion.paper_campaign_probe import probe_campaign
+
+    worker, remote, _, _, _ = _worker_fixture(tmp_path, ledger, adapter, monkeypatch)
+    worker._audit.close()
+    obj, head = ledger
+    _, venue = adapter
+    monkeypatch.setattr("scorpion.paper_campaign_probe.AlpacaEquityPaperVenue", lambda *a, **k: venue)
+    monkeypatch.setattr("scorpion.paper_campaign_probe._latch_ok", lambda _: True)
+    manifest = tmp_path / "worker.json"
+    counter = iter((0, 600_000_000, 700_000_000, 1_700_000_000))
+    result = probe_campaign(
+        worker_config=manifest, worker_pin=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        risk_path=tmp_path / "risk.json", ledger_path=obj.path,
+        latch_path=tmp_path / "synthetic", samples=1,
+        clock=lambda: NOW, monotonic_ns=lambda: next(counter),
+    )
+    assert result.max_combined_ms == 1600
+    assert result.blockers == ("read_latency_exceeds_probe_budget",)
+    assert remote["posts"] == remote["deletes"] == 0
+    assert obj.status(expected_head=head).events == 1

@@ -187,3 +187,17 @@ liquidity. Do not equate the first successful paper order with profitable
 alpha. No automatic resumption, quote-based exit authority or streaming
 broker event ingestion has been introduced. Those require independent
 design, fault certification and operator authorization.
+
+### Decision-theoretic research information value
+
+The adaptive report additionally evaluates exact finite-outcome beta-binomial
+expected value of information for one and five hypothetical future adjudicated
+sessions for each deterioration endpoint. Research retain/retire utility is
+max(0, tolerance minus posterior adverse-event probability). Enumerate all
+predictive outcomes, every possible missing adverse-indicator count, and four
+fixed beta priors. Report both minimum and maximum expected decision value;
+only the minimum normalized value can supplement the deficit-based utilities.
+This sensitivity model assumes conditionally IID Bernoulli observations and
+a fixed utility function; correlated sessions may violate those assumptions.
+It is not an empirical measure of learning gain, monetary EV or a guarantee
+that spending compute creates independent observations. No dispatch occurs.

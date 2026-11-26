@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,6 +35,8 @@ class CampaignProbe:
 def probe_campaign(
     *, worker_config: Path, worker_pin: str, risk_path: Path,
     ledger_path: Path, latch_path: Path, samples: int = 3,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    monotonic_ns: Callable[[], int] = time.monotonic_ns,
 ) -> CampaignProbe:
     if type(samples) is not int or not 1 <= samples <= 5:
         raise ValueError("probe sample bound")
@@ -46,23 +49,23 @@ def probe_campaign(
         raise ValueError("probe requires initialized opening ledger")
     if set(dict(authorization.exit_limits)) != set(dict(policy.symbols_and_groups)):
         raise ValueError("probe exit roster mismatch")
-    now = datetime.now(UTC)
+    now = clock()
     hours = session_hours(policy.session_date)
     if hours is None or not hours[0] <= now < hours[1]:
         raise ValueError("probe requires the pinned regular session")
     if not _latch_ok(latch_path):
         raise ValueError("probe safety latch not armed")
-    venue = AlpacaEquityPaperVenue(policy.account_id)
+    venue = AlpacaEquityPaperVenue(policy.account_id, clock=clock)
     snapshots: list[float] = []
     clocks: list[float] = []
     blockers: set[str] = set()
     for _ in range(samples):
-        started = time.monotonic_ns()
+        started = monotonic_ns()
         snapshot = venue.snapshot(policy.session_date)
-        snapshots.append((time.monotonic_ns() - started) / 1e6)
-        started = time.monotonic_ns()
-        opened = venue.market_open(datetime.now(UTC))
-        clocks.append((time.monotonic_ns() - started) / 1e6)
+        snapshots.append((monotonic_ns() - started) / 1e6)
+        started = monotonic_ns()
+        opened = venue.market_open(clock())
+        clocks.append((monotonic_ns() - started) / 1e6)
         if snapshot.orders or snapshot.positions or snapshot.trading_blocked:
             blockers.add("account_not_exclusive_flat")
         if not opened:

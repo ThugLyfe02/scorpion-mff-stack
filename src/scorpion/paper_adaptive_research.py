@@ -19,6 +19,7 @@ from .information_value import (
     LearningValueAssessment,
     allocate_learning_budget,
 )
+from .paper_research_information import ExperimentInformationValue, experiment_value_envelope
 from .paper_session_statistics import _number, load_verified_paper_cohort
 from .provenance import stable_hash
 from .sequential_evidence import BernoulliEPolicy, BernoulliEProcess
@@ -267,6 +268,7 @@ def assess_envelope(intervals: tuple[Interval, ...], predicted: Interval) -> Cov
 def allocate_diagnostic_research(
     *, uncertainty: UncertaintyEnvelope, robust: RobustEnvelope, decay: DecayEvidence,
     economic: DecayEvidence, coverage: CoverageDiagnostic, clip: float, budget: int,
+    information: tuple[ExperimentInformationValue, ...] = (),
 ) -> tuple[tuple[LearningValueAssessment, ...], LearningBudgetAllocation]:
     """Transparent deficit-based information utility, not inferred economic alpha.
 
@@ -295,12 +297,18 @@ def allocate_diagnostic_research(
         ("execution_cost_degradation", urgency(decay), False),
         ("economic_outcome_degradation", urgency(economic), True),
     )
+    by_experiment = {(v.endpoint, v.prospective_observations): v for v in information}
+
+    def value(name: str, n: int) -> float:
+        item = by_experiment.get((name, n))
+        return item.conservative_normalized_value if item is not None else 0.0
+
     rows = tuple(LearningValueAssessment(
         name, score, 1.0, 1.0,
-        0.45*score if not review else 0.0,
-        0.9*score if not review else 0.25*score,
+        min(1.0, 0.45*score + 0.55*value(name, 1)) if not review else 0.0,
+        min(1.0, (0.25 if review else 0.9)*score + 0.1*value(name, 5)),
         score if review else 0.35*score,
-        False, ("deficit_proxy_not_measured_information_gain",),
+        False, ("deficit_proxy_plus_assumption_conditional_value_not_measured_gain",),
     ) for name, score, review in deficits)
     return rows, allocate_learning_budget(rows, budget_units=budget)
 
@@ -319,6 +327,7 @@ class AdaptiveReport:
     execution_decay: DecayEvidence
     economic_decay: DecayEvidence
     economic_evidence: tuple[tuple[date, Interval, str], ...]
+    research_information: tuple[ExperimentInformationValue, ...]
     research_priorities: tuple[LearningValueAssessment, ...]
     allocation: LearningBudgetAllocation
     report_sha256: str
@@ -400,13 +409,18 @@ def evaluate_adaptive_research(
         floor=plan.economic_floor, null=plan.adverse_null,
         alternative=plan.adverse_alternative, alpha=plan.family_alpha/2,
     )
+    information = tuple(experiment_value_envelope(
+        endpoint=name, sessions=monitor.sessions, confirmed_adverse=monitor.confirmed_adverse,
+        ambiguous=monitor.ambiguous, observations=n, threshold=plan.adverse_null,
+    ) for name, monitor in (("execution_cost_degradation", decay),
+                            ("economic_outcome_degradation", economic)) for n in (1, 5))
     priorities, allocation = allocate_diagnostic_research(
         uncertainty=uncertainty, robust=robust, decay=decay, economic=economic,
-        coverage=coverage, clip=clip, budget=plan.budget_units,
+        coverage=coverage, clip=clip, budget=plan.budget_units, information=information,
     )
     fields = (
         plan.digest, baseline.report.report_sha256, target.report.report_sha256, as_of,
         tuple(s.session_date for s in target.report.sessions), uncertainty, robust, decision,
-        coverage, decay, economic, economic_rows, priorities, allocation,
+        coverage, decay, economic, economic_rows, information, priorities, allocation,
     )
     return AdaptiveReport(*fields, stable_hash(("paper-adaptive-research-v1", fields)))
