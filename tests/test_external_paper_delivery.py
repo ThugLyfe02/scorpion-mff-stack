@@ -1,6 +1,7 @@
 """P0 paper lifecycle fault tests. No authenticated or live network calls."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -11,6 +12,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
 from pathlib import Path
 from threading import Barrier
+from types import SimpleNamespace
 
 import pytest
 
@@ -392,3 +394,117 @@ def test_reservations_not_rounded_by_caller_decimal_context(ledger):
     with localcontext() as ctx:
         ctx.prec = 5
         assert obj.status().session_buy_commitment_usd == Decimal("59.62962963")
+
+
+def test_supervised_guard_closes_after_commit_without_post(tmp_path, ledger, adapter):
+    obj, head = ledger
+    remote, venue = adapter
+    path = tmp_path / "capture.jsonl"
+    seq = live_prefix(path)
+    checks = iter((True, True, False))
+    report = dispatch_paper_intent(
+        obj, venue, journal=path, seq=seq, expected_head=head,
+        latch_path=tmp_path / "synthetic", clock=lambda: NOW,
+        supervisor_guard=lambda: next(checks),
+    )
+    assert remote["posts"] == 0
+    assert report.orders[0].state == "DISPATCH_UNCERTAIN"
+    assert report.session_buy_commitment_usd == 60
+
+
+def _worker_fixture(tmp_path, ledger, adapter, monkeypatch):
+    from scorpion.paper_worker import SupervisedPaperWorker, load_worker_authorization
+
+    obj, head = ledger
+    remote, venue = adapter
+    policy_path = tmp_path / "risk.json"
+    policy_path.write_text(json.dumps({
+        "schema": "scorpion.paper-risk.v1", "authority": "PAPER_ONLY",
+        "account_id": ACCOUNT, "session_date": str(DAY),
+        "maximum_order_usd": "100", "maximum_session_buy_usd": "150",
+        "maximum_symbol_buy_usd": "100", "maximum_group_buy_usd": "100",
+        "fee_cash_buffer_usd": "5", "maximum_working_orders": 4,
+        "symbols_and_groups": dict(POLICY.symbols_and_groups),
+    }))
+    manifest = tmp_path / "worker.json"
+    manifest.write_text(json.dumps({
+        "schema": "scorpion.supervised-paper-worker.v1", "authority": "PAPER_ONLY",
+        "risk_sha256": hashlib.sha256(policy_path.read_bytes()).hexdigest(),
+        "opening_ledger_head": head,
+        "exit_limits": {sym: "9.00" for sym, _ in POLICY.symbols_and_groups},
+    }))
+    auth = load_worker_authorization(manifest, hashlib.sha256(manifest.read_bytes()).hexdigest())
+    path = tmp_path / "capture.jsonl"
+    seq = live_prefix(path)
+    row = json.loads(path.read_text().splitlines()[-1])
+    source = SimpleNamespace(path=path, durable_sequence=seq, check=lambda: None)
+    monkeypatch.setattr("scorpion.paper_worker.AlpacaEquityPaperVenue", lambda *a, **k: venue)
+    worker = SupervisedPaperWorker(
+        authorization=auth, risk_path=policy_path, ledger_path=obj.path,
+        source=source, audit_path=tmp_path / "audit.jsonl", latch_path=tmp_path / "synthetic",
+        clock=lambda: remote["now"],
+    )
+    worker._audit = Journal(tmp_path / "audit.jsonl", require_lossless=True)
+    worker.heartbeat()
+    worker._maintain()
+    return worker, remote, source, seq, row
+
+
+def test_worker_lost_ack_recovers_without_duplicate(tmp_path, ledger, adapter, monkeypatch):
+    worker, remote, _, seq, row = _worker_fixture(tmp_path, ledger, adapter, monkeypatch)
+    try:
+        worker.offer(seq, row)
+        worker._process(worker._queue.get_nowait())
+        assert remote["posts"] == 1
+        worker._maintain()
+        assert not worker._blockers
+        worker.offer(seq, row)
+        worker._process(worker._queue.get_nowait())
+        assert remote["posts"] == 1
+        worker.stop_admission()
+        report = worker._ledger.status(expected_head=worker._head)
+        assert report.orders[0].state == "WORKING"
+    finally:
+        worker._audit.close()
+    audit = [json.loads(line) for line in (tmp_path / "audit.jsonl").read_text().splitlines()]
+    assert [r["disposition"] for r in audit if r["kind"] == "worker_disposition"] == [
+        "DURABLE_DISPATCH", "NOT_DISPATCHED",
+    ]
+
+
+def test_worker_durability_deadline_and_supervision(tmp_path, ledger, adapter, monkeypatch):
+    worker, remote, source, seq, row = _worker_fixture(tmp_path, ledger, adapter, monkeypatch)
+    try:
+        source.durable_sequence = seq - 1
+        worker.offer(seq, row)
+        remote["now"] = NOW + timedelta(seconds=4)
+        worker._process(worker._queue.get_nowait())
+        assert remote["posts"] == 0
+        source.durable_sequence = seq
+        remote["now"] = NOW
+        worker._last_health = -1.0
+        worker.offer(seq, row)
+        worker._process(worker._queue.get_nowait())
+        assert remote["posts"] == 0
+    finally:
+        worker._audit.close()
+
+
+def test_worker_authorization_pin_refuses_modified_bytes(tmp_path):
+    from scorpion.paper_worker import load_worker_authorization
+
+    path = tmp_path / "manifest.json"
+    path.write_text("{}")
+    with pytest.raises(PaperDeliveryError, match="pin mismatch"):
+        load_worker_authorization(path, "a" * 64)
+
+
+def test_journal_durable_sequence_follows_checkpoint(tmp_path):
+    from scorpion.session_service import journal_checkpoint_path
+
+    path = tmp_path / "journal.jsonl"
+    journal = Journal(path, require_lossless=True)
+    seq = journal.submit({"kind": "test"})
+    journal.close()
+    assert journal.durable_sequence == seq
+    assert json.loads(journal_checkpoint_path(path).read_text())["records"] == seq

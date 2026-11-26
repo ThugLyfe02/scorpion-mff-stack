@@ -11,11 +11,13 @@ import queue
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from pathlib import Path
 
+from .config import MARKET_TZ
 from .delivery import PaperDeliveryError, PaperDeliveryLedger, PaperDeliveryReport, paper_money
 from .paper_venue import (
     AlpacaEquityPaperVenue,
@@ -26,6 +28,7 @@ from .paper_venue import (
     request_from_live_journal,
     sweep_overdue_paper_orders,
 )
+from .provenance import stable_hash
 from .session_service import Journal, JournalError, decode_paper_record
 
 # Fixed conservative operational settings; not optimizer-controlled.
@@ -84,8 +87,9 @@ def load_worker_authorization(path: Path, pin: str) -> WorkerAuthorization:
             raise PaperDeliveryError("worker exit symbol")
         price = paper_money(value, positive=True)
         tick = Decimal("0.01") if price >= 1 else Decimal("0.0001")
-        if price % tick:
-            raise PaperDeliveryError("worker exit tick")
+        with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
+            if price % tick:
+                raise PaperDeliveryError("worker exit tick")
         prices.append((symbol, price))
     return WorkerAuthorization(pin, risk_pin, head, tuple(prices))
 
@@ -97,6 +101,7 @@ class Candidate:
     role: str
     symbol: str | None
     created: datetime
+    source_sha256: str
 
 
 class SupervisedPaperWorker:
@@ -109,15 +114,21 @@ class SupervisedPaperWorker:
     def __init__(
         self, *, authorization: WorkerAuthorization, risk_path: Path, ledger_path: Path,
         source: Journal, audit_path: Path, latch_path: Path,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        trip: Callable[[str], object] | None = None,
     ) -> None:
         policy = load_paper_risk_policy(risk_path, authorization.risk_pin)
+        self._clock = clock
+        self._trip = trip
+        if clock().astimezone(MARKET_TZ).date() != policy.session_date:
+            raise PaperDeliveryError("worker policy is not for the current session")
         self._ledger = PaperDeliveryLedger(ledger_path, policy)
         initial = self._ledger.status(expected_head=authorization.opening_head)
         if initial.events != 1 or initial.orders:
             raise PaperDeliveryError("worker requires opening ledger; resume not authorized")
         if set(dict(authorization.exit_limits)) != set(dict(policy.symbols_and_groups)):
             raise PaperDeliveryError("operator exit limits must cover exact paper roster")
-        self._venue = AlpacaEquityPaperVenue(policy.account_id)
+        self._venue = AlpacaEquityPaperVenue(policy.account_id, clock=clock)
         self._source = source
         self._audit_path = audit_path
         self._latch_path = latch_path
@@ -125,6 +136,7 @@ class SupervisedPaperWorker:
         self._head = initial.chain_sha256
         self._queue: queue.Queue[Candidate] = queue.Queue(maxsize=_QUEUE_SIZE)
         self._stop = threading.Event()
+        self._admission_fault = threading.Event()
         self._last_health = 0.0
         self._next_reconcile = 0.0
         self._blockers: tuple[str, ...] = ("initial_reconciliation_required",)
@@ -141,7 +153,7 @@ class SupervisedPaperWorker:
         if self._audit is not None:
             self._audit.check()
         return (
-            not self._stop.is_set()
+            not self._stop.is_set() and not self._admission_fault.is_set()
             and 0 <= time.monotonic() - self._last_health <= _HEARTBEAT_MAX_SECONDS
         )
 
@@ -161,7 +173,12 @@ class SupervisedPaperWorker:
         role = "EXIT" if kind == "conditional_exit_intent" else (
             "CHASE" if record.get("chase") is True else "INITIAL"
         )
-        candidate = Candidate(seq, call, role, symbol if isinstance(symbol, str) else None, created)
+        if self._stop.is_set():
+            raise JournalError("worker stopped before candidate admission")
+        candidate = Candidate(
+            seq, call, role, symbol if isinstance(symbol, str) else None, created,
+            stable_hash({**record, "seq": seq}),
+        )
         try:
             self._queue.put_nowait(candidate)
         except queue.Full as exc:
@@ -172,13 +189,21 @@ class SupervisedPaperWorker:
         if self._audit is None:
             raise JournalError("worker audit missing")
         self._audit.submit({
-            "kind": kind, "ts_utc": datetime.now(UTC).isoformat(), "authority": "RESEARCH_ONLY",
+            "kind": kind, "ts_utc": self._clock().isoformat(), "authority": "RESEARCH_ONLY",
             "ledger_head": self._head, **fields,
         })
 
     def _result(self, report: PaperDeliveryReport, *, kind: str) -> None:
         self._head = report.chain_sha256
         self._blockers = report.blockers
+        if set(report.blockers) & {
+            "unexpected_external_order", "external_position_mismatch",
+            "external_cash_residual_exceeds_buffer", "venue_trading_blocked",
+        }:
+            if not self._admission_fault.is_set():
+                self._admission_fault.set()
+                if self._trip is not None:
+                    self._trip("worker_account_reconciliation_fault")
         self._record(
             kind, blockers=report.blockers, orders=len(report.orders),
             states=tuple((o.client_id, o.state) for o in report.orders),
@@ -188,28 +213,30 @@ class SupervisedPaperWorker:
         )
 
     def _maintain(self) -> None:
-        now = datetime.now(UTC)
+        now = self._clock()
         current = self._ledger.status(expected_head=self._head)
         working = tuple(o for o in current.orders if not (o.observation and o.observation.terminal))
         overdue = any(now >= o.request.deadline for o in working)
         if overdue:
             result = sweep_overdue_paper_orders(
-                self._ledger, self._venue, expected_head=self._head,
+                self._ledger, self._venue, expected_head=self._head, clock=self._clock,
             )
         elif any(o.state in ("DISPATCH_UNCERTAIN", "CANCEL_UNCERTAIN", "UNKNOWN")
                  for o in working):
-            result = recover_paper_orders(self._ledger, self._venue, expected_head=self._head)
+            result = recover_paper_orders(
+            self._ledger, self._venue, expected_head=self._head, clock=self._clock,
+        )
         else:
             snapshot = self._venue.snapshot(self._ledger.policy.session_date)
             result = self._ledger.reconcile(
-                snapshot, now=datetime.now(UTC), expected_head=self._head,
+                snapshot, now=self._clock(), expected_head=self._head,
             )
         self._result(result, kind="worker_reconciliation")
         working_now = any(not (o.observation and o.observation.terminal) for o in result.orders)
         # Revisit a deadline as soon as possible, but never spin on an ambiguous cancel.
         interval = _WORKING_RECONCILE_SECONDS if working_now else _IDLE_RECONCILE_SECONDS
         deadlines = [
-            (o.request.deadline - datetime.now(UTC)).total_seconds()
+            (o.request.deadline - self._clock()).total_seconds()
             for o in result.orders if o.observation and not o.observation.terminal
             and not o.cancel_requested
         ]
@@ -220,18 +247,18 @@ class SupervisedPaperWorker:
 
     def _disposition(self, c: Candidate, state: str, reason: str) -> None:
         self._record("worker_disposition", intent_seq=c.seq, call_id=c.call, role=c.role,
-                     disposition=state, reason=reason)
+                     disposition=state, reason=reason, source_record_sha256=c.source_sha256)
 
     def _process(self, c: Candidate) -> None:
         # The asynchronous journal submission is not a durable admission.
         ttl = timedelta(seconds=10 if c.role == "EXIT" else 3)
         while self._source.durable_sequence < c.seq:
-            if self._stop.is_set() or datetime.now(UTC) - c.created > ttl:
+            if self._stop.is_set() or self._clock() - c.created > ttl:
                 self._disposition(c, "NOT_DISPATCHED", "durable_ack_deadline")
                 return
             self._source.check()
             self._stop.wait(0.01)
-        if not self._gate() or not timedelta(0) <= datetime.now(UTC) - c.created <= ttl:
+        if not self._gate() or not timedelta(0) <= self._clock() - c.created <= ttl:
             self._disposition(c, "NOT_DISPATCHED", "supervision_or_candidate_deadline")
             return
 
@@ -274,14 +301,14 @@ class SupervisedPaperWorker:
         try:
             request = request_from_live_journal(
                 self._source.path, c.seq, policy=self._ledger.policy,
-                now=datetime.now(UTC), ledger_report=current, exit_limit=exit_limit,
+                now=self._clock(), ledger_report=current, exit_limit=exit_limit,
             )
             if (request.call_id, request.role, request.symbol) != (c.call, c.role, symbol):
                 raise PaperDeliveryError("candidate differs from durable journal")
             result = dispatch_paper_intent(
                 self._ledger, self._venue, journal=self._source.path, seq=c.seq,
                 expected_head=self._head, latch_path=self._latch_path, exit_limit=exit_limit,
-                supervisor_guard=self._gate,
+                supervisor_guard=self._gate, clock=self._clock,
             )
         except PaperDeliveryError as exc:
             if str(exc) not in _REFUSALS:
@@ -304,15 +331,20 @@ class SupervisedPaperWorker:
     def _shutdown(self) -> None:
         # No new orders, including no speculative market liquidation. Only exact
         # observed working identities may receive one durably claimed cancellation.
-        result = recover_paper_orders(self._ledger, self._venue, expected_head=self._head)
+        result = recover_paper_orders(
+            self._ledger, self._venue, expected_head=self._head, clock=self._clock,
+        )
         self._result(result, kind="worker_shutdown_reconcile")
         for order in result.orders:
             if order.observation and not order.observation.terminal and not order.cancel_requested:
                 result = cancel_paper_order(
-                    self._ledger, self._venue, client_id=order.client_id, expected_head=self._head,
+                    self._ledger, self._venue, client_id=order.client_id,
+                    expected_head=self._head, clock=self._clock,
                 )
                 self._result(result, kind="worker_shutdown_cancel")
-        result = recover_paper_orders(self._ledger, self._venue, expected_head=self._head)
+        result = recover_paper_orders(
+            self._ledger, self._venue, expected_head=self._head, clock=self._clock,
+        )
         self._result(result, kind="worker_shutdown_final")
         if result.blockers or result.expected_positions or any(
             not (o.observation and o.observation.terminal) for o in result.orders
@@ -336,6 +368,9 @@ class SupervisedPaperWorker:
                     continue
                 self._process(candidate)
         except Exception as exc:
+            self.stop_admission()
+            if self._trip is not None:
+                self._trip(f"worker_fault:{type(exc).__name__}")
             self._record("worker_fault", reason=type(exc).__name__)
             raise
         finally:

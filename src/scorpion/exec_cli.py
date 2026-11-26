@@ -261,7 +261,7 @@ async def _run_session(args: argparse.Namespace) -> int:
     )
     worker_enabled = args.authorize_paper_worker
     if (
-        (worker_enabled and (not all(worker_values) or args.no_discord
+        (worker_enabled and (not all(worker_values) or not latch.armed or args.no_discord
                              or not args.capture_market or mode is not ExecutionMode.PAPER))
         or (not worker_enabled and any(worker_values))
     ):
@@ -285,7 +285,7 @@ async def _run_session(args: argparse.Namespace) -> int:
                 authorization=authorization, risk_path=args.paper_risk_policy,
                 ledger_path=args.paper_ledger, source=journal,
                 audit_path=state_dir() / "paper-worker" / f"{today.isoformat()}.jsonl",
-                latch_path=latch_path(),
+                latch_path=latch_path(), trip=latch.trip,
             )
         except Exception as exc:
             latch.trip(f"worker_start:{type(exc).__name__}")
