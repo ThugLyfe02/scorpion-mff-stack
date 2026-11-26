@@ -6,6 +6,7 @@ outcome ledger. The existing session runtime remains intent-only.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import time
@@ -42,7 +43,7 @@ from .session_service import (
     JournalError,
     decode_paper_record,
     journal_checkpoint_path,
-    journal_identity_bytes,
+    _journal_identity,
     journal_receipt_path,
 )
 
@@ -347,16 +348,18 @@ def _durable_prefix(path: Path) -> tuple[dict[str, object], tuple[dict[str, obje
         raise PaperDeliveryError("invalid durable prefix size")
     with path.open("rb") as handle:
         prefix = handle.read(length)
-    if len(prefix) != length or journal_identity_bytes(prefix) != checkpoint:
+    records: list[dict[str, object]] = []
+    if len(prefix) != length or _journal_identity(io.BytesIO(prefix), records=records) != checkpoint:
         raise PaperDeliveryError("durable prefix identity mismatch")
     if journal_receipt_path(path).exists():
         raise PaperDeliveryError("journal closed during dispatch preparation")
-    return checkpoint, tuple(decode_paper_record(line) for line in prefix.splitlines())
+    return checkpoint, tuple(records)
 
 
 def request_from_live_journal(
     path: Path, seq: int, *, policy: PaperRiskPolicy, now: datetime,
     ledger_report: PaperDeliveryReport, exit_limit: Decimal | None = None,
+    expected_record_sha256: str | None = None,
 ) -> PaperOrderRequest:
     """Bind the dispatch to a frozen, durable current-session intention.
 
@@ -367,6 +370,8 @@ def request_from_live_journal(
     if not 1 <= seq <= len(rows):
         raise PaperDeliveryError("requested intent is not durable")
     start, row = rows[0], rows[seq - 1]
+    if expected_record_sha256 is not None and stable_hash(row) != expected_record_sha256:
+        raise PaperDeliveryError("candidate differs from durable journal")
     rules = load_forward_rules()
     hours = session_hours(policy.session_date)
     if (
@@ -465,6 +470,7 @@ def dispatch_paper_intent(
     journal: Path, seq: int, expected_head: str, latch_path: Path,
     exit_limit: Decimal | None = None, clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     supervisor_guard: Callable[[], bool] = lambda: True,
+    expected_record_sha256: str | None = None,
 ) -> PaperDeliveryReport:
     """Explicit invocation. Persist first, send once, never retry a side effect.
 
@@ -482,6 +488,7 @@ def dispatch_paper_intent(
     req = request_from_live_journal(
         journal, seq, policy=ledger.policy, now=clock(),
         ledger_report=status, exit_limit=exit_limit,
+        expected_record_sha256=expected_record_sha256,
     )
     # Recheck the actual safety state immediately before reserving and sending.
     if not _latch_ok(latch_path):
@@ -499,6 +506,7 @@ def dispatch_paper_intent(
         latest = request_from_live_journal(
             journal, seq, policy=ledger.policy, now=clock(),
             ledger_report=status, exit_limit=exit_limit,
+            expected_record_sha256=expected_record_sha256,
         )
         if latest.intent_sha256 != req.intent_sha256:
             return reserved

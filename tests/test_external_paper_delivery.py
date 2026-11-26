@@ -508,3 +508,18 @@ def test_journal_durable_sequence_follows_checkpoint(tmp_path):
     journal.close()
     assert journal.durable_sequence == seq
     assert json.loads(journal_checkpoint_path(path).read_text())["records"] == seq
+
+
+def test_supervisor_record_binding_refuses_changed_candidate(tmp_path, ledger, adapter):
+    obj, head = ledger
+    remote, venue = adapter
+    path = tmp_path / "capture.jsonl"
+    seq = live_prefix(path)
+    with pytest.raises(PaperDeliveryError, match="candidate differs"):
+        dispatch_paper_intent(
+            obj, venue, journal=path, seq=seq, expected_head=head,
+            latch_path=tmp_path / "synthetic", clock=lambda: NOW,
+            expected_record_sha256="f" * 64,
+        )
+    assert remote["posts"] == 0
+    assert not obj.status(expected_head=head).orders

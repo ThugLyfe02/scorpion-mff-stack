@@ -434,6 +434,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     market_source.add_argument("--recovered", type=Path)
     market_stress = sub.add_parser("paper-market-stress")
     market_stress.add_argument("--journal", type=Path, required=True)
+    campaign = sub.add_parser("paper-campaign-check")
+    campaign.add_argument("--worker-config", type=Path, required=True)
+    campaign.add_argument("--worker-sha256", required=True)
+    campaign.add_argument("--risk-policy", type=Path, required=True)
+    campaign.add_argument("--ledger", type=Path, required=True)
+    campaign.add_argument("--samples", type=int, default=3)
+    campaign.add_argument("--authorize-paper-api", action="store_true", required=True)
     capture_bench = sub.add_parser("paper-capture-benchmark")
     capture_bench.add_argument("--samples", type=int, default=2048)
     capture_bench.add_argument("--batch", type=int, default=64)
@@ -735,6 +742,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         _print(report)
         return 0
+    if args.command == "paper-campaign-check":
+        from dataclasses import asdict
+
+        from .paper_campaign_probe import probe_campaign
+        from .session_calendar import CalendarNotCovered
+        from .session_service import JournalError
+
+        try:
+            probe = probe_campaign(
+                worker_config=args.worker_config, worker_pin=args.worker_sha256,
+                risk_path=args.risk_policy, ledger_path=args.ledger,
+                latch_path=latch_path(), samples=args.samples,
+            )
+            _print(asdict(probe))
+            return 1 if probe.blockers else 0
+        except (OSError, ValueError, JournalError, CalendarNotCovered) as exc:
+            _print({"ok": False, "reason": type(exc).__name__, "authorizes_orders": False})
+            return 1
     if args.command == "paper-capture-benchmark":
         from dataclasses import asdict
 

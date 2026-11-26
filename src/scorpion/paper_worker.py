@@ -25,7 +25,6 @@ from .paper_venue import (
     dispatch_paper_intent,
     load_paper_risk_policy,
     recover_paper_orders,
-    request_from_live_journal,
     sweep_overdue_paper_orders,
 )
 from .provenance import stable_hash
@@ -102,6 +101,7 @@ class Candidate:
     symbol: str | None
     created: datetime
     source_sha256: str
+    enqueued_mono_ns: int
 
 
 class SupervisedPaperWorker:
@@ -179,7 +179,7 @@ class SupervisedPaperWorker:
             raise JournalError("worker stopped before candidate admission")
         candidate = Candidate(
             seq, call, role, symbol if isinstance(symbol, str) else None, created,
-            stable_hash({**record, "seq": seq}),
+            stable_hash({**record, "seq": seq}), time.monotonic_ns(),
         )
         try:
             self._queue.put_nowait(candidate)
@@ -214,6 +214,7 @@ class SupervisedPaperWorker:
         )
 
     def _maintain(self) -> None:
+        started = time.monotonic_ns()
         now = self._clock()
         current = self._ledger.status(expected_head=self._head)
         working = tuple(o for o in current.orders if not (o.observation and o.observation.terminal))
@@ -233,6 +234,7 @@ class SupervisedPaperWorker:
                 snapshot, now=self._clock(), expected_head=self._head,
             )
         self._result(result, kind="worker_reconciliation")
+        self._record("worker_latency", phase="reconcile", elapsed_ns=time.monotonic_ns()-started)
         working_now = any(not (o.observation and o.observation.terminal) for o in result.orders)
         # Revisit a deadline as soon as possible, but never spin on an ambiguous cancel.
         interval = _WORKING_RECONCILE_SECONDS if working_now else _IDLE_RECONCILE_SECONDS
@@ -247,8 +249,11 @@ class SupervisedPaperWorker:
         self._next_reconcile = time.monotonic() + interval
 
     def _disposition(self, c: Candidate, state: str, reason: str) -> None:
-        self._record("worker_disposition", intent_seq=c.seq, call_id=c.call, role=c.role,
-                     disposition=state, reason=reason, source_record_sha256=c.source_sha256)
+        self._record(
+            "worker_disposition", intent_seq=c.seq, call_id=c.call, role=c.role,
+            disposition=state, reason=reason, source_record_sha256=c.source_sha256,
+            elapsed_from_offer_ns=time.monotonic_ns() - c.enqueued_mono_ns,
+        )
 
     def _process(self, c: Candidate) -> None:
         # The asynchronous journal submission is not a durable admission.
@@ -269,7 +274,6 @@ class SupervisedPaperWorker:
             self._disposition(c, "NOT_DISPATCHED", "existing_logical_order")
             return
         exit_limit = None
-        symbol: str | None
         if c.role == "EXIT":
             if (
                 not related or any(o.observation is None or not o.observation.terminal
@@ -309,16 +313,12 @@ class SupervisedPaperWorker:
             return
 
         try:
-            request = request_from_live_journal(
-                self._source.path, c.seq, policy=self._ledger.policy,
-                now=self._clock(), ledger_report=current, exit_limit=exit_limit,
-            )
-            if (request.call_id, request.role, request.symbol) != (c.call, c.role, symbol):
-                raise PaperDeliveryError("candidate differs from durable journal")
+            started = time.monotonic_ns()
             result = dispatch_paper_intent(
                 self._ledger, self._venue, journal=self._source.path, seq=c.seq,
                 expected_head=self._head, latch_path=self._latch_path, exit_limit=exit_limit,
                 supervisor_guard=self._gate, clock=self._clock,
+                expected_record_sha256=c.source_sha256,
             )
         except PaperDeliveryError as exc:
             if str(exc) not in _REFUSALS:
@@ -330,7 +330,10 @@ class SupervisedPaperWorker:
             return
 
         self._head = result.chain_sha256
-        matching = [o for o in result.orders if o.client_id == request.client_id(self._ledger.policy)]
+        self._record("worker_latency", phase="dispatch", intent_seq=c.seq,
+                     elapsed_ns=time.monotonic_ns() - started)
+        matching = [o for o in result.orders if o.request.intent_seq == c.seq
+                    and (o.request.call_id, o.request.role) == (c.call, c.role)]
         if len(matching) != 1:
             raise PaperDeliveryError("dispatch result missing durable order identity")
         self._disposition(c, "DURABLE_DISPATCH", matching[0].state)
