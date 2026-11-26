@@ -274,6 +274,7 @@ class SupervisedPaperWorker:
             self._disposition(c, "NOT_DISPATCHED", "existing_logical_order")
             return
         exit_limit = None
+        symbol: str | None
         if c.role == "EXIT":
             if (
                 not related or any(o.observation is None or not o.observation.terminal

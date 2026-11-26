@@ -85,6 +85,8 @@ def test_coverage_and_budget_are_explicit_and_deterministic():
                   coverage=coverage, clip=100, budget=8)
     priorities, result = allocate_diagnostic_research(**kwargs)
     assert len(priorities) == 5
+    full_support = assess_envelope(((-100, 100),), (-100, 100))
+    assert full_support.certainly_covered == full_support.unresolved_outcomes == 1
     assert result.used_units <= 8
     assert result == allocate_diagnostic_research(**kwargs)[1]
     assert len({d.event_id for d in result.decisions}) == len(result.decisions)

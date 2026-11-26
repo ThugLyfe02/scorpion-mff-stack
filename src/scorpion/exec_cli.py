@@ -653,18 +653,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .session_service import JournalError
 
         try:
-            result = evaluate_adaptive_research(
+            adaptive_report = evaluate_adaptive_research(
                 plan_path=args.plan, plan_pin=args.plan_sha256,
                 baseline_cohort=args.baseline_cohort, baseline_inputs=args.baseline_inputs,
                 monitor_cohort=args.monitor_cohort, monitor_inputs=args.monitor_inputs,
                 trust_path=args.trust, cost_policy=args.cost_policy,
                 economic_inputs=args.economic_inputs, as_of=datetime.fromisoformat(args.as_of),
             )
-            _print(asdict(result))
+            _print(asdict(adaptive_report))
             return 0 if (
-                result.historical_research_recommendation == "RESEARCH_CANDIDATE_ONLY"
-                and result.execution_decay.status == "NO_ALARM_NOT_PROOF_OF_HEALTH"
-                and result.economic_decay.status == "NO_ALARM_NOT_PROOF_OF_HEALTH"
+                adaptive_report.historical_research_recommendation == "RESEARCH_CANDIDATE_ONLY"
+                and adaptive_report.execution_decay.status == "NO_ALARM_NOT_PROOF_OF_HEALTH"
+                and adaptive_report.economic_decay.status == "NO_ALARM_NOT_PROOF_OF_HEALTH"
             ) else 1
         except (OSError, ValueError, ImportError, JournalError, CalendarNotCovered) as exc:
             _print({"ok": False, "reason": type(exc).__name__, "authority": "RESEARCH_ONLY"})
@@ -785,13 +785,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .session_service import JournalError
 
         try:
-            probe = probe_campaign(
+            campaign_report = probe_campaign(
                 worker_config=args.worker_config, worker_pin=args.worker_sha256,
                 risk_path=args.risk_policy, ledger_path=args.ledger,
                 latch_path=latch_path(), samples=args.samples,
             )
-            _print(asdict(probe))
-            return 1 if probe.blockers else 0
+            _print(asdict(campaign_report))
+            return 1 if campaign_report.blockers else 0
         except (OSError, ValueError, JournalError, CalendarNotCovered) as exc:
             _print({"ok": False, "reason": type(exc).__name__, "authorizes_orders": False})
             return 1

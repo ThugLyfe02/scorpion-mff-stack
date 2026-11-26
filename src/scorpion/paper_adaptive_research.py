@@ -251,13 +251,17 @@ class CoverageDiagnostic:
     certainly_covered: int
     possibly_covered: int
     certainly_missed: int
+    unresolved_outcomes: int
 
 
 def assess_envelope(intervals: tuple[Interval, ...], predicted: Interval) -> CoverageDiagnostic:
     lo, hi = predicted
     certain = sum(lo <= a <= b <= hi for a, b in intervals)
     possible = sum(a <= hi and b >= lo for a, b in intervals)
-    return CoverageDiagnostic(len(intervals), certain, possible, len(intervals)-possible)
+    return CoverageDiagnostic(
+        len(intervals), certain, possible, len(intervals)-possible,
+        sum(a != b for a, b in intervals),
+    )
 
 
 def allocate_diagnostic_research(
@@ -274,7 +278,7 @@ def allocate_diagnostic_research(
         robust.baseline_identification_bps[0]-robust.stressed_identification_bps[0]
     )/(2*clip)))
     missing = (
-        (coverage.possibly_covered-coverage.certainly_covered)/coverage.sessions
+        coverage.unresolved_outcomes/coverage.sessions
         if coverage.sessions else 1.0
     )
 
@@ -358,6 +362,11 @@ def evaluate_adaptive_research(
     ):
         raise ValueError("adaptive baseline or holdout identity conflict")
     clip = baseline.policy.clip_bps
+    if not (
+        -clip < plan.score_floor < clip
+        and -plan.economic_clip < plan.economic_floor < plan.economic_clip
+    ):
+        raise ValueError("adaptive endpoint floor must lie inside bounded support")
     past = tuple(s.primary_bounds_bps for s in baseline.report.sessions)
     now = tuple(s.primary_bounds_bps for s in target.report.sessions)
     uncertainty = split_session_envelope(
