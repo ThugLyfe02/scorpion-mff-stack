@@ -395,6 +395,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     market_source.add_argument("--recovered", type=Path)
     market_stress = sub.add_parser("paper-market-stress")
     market_stress.add_argument("--journal", type=Path, required=True)
+    capture_bench = sub.add_parser("paper-capture-benchmark")
+    capture_bench.add_argument("--samples", type=int, default=2048)
+    capture_bench.add_argument("--batch", type=int, default=64)
+    capture_bench.add_argument("--rate", type=int, default=0)
+    capture_bench.add_argument("--workspace", type=Path)
+    paper_init = sub.add_parser("paper-order-init")
+    paper_status = sub.add_parser("paper-order-status")
+    paper_submit = sub.add_parser("paper-order-submit")
+    paper_recover = sub.add_parser("paper-order-recover")
+    paper_cancel = sub.add_parser("paper-order-cancel")
+    for command in (paper_init, paper_status, paper_submit, paper_recover, paper_cancel):
+        command.add_argument("--ledger", type=Path, required=True)
+        command.add_argument("--policy", type=Path, required=True)
+        command.add_argument("--policy-sha256", required=True)
+    for command in (paper_submit, paper_recover, paper_cancel):
+        command.add_argument("--ledger-head", required=True)
+    for command in (paper_init, paper_submit, paper_recover, paper_cancel):
+        command.add_argument("--authorize-paper-api", action="store_true", required=True)
+    paper_submit.add_argument("--journal", type=Path, required=True)
+    paper_submit.add_argument("--intent-seq", type=int, required=True)
+    paper_submit.add_argument("--exit-limit", type=Decimal)
+    paper_submit.add_argument("--authorize-paper-order", action="store_true", required=True)
+    paper_cancel.add_argument("--client-id", required=True)
+    paper_cancel.add_argument("--authorize-paper-cancel", action="store_true", required=True)
     recovery = sub.add_parser("recover-paper-journal")
     recovery.add_argument("--journal", type=Path, required=True)
     recovery.add_argument("--out", type=Path, required=True)
@@ -652,6 +676,73 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         _print(report)
         return 0
+    if args.command == "paper-capture-benchmark":
+        from dataclasses import asdict
+
+        from .hot_path_benchmark import benchmark_paper_capture
+
+        try:
+            benchmark = benchmark_paper_capture(
+                samples=args.samples, batch=args.batch, producer_rate=args.rate,
+                workspace=args.workspace,
+            )
+            _print(asdict(benchmark))
+            return 1 if benchmark.failures else 0
+        except (OSError, ValueError) as exc:
+            _print({"ok": False, "reason": type(exc).__name__})
+            return 1
+    if args.command in (
+        "paper-order-init", "paper-order-status", "paper-order-submit",
+        "paper-order-recover", "paper-order-cancel",
+    ):
+        import sqlite3
+        from dataclasses import asdict
+        from decimal import InvalidOperation
+
+        from .delivery import PaperDeliveryError, PaperDeliveryLedger
+        from .paper_venue import (
+            AlpacaEquityPaperVenue,
+            cancel_paper_order,
+            dispatch_paper_intent,
+            load_paper_risk_policy,
+            recover_paper_orders,
+        )
+        from .session_service import JournalError
+
+        try:
+            risk = load_paper_risk_policy(args.policy, args.policy_sha256)
+            ledger = PaperDeliveryLedger(args.ledger, risk)
+            if args.command == "paper-order-status":
+                paper_report = ledger.status()
+            else:
+                venue = AlpacaEquityPaperVenue(risk.account_id)
+                if args.command == "paper-order-init":
+                    paper_report = ledger.initialize(
+                        venue.snapshot(risk.session_date), now=datetime.now(UTC),
+                    )
+                elif args.command == "paper-order-submit":
+                    paper_report = dispatch_paper_intent(
+                        ledger, venue, journal=args.journal, seq=args.intent_seq,
+                        expected_head=args.ledger_head, latch_path=latch_path(),
+                        exit_limit=args.exit_limit,
+                    )
+                elif args.command == "paper-order-cancel":
+                    paper_report = cancel_paper_order(
+                        ledger, venue, client_id=args.client_id, expected_head=args.ledger_head,
+                    )
+                else:
+                    paper_report = recover_paper_orders(
+                        ledger, venue, expected_head=args.ledger_head,
+                    )
+            _print(asdict(paper_report))
+            return 1 if paper_report.blockers else 0
+        except PaperDeliveryError as exc:
+            _print({"ok": False, "reason": str(exc), "authority": "PAPER_ONLY"})
+            return 1
+        except (OSError, ValueError, KeyError, TypeError, JournalError,
+                InvalidOperation, sqlite3.Error) as exc:
+            _print({"ok": False, "reason": type(exc).__name__, "authority": "PAPER_ONLY"})
+            return 1
     if args.command in ("paper-market-replay", "paper-market-stress"):
         from dataclasses import asdict
         from decimal import InvalidOperation

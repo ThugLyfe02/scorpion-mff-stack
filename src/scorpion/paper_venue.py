@@ -38,6 +38,7 @@ from .provenance import stable_hash
 from .session_calendar import session_hours
 from .session_service import (
     MAX_PAPER_JOURNAL_BYTES,
+    JournalError,
     decode_paper_record,
     journal_checkpoint_path,
     journal_identity_bytes,
@@ -366,8 +367,9 @@ def request_from_live_journal(
         or start.get("rules_sha256") != FORWARD_RULES_SHA256
         or start.get("signal_ingress_enabled") is not True
         or start.get("latch_armed") is not True
-        or any(r.get("kind") in ("session_end", "latch", "market_gap")
-               or r.get("reason") == "blocked:no_trade_latch" for r in rows)
+        or any(r.get("kind") in ("session_end", "latch", "market_gap", "market_withdrawal")
+               or r.get("reason") == "blocked:no_trade_latch"
+               or r.get("action") == "blocked:conflicting_signal_create" for r in rows)
     ):
         raise PaperDeliveryError("live paper journal scope or continuity conflict")
     features = paper_features_from_records(receipt, rows)
@@ -393,6 +395,14 @@ def request_from_live_journal(
         )
         if not due <= created <= due + timedelta(seconds=3):
             raise PaperDeliveryError("paper intent timer mismatch")
+        declared = tuple(_time(row.get(key)) for key in (
+            "scheduled_entry_ts_utc", "scheduled_chase_ts_utc", "scheduled_exit_ts_utc",
+        ))
+        if declared != (schedule.entry_ts, schedule.chase_ts, schedule.exit_ts):
+            raise PaperDeliveryError("paper schedule identity mismatch")
+        age = int(feature.features["quote_age_ns"]) + int((now - created).total_seconds() * 1e9)
+        if not 0 <= age <= 3_000_000_000:
+            raise PaperDeliveryError("entry quote stale at dispatch")
         qty = paper_quantity(feature.features["quantity"], positive=True)
         limit = paper_money(feature.features["limit"], positive=True)
         if qty * limit > rules.paper_notional_usd:
@@ -466,6 +476,16 @@ def dispatch_paper_intent(
     # uncertain. Operator recovery must inspect the venue; no automatic retry.
     if not _latch_ok(latch_path) or clock() >= req.deadline:
         return reserved
+    # Never submit a changed or stale durable intent after crossing the dispatch boundary.
+    try:
+        latest = request_from_live_journal(
+            journal, seq, policy=ledger.policy, now=clock(),
+            ledger_report=status, exit_limit=exit_limit,
+        )
+        if latest.intent_sha256 != req.intent_sha256:
+            return reserved
+    except (OSError, ValueError, JournalError):
+        return reserved
     try:
         observation, digest = venue.submit_once(req, key)
         return ledger.observe(
@@ -480,6 +500,8 @@ def recover_paper_orders(
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> PaperDeliveryReport:
     """Read-only remote recovery, preserving missing and uncertain orders."""
+    if venue.account_id != ledger.policy.account_id:
+        raise PaperDeliveryError("paper account mismatch")
     snapshot = venue.snapshot(ledger.policy.session_date)
     # A missing client ID stays unknown; an explicit lookup may recover a response.
     current = ledger.status(expected_head=expected_head)
@@ -507,8 +529,16 @@ def cancel_paper_order(
     if venue.account_id != ledger.policy.account_id:
         raise PaperDeliveryError("paper account mismatch")
     # Confirm account identity before sending cancellation.
-    venue.snapshot(ledger.policy.session_date)
-    status = ledger.claim_cancel(client_id, expected_head=expected_head, now=clock())
+    snapshot = venue.snapshot(ledger.policy.session_date)
+    reconciled = ledger.reconcile(snapshot, now=clock(), expected_head=expected_head)
+    target = next((row for row in reconciled.orders if row.client_id == client_id), None)
+    if target is None or target.observation is None:
+        raise PaperDeliveryError("cancel target unverified")
+    if target.observation.terminal:
+        return reconciled
+    if not any(row.client_id == client_id for row in snapshot.orders):
+        raise PaperDeliveryError("cancel target absent from fresh venue snapshot")
+    status = ledger.claim_cancel(client_id, expected_head=reconciled.chain_sha256, now=clock())
     record = next(row for row in status.orders if row.client_id == client_id)
     assert record.observation is not None
     try:

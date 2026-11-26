@@ -545,6 +545,7 @@ class PaperDeliveryReport:
     expected_positions: tuple[tuple[str, int], ...]
     pending_sell_quantities: tuple[tuple[str, int], ...]
     cash_residual_usd: Decimal | None
+    overdue_working_ids: tuple[str, ...]
     blockers: tuple[str, ...]
     authority: str = "PAPER_ONLY"
     live_authorized: bool = False
@@ -651,6 +652,13 @@ class PaperDeliveryLedger:
     def initialize(self, snapshot: PaperAccountSnapshot, *, now: datetime) -> PaperDeliveryReport:
         now = _paper_clock(now)
         self._check_snapshot(snapshot, now)
+        from .config import MARKET_TZ
+        from .session_calendar import session_hours
+
+        if now.astimezone(MARKET_TZ).date() != self.policy.session_date or (
+            session_hours(self.policy.session_date) is None
+        ):
+            raise PaperDeliveryError("paper registry requires a current exchange session")
         if snapshot.orders or snapshot.positions or snapshot.trading_blocked:
             raise PaperDeliveryError("dedicated opening-flat paper account required")
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -702,6 +710,8 @@ class PaperDeliveryLedger:
             elif kind == "DISPATCH" and seq > 1:
                 req = _request_from(data["request"])
                 key = req.client_id(self.policy)
+                if len(state.orders) >= _PAPER_MAX_ORDERS:
+                    raise PaperDeliveryError("paper ledger order capacity exhausted")
                 if key in state.orders or key != data["client_id"]:
                     raise PaperDeliveryError("duplicate paper dispatch identity")
                 state.orders[key] = PaperOrderRecord(req, key, _paper_clock(data["dispatched_at"]))
@@ -736,7 +746,7 @@ class PaperDeliveryLedger:
         if (
             snapshot.account_id != self.policy.account_id
             or not timedelta(0) <= now - snapshot.observed_at <= timedelta(seconds=10)
-            or now.astimezone(MARKET_TZ).date() != self.policy.session_date
+            or now.astimezone(MARKET_TZ).date() < self.policy.session_date
         ):
             raise PaperDeliveryError("paper account snapshot stale or wrong scope")
 
@@ -763,6 +773,13 @@ class PaperDeliveryLedger:
                 blockers.add("terminal_fill_outside_route_deadline")
         commitment = sum(symbols.values(), Decimal(0))
         residual = None
+        overdue = tuple(sorted(
+            o.client_id for o in state.orders.values()
+            if snapshot is not None and snapshot.observed_at >= o.request.deadline
+            and not (o.observation and o.observation.terminal)
+        ))
+        if overdue:
+            blockers.add("overdue_working_orders")
         if snapshot is not None:
             external = {order.client_id: order for order in snapshot.orders}
             if external.keys() - state.orders.keys():
@@ -789,7 +806,7 @@ class PaperDeliveryLedger:
             self.policy.account_id, state.policy_hash, state.head, state.sequence,
             tuple(state.orders[key] for key in sorted(state.orders)), commitment,
             tuple(sorted(symbols.items())), tuple(sorted(groups.items())),
-            tuple(sorted(held.items())), tuple(sorted(sells.items())), residual,
+            tuple(sorted(held.items())), tuple(sorted(sells.items())), residual, overdue,
             tuple(sorted(blockers)),
         )
 
@@ -848,7 +865,11 @@ class PaperDeliveryLedger:
                 raise PaperDeliveryError("duplicate or exhausted paper dispatch")
             self._merge_snapshot(db, state, snapshot)
             report = self._report(state, snapshot)
-            if report.blockers:
+            blocking = set(report.blockers)
+            # A confirmed late entry must not prevent its bounded risk-reducing exit.
+            if req.side == "sell":
+                blocking.discard("terminal_fill_outside_route_deadline")
+            if blocking:
                 raise PaperDeliveryError("paper reconciliation blocks dispatch")
             if req.symbol not in dict(self.policy.symbols_and_groups):
                 raise PaperDeliveryError("paper symbol not approved")
@@ -876,7 +897,9 @@ class PaperDeliveryLedger:
                 reserved = dict(report.pending_sell_quantities).get(req.symbol, 0)
                 if req.quantity > available - reserved:
                     raise PaperDeliveryError("paper sell inventory already reserved")
-            working = sum(not (o.observation and o.observation.terminal) for o in state.orders.values())
+            working = sum(
+                not (o.observation and o.observation.terminal) for o in state.orders.values()
+            )
             if working >= self.policy.maximum_working_orders:
                 raise PaperDeliveryError("paper working-order cap")
             if req.side == "buy":
