@@ -405,20 +405,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     paper_submit = sub.add_parser("paper-order-submit")
     paper_recover = sub.add_parser("paper-order-recover")
     paper_cancel = sub.add_parser("paper-order-cancel")
-    for command in (paper_init, paper_status, paper_submit, paper_recover, paper_cancel):
+    paper_sweep = sub.add_parser("paper-order-sweep")
+    for command in (paper_init, paper_status, paper_submit, paper_recover, paper_cancel, paper_sweep):
         command.add_argument("--ledger", type=Path, required=True)
         command.add_argument("--policy", type=Path, required=True)
         command.add_argument("--policy-sha256", required=True)
-    for command in (paper_submit, paper_recover, paper_cancel):
+    for command in (paper_submit, paper_recover, paper_cancel, paper_sweep):
         command.add_argument("--ledger-head", required=True)
-    for command in (paper_init, paper_submit, paper_recover, paper_cancel):
+    for command in (paper_init, paper_submit, paper_recover, paper_cancel, paper_sweep):
         command.add_argument("--authorize-paper-api", action="store_true", required=True)
     paper_submit.add_argument("--journal", type=Path, required=True)
     paper_submit.add_argument("--intent-seq", type=int, required=True)
     paper_submit.add_argument("--exit-limit", type=Decimal)
     paper_submit.add_argument("--authorize-paper-order", action="store_true", required=True)
     paper_cancel.add_argument("--client-id", required=True)
-    paper_cancel.add_argument("--authorize-paper-cancel", action="store_true", required=True)
+    for command in (paper_cancel, paper_sweep):
+        command.add_argument("--authorize-paper-cancel", action="store_true", required=True)
     recovery = sub.add_parser("recover-paper-journal")
     recovery.add_argument("--journal", type=Path, required=True)
     recovery.add_argument("--out", type=Path, required=True)
@@ -693,7 +695,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
     if args.command in (
         "paper-order-init", "paper-order-status", "paper-order-submit",
-        "paper-order-recover", "paper-order-cancel",
+        "paper-order-recover", "paper-order-cancel", "paper-order-sweep",
     ):
         import sqlite3
         from dataclasses import asdict
@@ -706,6 +708,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             dispatch_paper_intent,
             load_paper_risk_policy,
             recover_paper_orders,
+            sweep_overdue_paper_orders,
         )
         from .session_service import JournalError
 
@@ -729,6 +732,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 elif args.command == "paper-order-cancel":
                     paper_report = cancel_paper_order(
                         ledger, venue, client_id=args.client_id, expected_head=args.ledger_head,
+                    )
+                elif args.command == "paper-order-sweep":
+                    paper_report = sweep_overdue_paper_orders(
+                        ledger, venue, expected_head=args.ledger_head,
                     )
                 else:
                     paper_report = recover_paper_orders(

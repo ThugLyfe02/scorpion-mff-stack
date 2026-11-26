@@ -7,7 +7,7 @@ import sqlite3
 from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Context, Decimal, InvalidOperation, localcontext
 from enum import StrEnum
 from pathlib import Path
 
@@ -395,6 +395,7 @@ class PaperOrderRequest:
     intent_seq: int
     created: datetime
     deadline: datetime
+    admit_until: datetime | None = None
 
     def __post_init__(self) -> None:
         _paper_symbol(self.symbol)
@@ -412,6 +413,10 @@ class PaperOrderRequest:
             raise PaperDeliveryError("invalid paper intent sequence")
         if not _paper_clock(self.created) < _paper_clock(self.deadline):
             raise PaperDeliveryError("invalid paper intent window")
+        if self.admit_until is not None and not (
+            self.created <= _paper_clock(self.admit_until) <= self.deadline
+        ):
+            raise PaperDeliveryError("invalid paper dispatch validity window")
         # Alpaca US equity sub-penny restrictions; no silent price rounding.
         tick = Decimal("0.01") if price >= 1 else Decimal("0.0001")
         if price % tick:
@@ -475,7 +480,8 @@ class PaperVenueOrder:
 
     @property
     def notional(self) -> Decimal:
-        return self.filled * (self.average or Decimal(0))
+        with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
+            return self.filled * (self.average or Decimal(0))
 
 
 @dataclass(frozen=True, slots=True)
@@ -535,7 +541,8 @@ class PaperOrderRecord:
         actual = self.observation.notional if self.observation else Decimal(0)
         if self.observation is not None and self.observation.terminal:
             return actual
-        return actual + (self.request.quantity - self.filled) * self.request.limit
+        with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
+            return actual + (self.request.quantity - self.filled) * self.request.limit
 
 
 @dataclass(frozen=True, slots=True)
@@ -574,6 +581,7 @@ def _request_from(data: dict[str, object]) -> PaperOrderRequest:
         str(data["intent_sha256"]), str(data["prefix_sha256"]),
         paper_quantity(data["intent_seq"], positive=True),
         _paper_clock(data["created"]), _paper_clock(data["deadline"]),
+        None if data.get("admit_until") is None else _paper_clock(data["admit_until"]),
     )
 
 
@@ -605,12 +613,13 @@ def _apply_observation(record: PaperOrderRecord, venue: PaperVenueOrder) -> Pape
         ):
             raise PaperDeliveryError("venue state regression or identity conflict")
         if venue.filled > prior.filled:
-            increment = venue.notional - prior.notional
-            qty = venue.filled - prior.filled
-            if increment <= 0 or (req.side == "buy" and increment > qty * req.limit) or (
-                req.side == "sell" and increment < qty * req.limit
-            ):
-                raise PaperDeliveryError("incremental venue notional violates limit")
+            with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
+                increment = venue.notional - prior.notional
+                qty = venue.filled - prior.filled
+                if increment <= 0 or (req.side == "buy" and increment > qty * req.limit) or (
+                    req.side == "sell" and increment < qty * req.limit
+                ):
+                    raise PaperDeliveryError("incremental venue notional violates limit")
     return replace(record, observation=venue)
 
 
@@ -720,6 +729,10 @@ class PaperDeliveryLedger:
                     raise PaperDeliveryError("paper ledger order capacity exhausted")
                 if key in state.orders or key != data["client_id"]:
                     raise PaperDeliveryError("duplicate paper dispatch identity")
+                if "account_snapshot" in data and (
+                    stable_hash(data["account_snapshot"]) != data["snapshot_sha256"]
+                ):
+                    raise PaperDeliveryError("paper dispatch snapshot identity mismatch")
                 state.orders[key] = PaperOrderRecord(req, key, _paper_clock(data["dispatched_at"]))
             elif kind == "OBSERVE" and seq > 1:
                 obs = _observation_from(data["observation"])
@@ -758,6 +771,11 @@ class PaperDeliveryLedger:
 
     def _report(self, state: _PaperState,
                 snapshot: PaperAccountSnapshot | None = None) -> PaperDeliveryReport:
+        with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
+            return self._report_exact(state, snapshot)
+
+    def _report_exact(self, state: _PaperState,
+                      snapshot: PaperAccountSnapshot | None) -> PaperDeliveryReport:
         symbols: dict[str, Decimal] = {}
         groups: dict[str, Decimal] = {}
         mapping = dict(self.policy.symbols_and_groups)
@@ -863,8 +881,10 @@ class PaperDeliveryLedger:
             raise PaperDeliveryError("paper order outside authorized regular-session window")
         if clock.astimezone(MARKET_TZ).date() != self.policy.session_date:
             raise PaperDeliveryError("paper session date mismatch")
+        if req.admit_until is not None and clock > req.admit_until:
+            raise PaperDeliveryError("paper dispatch validity expired")
         key = req.client_id(self.policy)
-        with closing(self._connect()) as db:
+        with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)), closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             state = self._load(db, expected_head)
             if key in state.orders or len(state.orders) >= _PAPER_MAX_ORDERS:
@@ -933,6 +953,8 @@ class PaperDeliveryLedger:
             self._append(db, state, "DISPATCH", {
                 "request": asdict(req), "client_id": key, "dispatched_at": clock,
                 "snapshot_sha256": stable_hash(snapshot),
+                "account_snapshot": snapshot,
+                "pre_dispatch_buy_commitment_usd": report.session_buy_commitment_usd,
             })
             state.orders[key] = PaperOrderRecord(req, key, clock)
             db.execute("COMMIT")

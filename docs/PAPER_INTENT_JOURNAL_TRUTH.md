@@ -723,3 +723,25 @@ and reports producer admission and durability p50/p95/p99/max, actual acknowledg
 records/s, bytes/s, workload digest, platform and failures. CI runs both fixed synthetic
 workloads. This is not a sustained production feed, venue latency, or 10x throughput claim.
 Benchmark the actual deployment volume and failure behavior before increasing limits.
+
+
+### Deadline cancellation and process-exit verification
+
+A one-shot explicit deadline sweep can be run after an operator has verified the last
+head. It reconciles account state, cancels only known overdue working order IDs, persists
+each cancel claim before DELETE, then reconciles again. It never submits a new order,
+never retries a prior cancel, and leaves uncertain residual exposure reserved.
+
+    python -m scorpion paper-order-sweep [COMMON] --ledger-head HEAD \
+      --authorize-paper-api --authorize-paper-cancel
+
+Use one supervised operator process; no scheduled job is installed by this change.
+The open-order endpoint roster must match the nonterminal population of the session
+orders endpoint, and no prior-session order may be imported into a fresh pilot.
+The entry dispatch validity deadline accounts for the initial quote's age and is
+rechecked at the transport boundary; the original order expiration remains separate.
+The durable dispatch event includes its normalized account snapshot and source digest.
+Risk arithmetic runs in a fixed high-precision decimal context. A subprocess regression
+exits abruptly immediately after the committed dispatch and proves the reopened ledger
+does not release the reservation or allow duplicate submission. This is a process-exit
+drill, not proof of power-loss durability on all filesystems.

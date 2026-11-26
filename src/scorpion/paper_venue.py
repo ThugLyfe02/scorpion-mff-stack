@@ -260,10 +260,18 @@ class AlpacaEquityPaperVenue:
                 if row.client_id in by_key:
                     raise PaperDeliveryError("duplicate paper order")
                 by_key[row.client_id] = row
+            open_ids: set[str] = set()
             for item in opened:
                 row = _order(item)
                 if row.client_id not in by_key or row != by_key[row.client_id]:
                     raise PaperDeliveryError("prior-session or inconsistent working order")
+                if row.client_id in open_ids or row.terminal:
+                    raise PaperDeliveryError("invalid open order roster")
+                open_ids.add(row.client_id)
+            if open_ids != {key for key, row in by_key.items() if not row.terminal}:
+                raise PaperDeliveryError("working order roster incomplete")
+            if any(row.submitted < start for row in by_key.values()):
+                raise PaperDeliveryError("order predates paper session")
             held: dict[str, int] = {}
             for item in positions:
                 if (
@@ -402,9 +410,11 @@ def request_from_live_journal(
         ))
         if declared != (schedule.entry_ts, schedule.chase_ts, schedule.exit_ts):
             raise PaperDeliveryError("paper schedule identity mismatch")
-        age = int(feature.features["quote_age_ns"]) + int((now - created).total_seconds() * 1e9)
+        base_age = int(feature.features["quote_age_ns"])
+        age = base_age + int((now - created).total_seconds() * 1e9)
         if not 0 <= age <= 3_000_000_000:
             raise PaperDeliveryError("entry quote stale at dispatch")
+        admit_until = min(deadline, created + timedelta(microseconds=(3_000_000_000-base_age)//1000))
         qty = paper_quantity(feature.features["quantity"], positive=True)
         limit = paper_money(feature.features["limit"], positive=True)
         if qty * limit > rules.paper_notional_usd:
@@ -429,6 +439,7 @@ def request_from_live_journal(
             raise PaperDeliveryError("premature exit intent")
         deadline = min(scheduled + timedelta(seconds=60), hours[1])
         limit = paper_money(exit_limit, positive=True)
+        admit_until = min(deadline, created + timedelta(seconds=10))
         material = (row, str(limit), qty)
     else:
         raise PaperDeliveryError("selected record is not a paper intent")
@@ -436,7 +447,7 @@ def request_from_live_journal(
         raise PaperDeliveryError("paper route window expired")
     return PaperOrderRequest(
         call, role, symbol, qty, limit, stable_hash(material), features.journal_sha256,
-        seq, created, deadline,
+        seq, created, deadline, admit_until,
     )
 
 
@@ -488,7 +499,11 @@ def dispatch_paper_intent(
             return reserved
     except (OSError, ValueError, JournalError):
         return reserved
-    if not _latch_ok(latch_path) or clock() >= req.deadline:
+    final_clock = clock()
+    if (
+        not _latch_ok(latch_path) or final_clock >= req.deadline
+        or (req.admit_until is not None and final_clock > req.admit_until)
+    ):
         return reserved
     try:
         observation, digest = venue.submit_once(req, key)
@@ -552,3 +567,30 @@ def cancel_paper_order(
     with suppress(PaperDeliveryError, OSError):
         venue.cancel_once(record.observation.venue_id)
     return status
+
+
+def sweep_overdue_paper_orders(
+    ledger: PaperDeliveryLedger, venue: AlpacaEquityPaperVenue, *, expected_head: str,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> PaperDeliveryReport:
+    """One explicitly authorized recovery/cancel pass. Never issues a new order.
+
+    Only overdue, independently observed working identities receive a cancellation.
+    A previous cancel request, absent observation or terminal order cannot be retried.
+    """
+    report = recover_paper_orders(ledger, venue, expected_head=expected_head, clock=clock)
+    targets = tuple(
+        order.client_id for order in report.orders
+        if order.client_id in report.overdue_working_ids and order.observation is not None
+        and not order.observation.terminal and not order.cancel_requested
+        and order.state in ("WORKING", "PARTIAL")
+    )
+    for key in targets:
+        report = cancel_paper_order(
+            ledger, venue, client_id=key, expected_head=report.chain_sha256, clock=clock,
+        )
+    if targets:
+        report = recover_paper_orders(
+            ledger, venue, expected_head=report.chain_sha256, clock=clock,
+        )
+    return report

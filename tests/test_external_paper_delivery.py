@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 from threading import Barrier
 
@@ -28,6 +31,7 @@ from scorpion.paper_venue import (
     dispatch_paper_intent,
     recover_paper_orders,
     request_from_live_journal,
+    sweep_overdue_paper_orders,
 )
 from scorpion.session_service import Journal, journal_receipt_path
 
@@ -218,7 +222,7 @@ def adapter(monkeypatch):
     monkeypatch.setenv("SCORPION_ALPACA_PAPER_SECRET", "fixture-secret")
     monkeypatch.setattr("scorpion.paper_venue._latch_ok", lambda _: True)
     remote = {"orders": [], "positions": [], "cash": "1000", "posts": 0, "deletes": 0,
-              "lost_ack": True}
+              "lost_ack": True, "now": NOW}
 
     def transport(req, timeout):
         assert req.full_url.startswith("https://paper-api.alpaca.markets/v2/")
@@ -247,7 +251,7 @@ def adapter(monkeypatch):
                 "account_blocked": False, "trading_blocked": False,
             }
         elif "/v2/clock" in url:
-            payload = {"is_open": True, "timestamp": NOW.isoformat()}
+            payload = {"is_open": True, "timestamp": remote["now"].isoformat()}
         elif "/v2/positions" in url:
             payload = remote["positions"]
         elif "/v2/orders:by_client_order_id" in url:
@@ -260,7 +264,7 @@ def adapter(monkeypatch):
             payload = remote["orders"]
         return 200, json.dumps(payload).encode()
 
-    return remote, AlpacaEquityPaperVenue(ACCOUNT, transport=transport, clock=lambda: NOW)
+    return remote, AlpacaEquityPaperVenue(ACCOUNT, transport=transport, clock=lambda: remote["now"])
 
 
 def test_lost_ack_then_recovery_and_cancel_never_resubmit(tmp_path, ledger, adapter):
@@ -311,3 +315,80 @@ def test_capture_benchmark_verifies_every_sequence(tmp_path):
     assert report.requested_records == report.admitted_records == report.durable_records == 128
     assert report.records_per_second > 0 and report.bytes_per_second > 0
     assert not report.production_capacity_certified
+
+
+def _crash_after_commit(path: str, head: str) -> None:
+    obj = PaperDeliveryLedger(Path(path), POLICY)
+    obj.reserve_dispatch(request(), snapshot(), now=NOW, expected_head=head)
+    # Actual abrupt process exit: no Python teardown or delivery acknowledgement.
+    os._exit(73)
+
+
+def test_process_exit_after_dispatch_commit_does_not_release_or_retry(ledger):
+    obj, head = ledger
+    child = subprocess.run(
+        [sys.executable, "-c",
+         "import runpy,sys;runpy.run_path(sys.argv[1])['_crash_after_commit'](*sys.argv[2:])",
+         __file__, str(obj.path), head],
+        timeout=15, check=False, capture_output=True,
+    )
+    assert child.returncode == 73, child.stderr.decode()
+    reopened = PaperDeliveryLedger(obj.path, POLICY)
+    report = reopened.status()
+    assert report.orders[0].state == "DISPATCH_UNCERTAIN"
+    assert report.session_buy_commitment_usd == Decimal("60")
+    with pytest.raises(PaperDeliveryError, match="duplicate"):
+        reopened.reserve_dispatch(request(), snapshot(), now=NOW, expected_head=report.chain_sha256)
+
+
+def test_deadline_sweep_cancels_once_without_new_submissions(tmp_path, ledger, adapter):
+    obj, head = ledger
+    remote, venue = adapter
+    journal = tmp_path / "capture.jsonl"
+    seq = live_prefix(journal)
+    report = dispatch_paper_intent(
+        obj, venue, journal=journal, seq=seq, expected_head=head,
+        latch_path=tmp_path / "synthetic", clock=lambda: NOW,
+    )
+    remote["now"] = NOW + timedelta(minutes=4)
+    late = remote["now"]
+    swept = sweep_overdue_paper_orders(
+        obj, venue, expected_head=report.chain_sha256, clock=lambda: late,
+    )
+    assert remote["posts"] == remote["deletes"] == 1
+    assert swept.orders[0].state == "CANCEL_UNCERTAIN"
+    again = sweep_overdue_paper_orders(
+        obj, venue, expected_head=swept.chain_sha256, clock=lambda: late,
+    )
+    assert remote["posts"] == remote["deletes"] == 1
+    assert again.session_buy_commitment_usd == Decimal("60")
+    remote["orders"][0]["status"] = "canceled"
+    terminal = sweep_overdue_paper_orders(
+        obj, venue, expected_head=again.chain_sha256, clock=lambda: late,
+    )
+    assert terminal.orders[0].state == "CANCELLED"
+    assert terminal.session_buy_commitment_usd == 0
+
+
+def test_expired_send_window_refused_before_dispatch(ledger):
+    obj, head = ledger
+    req = replace(request(), admit_until=NOW + timedelta(milliseconds=500))
+    clock = NOW + timedelta(seconds=1)
+    with pytest.raises(PaperDeliveryError, match="validity expired"):
+        obj.reserve_dispatch(req, snapshot(now=clock), now=clock, expected_head=head)
+    assert not obj.status().orders
+
+
+def test_reservations_not_rounded_by_caller_decimal_context(ledger):
+    obj, head = ledger
+    req = request()
+    dispatch = obj.reserve_dispatch(req, snapshot(), now=NOW, expected_head=head)
+    partial = observed(req, "PARTIAL", 3, average="9.87654321")
+    report = obj.reconcile(
+        snapshot([partial], [("XYZ", 3)], "970.37037037"),
+        now=NOW, expected_head=dispatch.chain_sha256,
+    )
+    assert report.session_buy_commitment_usd == Decimal("59.62962963")
+    with localcontext() as ctx:
+        ctx.prec = 5
+        assert obj.status().session_buy_commitment_usd == Decimal("59.62962963")
