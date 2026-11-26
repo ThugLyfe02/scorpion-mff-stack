@@ -621,3 +621,105 @@ and compares net deltas only for equal positive flat quantities on locally unblo
 model runs. Different quantities remain distinct outcomes, not a selection-adjusted gain.
 Neither a grid winner nor any modeled cost difference is a promotion candidate. Filtered
 single-venue quote continuity, queue priority and actual fill probability remain unproven.
+
+
+## P0 external equity paper dispatch pilot
+
+The existing run-session remains intent-only. A separate, explicitly authorized operator
+command consumes one fresh, fsync-confirmed prefix intent. It does not connect the agent,
+scanner, optimizer or trading model directly to an order transport. The adapter uses
+only https://paper-api.alpaca.markets, documented GET account/orders/positions/clock,
+POST orders, GET by client_order_id and DELETE order-id endpoints. It does not use live
+credentials, configurable URLs, redirects or proxy inheritance. Use a dedicated exclusive
+paper account; account ID must match, currency USD, account active. No real orders.
+
+### Preregistered local risk policy
+
+Pin the exact bytes of a private JSON file (sha256sum); the ledger additionally binds the
+canonical typed policy. Example (replace account UUID, date and symbols with real,
+operator-approved values; amounts are illustrative, not recommended allocations):
+
+    {
+      "schema": "scorpion.paper-risk.v1",
+      "authority": "PAPER_ONLY",
+      "account_id": "00000000-0000-0000-0000-000000000001",
+      "session_date": "2026-11-27",
+      "maximum_order_usd": "100",
+      "maximum_session_buy_usd": "300",
+      "maximum_symbol_buy_usd": "150",
+      "maximum_group_buy_usd": "200",
+      "fee_cash_buffer_usd": "10",
+      "maximum_working_orders": 3,
+      "symbols_and_groups": {"XYZ": "group-a", "ABC": "group-a"}
+    }
+
+The group mapping is an operator-defined exposure grouping, not estimated covariance.
+The conservative reservation is cumulative session buy cost plus outstanding limit
+commitments; filled purchases consume budget even after sales. Only terminal
+unfilled quantity releases its reservation. No leverage, shorts or proceeds recycling.
+Current cash/buying power and remaining buy commitments are checked conservatively,
+plus the fixed fee buffer. Sell reservations are constrained by confirmed call inventory
+and aggregate symbol holdings less pending sells. This is cost-basis commitment, not
+mark-to-market, liquidity-at-risk or an account-wide multi-asset risk model.
+
+### Lifecycle and commands
+
+Set SCORPION_ALPACA_PAPER_KEY and SCORPION_ALPACA_PAPER_SECRET locally. Never paste them
+into chat, commit them, or put them on command lines. All five commands accept
+--ledger /private/paper-orders.db --policy /private/risk.json --policy-sha256 POLICY_PIN.
+Initialize once, on a regular exchange date, only from a stable flat account with no
+orders. Reconcile and retain each returned ledger chain hash independently outside
+the dispatch process. A local hash chain cannot detect a full rollback or clone; keep
+one ledger per account/session. Do not reset or fork it if a request is uncertain.
+
+    python -m scorpion paper-order-init [COMMON] --authorize-paper-api
+    python -m scorpion paper-order-status [COMMON]
+    python -m scorpion paper-order-recover [COMMON] --ledger-head HEAD --authorize-paper-api
+    python -m scorpion paper-order-submit [COMMON] --ledger-head HEAD \
+      --journal /private/session.jsonl --intent-seq SEQ \
+      --authorize-paper-api --authorize-paper-order
+    python -m scorpion paper-order-cancel [COMMON] --ledger-head HEAD \
+      --client-id CLIENT_ID --authorize-paper-api --authorize-paper-cancel
+
+[COMMON] means the three options above, not literal shell syntax. A conditional EXIT
+additionally requires --exit-limit with an explicitly operator-reviewed limit; quantity
+is exact confirmed entry inventory (and bounded by the conditional journal quantity).
+The source prefix must still be open, have an eligible same-day frozen intent,
+no recorded gaps/latch and fresh entry quote. Submit checks the existing safety latch,
+venue clock, regular session and exact schedule. The action is a single DAY limit,
+whole-share order, no extended hours, replacement, fractional, bracket or option orders.
+A later quote must not silently change the recorded entry limit.
+
+DISPATCH is committed with FULL synchronous SQLite before a single POST. Deterministic
+client ID derives from account/date/call/role, not a moving prefix hash. Lost ACK, timeout,
+HTTP error or crash after the durable transition -> DISPATCH_UNCERTAIN, not retryable.
+Only read-side observations advance the order. A 404 is not proof of non-submission.
+Cancel is a durable single request; HTTP 204 is not proof of a terminal cancel.
+Expired working orders are reported, not automatically canceled; cancel explicitly and
+recover. Snapshot comparison double-reads the normalized account, orders and positions,
+including all open orders to detect prior-day working orders, and refuses capped results.
+Recovery can inspect the account after the original session date; new orders cannot.
+It is not atomic venue state; account must remain exclusive. Cash residual within
+the pinned fee buffer is not verified fee accounting, and reported average price is
+provisional, not individual signed fills. Stage 1/round-trip admission remains independent.
+
+Status without a fresh account snapshot intentionally reports a reconciliation blocker.
+A submit or cancel may return nonzero after the network action: never interpret the
+exit code as permission to retry. Always inspect the persisted client ID, then recover.
+After crash between commit and response, inspect local status and independently reconcile
+the head transition before updating the external pin. Never blindly accept a replaced DB.
+This is a manually operated paper pilot; automatic deadline cancels, long-running stream
+supervision, multi-exit liquidation/replacements, host-level exclusivity, network fault
+drills and authenticated vendor verification remain required before unattended paper use.
+
+### Capture benchmark
+
+    python -m scorpion paper-capture-benchmark --samples 2048 --batch 64
+    python -m scorpion paper-capture-benchmark --samples 512 --batch 64 --rate 1000
+
+The benchmark drives the real strict journal, fsync and checkpoint callbacks on an
+isolated temporary filesystem, verifies every admitted sequence and the final receipt,
+and reports producer admission and durability p50/p95/p99/max, actual acknowledged
+records/s, bytes/s, workload digest, platform and failures. CI runs both fixed synthetic
+workloads. This is not a sustained production feed, venue latency, or 10x throughput claim.
+Benchmark the actual deployment volume and failure behavior before increasing limits.

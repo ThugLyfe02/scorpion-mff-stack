@@ -488,6 +488,8 @@ def dispatch_paper_intent(
         return reserved
     try:
         observation, digest = venue.submit_once(req, key)
+        if observation.client_id != key:
+            raise PaperDeliveryError("submission response client identity mismatch")
         return ledger.observe(
             observation, now=clock(), expected_head=reserved.chain_sha256, source_sha256=digest,
         )
@@ -512,6 +514,8 @@ def recover_paper_orders(
         result = venue.lookup(record.client_id)
         if result is not None:
             observation, digest = result
+            if observation.client_id != record.client_id:
+                raise PaperDeliveryError("lookup response client identity mismatch")
             current = ledger.observe(
                 observation, now=clock(), expected_head=current.chain_sha256,
                 source_sha256=digest,

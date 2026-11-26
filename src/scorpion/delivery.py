@@ -366,7 +366,8 @@ class PaperRiskPolicy:
             paper_money(amount, positive=True)
         paper_money(self.fee_cash_buffer_usd)
         if (
-            not 1 <= self.maximum_working_orders <= 20
+            type(self.maximum_working_orders) is not int
+            or not 1 <= self.maximum_working_orders <= 20
             or not 1 <= len(self.symbols_and_groups) <= 100
             or len(dict(self.symbols_and_groups)) != len(self.symbols_and_groups)
             or tuple(sorted(self.symbols_and_groups)) != self.symbols_and_groups
@@ -399,6 +400,8 @@ class PaperOrderRequest:
         _paper_symbol(self.symbol)
         _paper_digest(self.intent_sha256)
         _paper_digest(self.prefix_sha256)
+        if type(self.quantity) is not int:
+            raise PaperDeliveryError("paper whole-share quantity required")
         paper_quantity(self.quantity, positive=True)
         price = paper_money(self.limit, positive=True)
         if not self.call_id or len(self.call_id) > 256 or self.role not in (
@@ -443,6 +446,8 @@ class PaperVenueOrder:
         if not self.client_id or not self.venue_id or self.side not in ("buy", "sell"):
             raise PaperDeliveryError("invalid venue order identity")
         _paper_symbol(self.symbol)
+        if type(self.requested) is not int or type(self.filled) is not int:
+            raise PaperDeliveryError("paper whole-share quantity required")
         paper_quantity(self.requested, positive=True)
         paper_quantity(self.filled)
         paper_money(self.limit, positive=True)
@@ -494,6 +499,7 @@ class PaperAccountSnapshot:
             or len({o.client_id for o in self.orders}) != len(self.orders)
             or len({o.venue_id for o in self.orders}) != len(self.orders)
             or len(dict(self.positions)) != len(self.positions)
+            or type(self.trading_blocked) is not bool
             or any(o.updated > self.observed_at for o in self.orders)
         ):
             raise PaperDeliveryError("invalid account snapshot")
