@@ -7,6 +7,7 @@ import platform
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -20,6 +21,8 @@ from .durable_ingress import append_raw_with_receipt
 from .pipeline import Pipeline
 from .processing_order import inspect_processing_order
 from .profiling import profile_messages
+from .provenance import stable_hash
+from .session_service import Journal, JournalError, verify_paper_journal
 from .stage_trace import load_stage_latency_report
 from .store import Store
 
@@ -286,3 +289,110 @@ def benchmark_hot_path(
         failures=tuple(failures),
         core_event_kind_counts=tuple(sorted(core_counts.items())),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureBenchmarkReport:
+    requested_records: int
+    admitted_records: int
+    durable_records: int
+    records_per_second: float
+    bytes_per_second: float
+    producer_admission: BenchmarkPercentiles
+    admission_to_checkpoint: BenchmarkPercentiles
+    end_to_end_seconds: float
+    byte_count: int
+    exact_receipt_verified: bool
+    workload_sha256: str
+    batch_size: int
+    producer_rate: int
+    python_version: str
+    platform: str
+    failures: tuple[str, ...]
+    authority: str = "RESEARCH_ONLY"
+    production_capacity_certified: bool = False
+
+
+def benchmark_paper_capture(
+    *, samples: int = 2048, batch: int = 64, producer_rate: int = 0,
+    workspace: Path | None = None,
+) -> CaptureBenchmarkReport:
+    """Real strict journal fsync + checkpoint path; synthetic fixed-size market records.
+
+    producer_rate=0 is an unpaced burst. The exact admitted/acknowledged sequence
+    and receipt are verified; no loss is hidden in the throughput denominator.
+    """
+    if (
+        not 32 <= samples <= 80_000 or not 1 <= batch <= 256
+        or not 0 <= producer_rate <= 100_000
+        or (producer_rate and samples / producer_rate > 60)
+    ):
+        raise ValueError("capture benchmark outside bounded workload")
+    records = tuple({
+        "kind": "market_quote", "symbol": f"BENCH{i % 32:02d}",
+        "ts_event_ns": 1_800_000_000_000_000_000 + i,
+        "recv_wall_ns": 1_800_000_000_001_000_000 + i,
+        "recv_mono_ns": 1_000_000 + i, "bid": "9.99", "ask": "10.01",
+        "bid_size": 100 + i % 20, "ask_size": 100 + i % 50,
+        "publisher_id": 1, "instrument_id": i % 32 + 1, "provider_sequence": i + 1,
+    } for i in range(samples))
+    workload = stable_hash(records)
+    submit_ns: dict[int, int] = {}
+    durable_ns: dict[int, int] = {}
+    acknowledgements: list[int] = []
+    durations: list[int] = []
+    lock = threading.Lock()
+    failures: list[str] = []
+
+    def acknowledged(seq: int, stamp: int) -> None:
+        with lock:
+            acknowledgements.append(seq)
+            durable_ns[seq] = stamp
+
+    with tempfile.TemporaryDirectory(prefix="paper-capture-bench-", dir=workspace) as folder:
+        path = Path(folder) / "capture.jsonl"
+        journal = Journal(path, batch=batch, require_lossless=True, on_durable=acknowledged)
+        started = time.perf_counter_ns()
+        admitted = 0
+        for record in records:
+            if producer_rate:
+                target = started + admitted * 1_000_000_000 // producer_rate
+                remaining = (target - time.perf_counter_ns()) / 1e9
+                if remaining > 0:
+                    time.sleep(remaining)
+            tick = time.perf_counter_ns()
+            try:
+                seq = journal.submit(record)
+            except JournalError as exc:
+                failures.append(str(exc))
+                break
+            with lock:
+                submit_ns[seq] = tick
+            durations.append((time.perf_counter_ns() - tick) // 1000)
+            admitted += 1
+        try:
+            journal.close(timeout_s=30)
+        except JournalError as exc:
+            failures.append(str(exc))
+        elapsed = max((time.perf_counter_ns() - started) / 1e9, 1e-9)
+        verified = False
+        size = path.stat().st_size if path.exists() else 0
+        try:
+            receipt = verify_paper_journal(path)
+            verified = (
+                receipt["records"] == samples == admitted == len(acknowledgements)
+                and acknowledgements == list(range(1, samples + 1))
+            )
+        except JournalError:
+            failures.append("capture_receipt_unverified")
+        if not verified:
+            failures.append("capture_loss_or_incomplete_workload")
+        with lock:
+            latencies = [(stamp - submit_ns[seq]) // 1000 for seq, stamp in durable_ns.items()
+                         if seq in submit_ns]
+        return CaptureBenchmarkReport(
+            samples, admitted, len(acknowledgements), len(acknowledgements) / elapsed,
+            size / elapsed, _summary(durations), _summary(latencies), elapsed, size,
+            verified, workload, batch, producer_rate, sys.version.split()[0],
+            platform.platform(), tuple(dict.fromkeys(failures)),
+        )

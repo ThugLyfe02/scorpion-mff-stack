@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 
@@ -76,3 +77,53 @@ class OnlineBernoulliMonitor:
             raise ValueError("required_lower_bound must be between 0 and 1")
         current = self.current()
         return current.samples >= min_samples and current.lower_bound >= required_lower_bound
+
+
+@dataclass(frozen=True, slots=True)
+class BoundedMeanConfidenceSequence:
+    """Bounds for the average predictable conditional mean of bounded session scores."""
+
+    samples: int
+    interval_mean_lower: float | None
+    interval_mean_upper: float | None
+    lower_bound: float
+    upper_bound: float
+    alpha: float
+    radius: float | None
+    fully_observed: int
+
+
+def anytime_bounded_mean_confidence_sequence(
+    observations: Sequence[tuple[float, float]],
+    *, lower: float, upper: float, alpha: float = 0.05,
+) -> BoundedMeanConfidenceSequence:
+    """Hoeffding union-bound sequence for interval-observed bounded scores.
+
+    If X_t lies in [lower,upper] and the supplied interval contains X_t, the
+    confidence sequence covers the average of E[X_t | F_(t-1)] simultaneously
+    over t, assuming the specified bounds and filtration. No within-session IID
+    assumption is needed. It is not an interval for a stationary future mean.
+    Missing observations may be represented by the full support, never zero.
+    """
+    if not all(math.isfinite(v) for v in (lower, upper, alpha)):
+        raise ValueError("nonfinite confidence sequence parameters")
+    if not lower < upper or not 0 < alpha < 1:
+        raise ValueError("invalid confidence sequence support or alpha")
+    if not math.isfinite(upper - lower):
+        raise ValueError("confidence support width must be finite")
+    n = len(observations)
+    for lo, hi in observations:
+        if not math.isfinite(lo) or not math.isfinite(hi) or not lower <= lo <= hi <= upper:
+            raise ValueError("observation interval outside declared support")
+    if not n:
+        return BoundedMeanConfidenceSequence(0, None, None, lower, upper, alpha, None, 0)
+    # Allocate alpha/(n(n+1)) to each two-sided look. Use logs to avoid underflow.
+    radius = (upper - lower) * math.sqrt(
+        ((math.log(2) - math.log(alpha)) + math.log(n) + math.log(n + 1)) / (2 * n)
+    )
+    lo_mean = math.fsum(lo / n for lo, _ in observations)
+    hi_mean = math.fsum(hi / n for _, hi in observations)
+    return BoundedMeanConfidenceSequence(
+        n, lo_mean, hi_mean, max(lower, lo_mean - radius), min(upper, hi_mean + radius),
+        alpha, radius, sum(lo == hi for lo, hi in observations),
+    )

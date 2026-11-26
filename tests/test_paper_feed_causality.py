@@ -223,3 +223,20 @@ def test_live_adapter_mbp_never_requests_mbo_snapshot_and_never_prices_order_act
 
     asyncio.run(consume())
     assert subscriptions and all(row["snapshot"] is False for row in subscriptions)
+
+
+def test_first_usable_quote_readiness_cannot_be_backfilled_or_refreshed() -> None:
+    clock, _, feed = build()
+    feed._apply(message(WALL - 3_001 * MS))
+    feed._apply(message(WALL + 1))
+    feed._apply(message(WALL, "NaN", "10.02"))
+    assert feed.stats.first_usable_recv_wall_ns is None
+    clock.wall += MS
+    clock.mono += MS
+    feed._apply(message(clock.wall))
+    first = clock.wall
+    assert feed.stats.first_usable_recv_wall_ns == first
+    clock.wall += MS
+    clock.mono += MS
+    feed._apply(message(clock.wall))
+    assert feed.stats.first_usable_recv_wall_ns == first

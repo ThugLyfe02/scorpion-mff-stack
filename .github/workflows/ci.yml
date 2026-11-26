@@ -26,3 +26,7 @@ jobs:
       - run: ruff check src tests
       - run: mypy src/scorpion
       - run: pytest
+      - name: Measure strict paper capture on CI filesystem (synthetic)
+        run: |
+          python -m scorpion paper-capture-benchmark --samples 2048 --batch 64
+          python -m scorpion paper-capture-benchmark --samples 512 --batch 64 --rate 1000

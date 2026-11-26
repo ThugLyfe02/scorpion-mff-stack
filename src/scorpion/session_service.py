@@ -1,40 +1,45 @@
 """One supervised asyncio paper session: Discord post -> decision -> paper order intent.
 
 Hot path (``on_post`` / ``on_entry_due``) is pure in-memory work on the event loop: existing parser,
-frozen forward rules, an O(1) per-symbol quote read, a Decimal limit, and a PaperBroker call. All
-disk I/O (journal fsync, latch persistence) is handed to worker threads and never awaited by the
+frozen forward rules, an O(1) per-symbol quote read, a Decimal limit, and an intent-only recorder.
+All disk I/O (journal fsync, latch persistence) is handed to worker threads and never awaited by the
 decision. The latch is mirrored in memory and re-read from disk at 1 Hz; a trip is applied to the
 mirror before it is persisted, so a trip can never be slower than its own write.
 
-Paper only. The only order sinks are PaperBroker and ReviewOnlyBroker.
+Paper only. The only sinks are PaperIntentBroker and ReviewOnlyBroker.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import io
 import json
 import logging
 import math
 import os
 import queue
 import socket
+import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
+from typing import NoReturn
 
 from .alerts import Page, Pager
-from .broker import ExecutionMode, ExecutionResult, PaperBroker, ReviewOnlyBroker
+from .broker import ExecutionMode, ExecutionResult, PaperIntentBroker, Quote, ReviewOnlyBroker
 from .config import (
     ALLOWED_CHANNEL_IDS,
     CHANNELS,
     EXECUTION_COMPONENT,
     EXECUTION_LIMITS,
+    GUILD_ID,
     MARKET_TZ,
     STALE_POLICY,
     ExecutionLimits,
@@ -42,12 +47,20 @@ from .config import (
     StalePolicy,
 )
 from .domain import Effect, EffectKind, EventKind, RawDiscordMessage
-from .execution_model import CallSpec, EntrySchedule, Track, entry_schedule, track_for
+from .execution_model import (
+    CallSpec,
+    EntrySchedule,
+    Track,
+    entry_schedule,
+    strict_paper_schedule,
+    track_for,
+)
 from .fail_safe_control import NoTradeSafetyLatch, SafetyMode
 from .fastpath import QuoteCache
 from .health import FeedHealthMonitor
 from .parser import parse_message
 from .pricing import guarded_entry_limit, reference_price
+from .session_calendar import session_hours
 
 LOGGER = logging.getLogger(__name__)
 _OK_CHANNEL_ID = CHANNELS["options-king"]
@@ -56,12 +69,176 @@ _OK_CHANNEL_ID = CHANNELS["options-king"]
 # --------------------------------------------------------------------------- journal (off-path)
 
 
-class Journal:
-    """Append-only JSONL journal written and fsync'd by one dedicated thread.
+MAX_PAPER_JOURNAL_BYTES = 64 * 1024 * 1024
+MAX_PAPER_RECORD_BYTES = 256 * 1024
 
-    ``submit`` is a lock-free enqueue; the decision never waits for the disk. ``on_durable`` (if
-    given) is invoked from the writer thread with the record's ``seq`` after its fsync, which is
-    how the durable-ack latency is measured separately from decision latency.
+
+class JournalError(RuntimeError):
+    """The paper evidence stream cannot be trusted to persist."""
+
+
+def journal_receipt_path(path: Path) -> Path:
+    return path.with_name(path.name + ".receipt.json")
+
+
+def journal_checkpoint_path(path: Path) -> Path:
+    return path.with_name(path.name + ".checkpoint.json")
+
+
+def decode_paper_record(line: bytes) -> dict[str, object]:
+    """Reject ambiguous JSON even if a caller recomputes an unkeyed receipt."""
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in items:
+            if key in result:
+                raise JournalError("journal_duplicate_json_key")
+            result[key] = value
+        return result
+
+    def constant(_: str) -> object:
+        raise JournalError("journal_nonfinite_json")
+
+    def finite_float(value: str) -> float:
+        result = float(value)
+        if not math.isfinite(result):
+            raise JournalError("journal_nonfinite_json")
+        return result
+
+    if len(line) > MAX_PAPER_RECORD_BYTES:
+        raise JournalError("journal_record_bound")
+    try:
+        row = json.loads(
+            line, object_pairs_hook=pairs, parse_constant=constant, parse_float=finite_float,
+        )
+    except (ValueError, RecursionError) as exc:
+        raise JournalError("journal_invalid_json") from exc
+    if not isinstance(row, dict):
+        raise JournalError("journal_expected_object")
+    return row
+
+
+def _journal_identity(
+    lines: Iterable[bytes], *, records: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    digest = hashlib.sha256()
+    count = 0
+    size = 0
+    try:
+        for line in lines:
+            if not line.endswith(b"\n"):
+                raise JournalError("journal_incomplete_record")
+            row = decode_paper_record(line)
+            count += 1
+            if (
+                not isinstance(row, dict) or type(row.get("seq")) is not int
+                or row["seq"] != count
+            ):
+                raise JournalError("journal_sequence_mismatch")
+            size += len(line)
+            if size > MAX_PAPER_JOURNAL_BYTES:
+                raise JournalError("journal_read_bound_exceeded")
+            digest.update(line)
+            if records is not None:
+                records.append(row)
+    except (OSError, ValueError) as exc:
+        raise JournalError(f"journal_read:{type(exc).__name__}") from exc
+    return {
+        "schema": "scorpion.paper-intent-journal-receipt.v1",
+        "authority": "PAPER_INTENT_ONLY",
+        "records": count,
+        "bytes": size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def journal_identity_bytes(data: bytes) -> dict[str, object]:
+    return _journal_identity(io.BytesIO(data))
+
+
+def journal_identity(path: Path) -> dict[str, object]:
+    """Verify the framing and sequence while computing an exact-byte identity."""
+    try:
+        with path.open("rb") as handle:
+            return _journal_identity(iter(lambda: handle.readline(MAX_PAPER_RECORD_BYTES + 1), b""))
+    except OSError as exc:
+        raise JournalError(f"journal_read:{type(exc).__name__}") from exc
+
+
+def _read_receipt(path: Path) -> dict[str, object]:
+    with journal_receipt_path(path).open("rb") as handle:
+        raw = handle.read(65537)
+        if len(raw) > 65536:
+            raise JournalError("journal_receipt_bound")
+        return decode_paper_record(raw)
+
+
+def verify_paper_journal(path: Path) -> dict[str, object]:
+    """A receipt proves clean journal close and byte identity, not market fills."""
+    try:
+        receipt = _read_receipt(path)
+    except (OSError, ValueError) as exc:
+        raise JournalError("journal_receipt_missing_or_invalid") from exc
+    actual = journal_identity(path)
+    if receipt != actual:
+        raise JournalError("journal_receipt_mismatch")
+    return actual
+
+
+def read_verified_paper_records(
+    path: Path, *, max_bytes: int = MAX_PAPER_JOURNAL_BYTES,
+) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
+    """Read exactly the verified bytes once; consumers cannot race a second journal read."""
+    if not 0 < max_bytes <= MAX_PAPER_JOURNAL_BYTES:
+        raise ValueError("journal read limit outside supported bound")
+    try:
+        receipt = _read_receipt(path)
+        with path.open("rb") as handle:
+            raw = handle.read(max_bytes + 1)
+    except (OSError, ValueError) as exc:
+        raise JournalError("journal_receipt_missing_or_invalid") from exc
+    if len(raw) > max_bytes:
+        raise JournalError("journal_read_bound_exceeded")
+    records: list[dict[str, object]] = []
+    identity = _journal_identity(io.BytesIO(raw), records=records)
+    if receipt != identity:
+        raise JournalError("journal_receipt_mismatch")
+    return identity, tuple(records)
+
+
+def _fsync_directory(path: Path) -> None:
+    # systemd deployment is POSIX. Other platforms retain file fsync but do not
+    # claim power-loss durability of directory-entry updates.
+    if os.name == "posix":
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _write_checkpoint(path: Path, payload: dict[str, object]) -> None:
+    """Publish a durable-prefix pointer only after the journal itself was fsync'd."""
+    target = journal_checkpoint_path(path)
+    descriptor, name = tempfile.mkstemp(prefix=target.name + ".", dir=target.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        _fsync_directory(target.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+class Journal:
+    """Bounded asynchronous writer. Refuse backlog, writer failure and silent restart.
+
+    Existing files are never appended to: the session cannot yet restore working calls.
+    Successful close proves that the writer drained its queue and fsync'd the records.
+    This is paper-only; real external effects require a durable admission first.
     """
 
     def __init__(
@@ -70,52 +247,175 @@ class Journal:
         *,
         on_durable: Callable[[int, int], None] | None = None,
         batch: int = 64,
+        max_pending: int = 8192,
+        max_bytes: int = MAX_PAPER_JOURNAL_BYTES,
+        max_pending_bytes: int = 8 * 1024 * 1024,
+        require_lossless: bool = False,
     ) -> None:
+        if batch <= 0 or max_pending <= 0 or not 0 < max_bytes <= MAX_PAPER_JOURNAL_BYTES:
+            raise ValueError("invalid journal batch or capacity")
+        if not 0 < max_pending_bytes <= MAX_PAPER_JOURNAL_BYTES:
+            raise ValueError("invalid pending byte capacity")
+        self._max_bytes = max_bytes
+        self._max_pending_bytes = max_pending_bytes
+        self._require_lossless = require_lossless
+        self._admitted_bytes = 0
+        self._durable_bytes = 0
+        self._admission_failure: str | None = None
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._queue: queue.SimpleQueue[dict[str, object] | None] = queue.SimpleQueue()
+        self._queue: queue.Queue[tuple[int, bytes] | None] = queue.Queue(maxsize=max_pending)
         self._on_durable = on_durable
         self._batch = batch
         self._seq = 0
+        self._closed = False
+        self._failure: str | None = None
+        self._completed: dict[str, object] | None = None
+        self._ready = threading.Event()
+        self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, name="exec-journal", daemon=True)
         self._thread.start()
+        if not self._ready.wait(5.0):
+            raise JournalError("journal_start_timeout")
+        self.check()
+
+    def check(self) -> None:
+        if self._failure is not None:
+            raise JournalError(self._failure)
+        if self._admission_failure is not None:
+            raise JournalError(self._admission_failure)
+
+    def _refuse_admission(self, reason: str) -> NoReturn:
+        if self._require_lossless:
+            self._admission_failure = reason
+        raise JournalError(reason)
 
     def submit(self, record: dict[str, object]) -> int:
-        self._seq += 1
-        record["seq"] = self._seq
-        self._queue.put(record)
-        return self._seq
+        with self._lock:
+            self.check()
+            if self._closed:
+                raise JournalError("journal_closed")
+            next_seq = self._seq + 1
+            # Serialize before handing ownership to the worker: nested caller mutations
+            # cannot change what was admitted. NaN is not valid research evidence.
+            try:
+                encoded = (
+                    json.dumps({**record, "seq": next_seq}, sort_keys=True, default=str,
+                               allow_nan=False) + "\n"
+                ).encode("utf-8")
+            except (TypeError, ValueError, RecursionError):
+                self._refuse_admission("journal_invalid_record")
+            if len(encoded) > MAX_PAPER_RECORD_BYTES:
+                self._refuse_admission("journal_record_bound")
+            if self._admitted_bytes + len(encoded) > self._max_bytes:
+                self._refuse_admission("journal_total_byte_bound")
+            if self._admitted_bytes - self._durable_bytes + len(encoded) > self._max_pending_bytes:
+                self._refuse_admission("journal_pending_byte_bound")
+            try:
+                self._queue.put_nowait((next_seq, encoded))
+            except queue.Full:
+                self._refuse_admission("journal_backpressure")
+            self._seq = next_seq
+            self._admitted_bytes += len(encoded)
+            return next_seq
 
     def _run(self) -> None:
-        with self.path.open("a", encoding="utf-8") as handle:
-            while True:
-                item = self._queue.get()
-                pending = [item]
-                while len(pending) < self._batch:
-                    try:
-                        pending.append(self._queue.get_nowait())
-                    except queue.Empty:
-                        break
-                stop = False
-                written: list[int] = []
-                for record in pending:
-                    if record is None:
-                        stop = True
-                        continue
-                    handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
-                    written.append(int(str(record["seq"])))
-                handle.flush()
-                os.fsync(handle.fileno())
-                if self._on_durable is not None:
-                    durable_ns = time.perf_counter_ns()
-                    for seq in written:
-                        self._on_durable(seq, durable_ns)
-                if stop:
-                    return
+        digest = hashlib.sha256()
+        count = 0
+        size = 0
+        try:
+            if (
+                journal_checkpoint_path(self.path).exists()
+                or journal_receipt_path(self.path).exists()
+            ):
+                raise FileExistsError("journal sidecar already exists")
+            with self.path.open("xb") as handle:
+                self._ready.set()
+                while True:
+                    pending = [self._queue.get()]
+                    while len(pending) < self._batch:
+                        try:
+                            pending.append(self._queue.get_nowait())
+                        except queue.Empty:
+                            break
+                    stop = False
+                    written: list[int] = []
+                    for record in pending:
+                        if record is None:
+                            stop = True
+                            continue
+                        seq, encoded = record
+                        if seq != count + 1:
+                            raise JournalError("journal_writer_sequence")
+                        if handle.write(encoded) != len(encoded):
+                            raise JournalError("journal_short_write")
+                        digest.update(encoded)
+                        count += 1
+                        size += len(encoded)
+                        written.append(seq)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    checkpoint: dict[str, object] = {
+                        "schema": "scorpion.paper-intent-journal-receipt.v1",
+                        "authority": "PAPER_INTENT_ONLY",
+                        "records": count,
+                        "bytes": size,
+                        "sha256": digest.hexdigest(),
+                    }
+                    _write_checkpoint(self.path, checkpoint)
+                    with self._lock:
+                        self._durable_bytes = size
+                    if self._on_durable is not None:
+                        durable_ns = time.perf_counter_ns()
+                        for seq in written:
+                            self._on_durable(seq, durable_ns)
+                    if stop:
+                        self._completed = checkpoint
+                        return
+        except Exception as exc:
+            self._failure = f"journal_writer:{type(exc).__name__}"
+        finally:
+            self._ready.set()
 
     def close(self, timeout_s: float = 5.0) -> None:
-        self._queue.put(None)
-        self._thread.join(timeout_s)
+        if timeout_s <= 0:
+            raise ValueError("journal close timeout must be positive")
+        with self._lock:
+            if self._failure is not None:
+                raise JournalError(self._failure)
+            if self._closed:
+                if self._thread.is_alive():
+                    raise JournalError("journal_close_incomplete")
+                self.check()
+                verify_paper_journal(self.path)
+                return
+            self._closed = True
+        deadline = time.monotonic() + timeout_s
+        try:
+            self._queue.put(None, timeout=timeout_s)
+        except queue.Full as exc:
+            raise JournalError("journal_close_backpressure") from exc
+        self._thread.join(max(0.0, deadline - time.monotonic()))
+        if self._thread.is_alive():
+            raise JournalError("journal_close_timeout")
+        # A loss-intolerant admission fault drains the durable prefix but never seals it.
+        self.check()
+        if (
+            self._completed is None or self._completed["records"] != self._seq
+            or self._completed["bytes"] != self._admitted_bytes
+            or journal_identity(self.path) != self._completed
+        ):
+            raise JournalError("journal_close_identity_mismatch")
+        # Never overwrite a prior receipt. A torn receipt fails verification.
+        try:
+            with journal_receipt_path(self.path).open("x", encoding="utf-8") as handle:
+                json.dump(self._completed, handle, sort_keys=True, allow_nan=False)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            _fsync_directory(self.path.parent)
+        except OSError as exc:
+            raise JournalError("journal_receipt_write_failed") from exc
 
 
 # ------------------------------------------------------------------------------ latch mirror
@@ -170,6 +470,7 @@ class WorkingCall:
     limit: Decimal | None = None
     chase_limit: Decimal | None = None
     status: str = "scheduled"
+    intended_qty: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +524,9 @@ class PaperExecutionSession:
         limits: ExecutionLimits = EXECUTION_LIMITS,
         mode: ExecutionMode = ExecutionMode.PAPER,
         allowed_author_ids: frozenset[str] | None = None,
+        strict_runtime: bool = False,
+        capture_market: bool = False,
+        max_market_records: int = 80_000,
         mono_ns: Callable[[], int] = time.monotonic_ns,
         now_utc: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -237,10 +541,18 @@ class PaperExecutionSession:
         self.limits = limits
         self.mode = mode
         self.allowed_author_ids = allowed_author_ids
+        if capture_market and (journal is None or not strict_runtime or max_market_records <= 0):
+            raise ValueError("market capture requires a strict journaled session")
+        self.strict_runtime = strict_runtime
+        self.capture_market = capture_market
+        self.max_market_records = max_market_records
+        self.market_records = 0
+        self._capture_until: dict[str, datetime] = {}
         self._mono_ns = mono_ns
         self._now_utc = now_utc
-        self._broker = PaperBroker() if mode is ExecutionMode.PAPER else ReviewOnlyBroker()
+        self._broker = PaperIntentBroker() if mode is ExecutionMode.PAPER else ReviewOnlyBroker()
         self.working: dict[str, WorkingCall] = {}
+        self._seen_creates: dict[str, tuple[str, str, str, str]] = {}
         self.orders: list[ExecutionResult] = []
         self.latency = LatencyRecorder()
 
@@ -249,7 +561,14 @@ class PaperExecutionSession:
         started = time.perf_counter_ns() if recv_ns is None else recv_ns
         decision = self._decide(raw, started)
         self.latency.add("post_to_decision", decision.latency_ns)
-        self._journal({"kind": "decision", **_decision_record(decision)})
+        self._journal({
+            "kind": "decision", **_decision_record(decision),
+            "source_ts_utc": raw.source_ts_utc.isoformat(),
+            "received_ts_utc": raw.received_ts_utc.isoformat(),
+            "revision_id": raw.revision_id,
+            "content_sha256": raw.content_sha256,
+            "rules_sha256": self.rules.sha256,
+        })
         return decision
 
     def _decide(self, raw: RawDiscordMessage, started: int) -> Decision:
@@ -271,10 +590,26 @@ class PaperExecutionSession:
                 entry,
             )
 
+        if raw.guild_id != GUILD_ID:
+            return done("ignore:guild")
         if raw.channel_id not in ALLOWED_CHANNEL_IDS or raw.channel_id != _OK_CHANNEL_ID:
             return done("ignore:channel")
         if raw.edited_ts_utc is not None:
             return done("ignore:edit_revision")
+        if raw.source_ts_utc > raw.received_ts_utc:
+            return done("skip:noncausal_signal")
+        if self.allowed_author_ids is not None and raw.author_id not in self.allowed_author_ids:
+            return done("ignore:unauthorized_author")
+        identity = (
+            raw.revision_id, raw.author_id, raw.channel_id, raw.source_ts_utc.isoformat(),
+        )
+        previous = self._seen_creates.get(raw.message_id)
+        if previous is not None:
+            if previous != identity:
+                self.latch.trip("conflicting_signal_create")
+                return done("blocked:conflicting_signal_create")
+            return done("ignore:duplicate_message")
+        self._seen_creates[raw.message_id] = identity
         event = parse_message(raw, self.allowed_author_ids)
         if event.kind is not EventKind.ENTRY or event.ticker is None:
             return done(f"ignore:{event.kind.value.lower()}")
@@ -295,6 +630,20 @@ class PaperExecutionSession:
             seen_time_et=seen_et.strftime("%H:%M"),
         )
         schedule = entry_schedule(raw.source_ts_utc, raw.received_ts_utc, self.rules)
+        if self.strict_runtime:
+            today = self._now_utc().astimezone(MARKET_TZ).date()
+            hours = session_hours(today)
+            if post_et.date() != today or seen_et.date() != today or hours is None:
+                return done("skip:wrong_session", ticker=ticker)
+            if raw.received_ts_utc > self._now_utc():
+                return done("skip:future_receipt", ticker=ticker)
+            try:
+                schedule = strict_paper_schedule(
+                    raw.source_ts_utc, raw.received_ts_utc, self.rules,
+                    session_open=hours[0], session_close=hours[1],
+                )
+            except ValueError:
+                return done("skip:outside_paper_window", ticker=ticker)
         track = track_for(raw.source_ts_utc, self.rules)
         if schedule.late:
             return done("skip:late_gt15min", ticker=ticker, track=track.value, call_id=spec.call_id)
@@ -312,12 +661,23 @@ class PaperExecutionSession:
         working = self.working.get(call_id)
         if working is None or working.track is not Track.MAIN:
             return None
+        if working.status != ("limit_intent" if chase else "scheduled"):
+            return None
+        if self.strict_runtime:
+            due = working.schedule.chase_ts if chase else working.schedule.entry_ts
+            now = self._now_utc()
+            if not due <= now <= due + timedelta(seconds=3):
+                working.status = "skip:entry_timer_outside_budget"
+                self._journal({"kind": "skip", "call_id": call_id, "reason": working.status})
+                return None
         if not self.latch.armed:
             working.status = "blocked:no_trade_latch"
             self._journal({"kind": "skip", "call_id": call_id, "reason": working.status})
             return None
+        observed_mono_ns = self._mono_ns()
         quote = self.cache.fresh(
-            working.spec.ticker, max_age_ms=self.stale.quote_max_age_ms, now_mono_ns=self._mono_ns()
+            working.spec.ticker, max_age_ms=self.stale.quote_max_age_ms,
+            now_mono_ns=observed_mono_ns,
         )
         anchor = working.limit if chase and working.limit is not None else reference_price(quote)
         limit = (
@@ -335,7 +695,11 @@ class PaperExecutionSession:
         if not chase:
             # First limit rests at the current price (R1); it is not lifted to the ask.
             limit = min(limit, anchor) if anchor is not None else limit
-        quantity = max(1, int(self.rules.paper_notional_usd // limit))
+        quantity = int(self.rules.paper_notional_usd // limit)
+        if quantity <= 0:
+            working.status = "skip:below_one_share_budget"
+            self._journal({"kind": "skip", "call_id": call_id, "reason": working.status})
+            return None
         effect = Effect(
             EffectKind.PROPOSE_OPEN,
             working.spec.ticker,
@@ -351,6 +715,7 @@ class PaperExecutionSession:
         else:
             working.limit = limit
             working.status = "limit_intent"
+        working.intended_qty = quantity
         self.orders.append(result)
         elapsed = time.perf_counter_ns() - started
         self.latency.add("entry_to_intent", elapsed)
@@ -360,30 +725,76 @@ class PaperExecutionSession:
                 "call_id": call_id,
                 "ticker": working.spec.ticker,
                 "chase": chase,
+                "conditional_on": "initial_unfilled" if chase else None,
                 "limit": str(limit),
                 "quantity": quantity,
                 "status": result.status,
                 "mode": result.mode.value,
+                "rules_sha256": self.rules.sha256,
+                "reference_price": str(anchor),
+                "scheduled_entry_ts_utc": working.schedule.entry_ts.isoformat(),
+                "scheduled_chase_ts_utc": working.schedule.chase_ts.isoformat(),
+                "scheduled_exit_ts_utc": working.schedule.exit_ts.isoformat(),
+                "quote_evidence": (
+                    {
+                        "bid": str(quote.bid), "ask": str(quote.ask),
+                        "last": str(quote.last) if quote.last is not None else None,
+                        "observed_ts_utc": quote.observed_ts_utc.isoformat(),
+                        "ts_event_ns": quote.ts_event_ns,
+                        "recv_mono_ns": quote.recv_mono_ns,
+                        "source_age_ns": quote.source_age_ns,
+                        "decision_mono_ns": observed_mono_ns,
+                    }
+                    if isinstance(quote, Quote) else None
+                ),
                 "latency_us": elapsed // 1_000,
             }
         )
+        if self.capture_market:
+            until = working.schedule.exit_ts + timedelta(seconds=60)
+            self._capture_until[working.spec.ticker] = max(
+                until, self._capture_until.get(working.spec.ticker, until),
+            )
         return result
+
+    def on_market_observation(self, record: dict[str, object]) -> None:
+        """Bounded loss-intolerant capture for symbols with a recorded intention."""
+        if not self.capture_market:
+            return
+        symbol = record.get("symbol")
+        if symbol is not None:
+            if not isinstance(symbol, str) or symbol not in self._capture_until:
+                return
+            if self._now_utc() > self._capture_until[symbol]:
+                return
+        if self.market_records >= self.max_market_records:
+            raise JournalError("market_capture_record_bound")
+        self._journal(record)
+        self.market_records += 1
 
     def on_exit_due(self, call_id: str) -> ExecutionResult | None:
         working = self.working.get(call_id)
-        if working is None or working.limit is None:
+        if (
+            working is None or working.limit is None or working.intended_qty <= 0
+            or working.status == "exit_intent"
+        ):
             return None
         effect = Effect(EffectKind.PROPOSE_CLOSE, working.spec.ticker, call_id, 1, "fwd-v2 60m exit")
-        result = self._broker.execute(
-            effect, max(1, int(self.rules.paper_notional_usd // working.limit)), None
-        )
+        result = self._broker.execute(effect, working.intended_qty, None)
         working.status = "exit_intent"
         self.orders.append(result)
-        self._journal({"kind": "exit", "call_id": call_id, "status": result.status})
+        self._journal({
+            "kind": "conditional_exit_intent", "call_id": call_id,
+            "status": result.status, "conditional_on": "confirmed_entry_fill",
+            "quantity": working.intended_qty,
+            "scheduled_exit_ts_utc": working.schedule.exit_ts.isoformat(),
+        })
         return result
 
     # -- health -------------------------------------------------------------------------------
     def health_tick(self, monitor: FeedHealthMonitor, *, session_open: bool) -> list[str]:
+        if self.journal is not None:
+            self.journal.check()
         watched = [w.spec.ticker for w in self.working.values() if w.track is Track.MAIN]
         health = monitor.evaluate(
             now_mono_ns=self._mono_ns(), session_open=session_open, watched=watched
@@ -446,8 +857,9 @@ async def supervise(
     session_open: Callable[[], bool],
     stop_at_utc: datetime,
     tick_s: float = 1.0,
+    ingest_run: Callable[[], object] | None = None,
 ) -> None:
-    """Run feed, ingest consumer, health (1 Hz) and pager in one TaskGroup.
+    """Run feed, ingress, consumer, health (1 Hz) and pager in one TaskGroup.
 
     Any task crash latches NO_TRADE, pages once and re-raises so systemd restarts the unit; the
     restart comes back NO_TRADE because only a person clears the latch.
@@ -491,10 +903,16 @@ async def supervise(
                 raise _SessionComplete
             await asyncio.sleep(tick_s)
 
+    async def required_component(factory: Callable[[], object], name: str) -> None:
+        await _as_coroutine(factory)
+        raise RuntimeError(f"required_component_ended:{name}")
+
     try:
         async with asyncio.TaskGroup() as tg:
             if feed_run is not None:
-                tg.create_task(_as_coroutine(feed_run), name="databento-feed")
+                tg.create_task(required_component(feed_run, "feed"), name="databento-feed")
+            if ingest_run is not None:
+                tg.create_task(required_component(ingest_run, "ingress"), name="discord-ingest")
             tg.create_task(consume(), name="call-ingest-decision")
             tg.create_task(health(), name="health-1hz")
             tg.create_task(session.pager.run(), name="pager")

@@ -9,7 +9,7 @@ import logging
 import os
 import random
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -104,6 +104,7 @@ class FeedStats:
     rejected_quote: int = 0
     rejected_symbol: int = 0
     timestamp_conflicts: int = 0
+    first_usable_recv_wall_ns: int | None = None
     delays_s: list[float] = field(default_factory=list)
 
 
@@ -228,6 +229,8 @@ class DatabentoFeed:
             recv_mono_ns=received,
             source_age_ns=age_ns,
         )
+        if self.stats.first_usable_recv_wall_ns is None:
+            self.stats.first_usable_recv_wall_ns = received_wall
         self._observe({
             "kind": "market_quote", "symbol": message.symbol,
             "ts_event_ns": message.ts_event_ns, "recv_wall_ns": received_wall,
@@ -293,7 +296,9 @@ class DatabentoLiveClient:
                 dataset=self.dataset, schema=self.schema, symbols=list(symbols), snapshot=False
             )
 
-    async def stream(self, symbols: Sequence[str], *, snapshot: bool) -> AsyncIterator[FeedMessage]:
+    async def stream(
+        self, symbols: Sequence[str], *, snapshot: bool,
+    ) -> AsyncGenerator[FeedMessage]:
         import databento  # optional live dependency
 
         # Databento snapshots are MBO-only; MBP reconnects never imply restored continuity.

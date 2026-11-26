@@ -5,11 +5,12 @@ import json
 import math
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 
 _GENESIS = "0" * 64
+_PROSPECTIVE_BUDGET_UNITS = 50_000_000  # billionths of alpha; lifetime 0.05
 
 
 class HypothesisStatus(StrEnum):
@@ -137,6 +138,47 @@ CREATE TABLE IF NOT EXISTS research_hypothesis_integrity_state (
     head_event_hash TEXT NOT NULL,
     chain_hash TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS prospective_study_reservations (
+    study_sha256 TEXT PRIMARY KEY,
+    root_sha256 TEXT NOT NULL,
+    family_id TEXT NOT NULL,
+    study_kind TEXT NOT NULL,
+    alpha_units INTEGER NOT NULL CHECK(alpha_units > 0),
+    session_dates_json TEXT NOT NULL,
+    approval_sha256 TEXT NOT NULL,
+    approval_raw_hex TEXT NOT NULL,
+    approval_signature TEXT NOT NULL,
+    previous_chain_hash TEXT NOT NULL,
+    reserved_ts_utc TEXT NOT NULL,
+    record_hash TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS prospective_study_finalizations (
+    study_sha256 TEXT PRIMARY KEY,
+    root_sha256 TEXT NOT NULL,
+    dossier_sha256 TEXT NOT NULL UNIQUE,
+    dossier_json TEXT NOT NULL,
+    dossier_json_sha256 TEXT NOT NULL,
+    approval_sha256 TEXT NOT NULL,
+    approval_raw_hex TEXT NOT NULL,
+    approval_signature TEXT NOT NULL,
+    previous_chain_hash TEXT NOT NULL,
+    disposition TEXT NOT NULL,
+    evidence_keys_json TEXT NOT NULL,
+    finalized_ts_utc TEXT NOT NULL,
+    record_hash TEXT NOT NULL UNIQUE
+);
+CREATE TRIGGER IF NOT EXISTS prospective_study_reservations_no_update
+BEFORE UPDATE ON prospective_study_reservations
+BEGIN SELECT RAISE(ABORT,'prospective_study_append_only'); END;
+CREATE TRIGGER IF NOT EXISTS prospective_study_reservations_no_delete
+BEFORE DELETE ON prospective_study_reservations
+BEGIN SELECT RAISE(ABORT,'prospective_study_append_only'); END;
+CREATE TRIGGER IF NOT EXISTS prospective_study_finalizations_no_update
+BEFORE UPDATE ON prospective_study_finalizations
+BEGIN SELECT RAISE(ABORT,'prospective_study_append_only'); END;
+CREATE TRIGGER IF NOT EXISTS prospective_study_finalizations_no_delete
+BEFORE DELETE ON prospective_study_finalizations
+BEGIN SELECT RAISE(ABORT,'prospective_study_append_only'); END;
 CREATE TRIGGER IF NOT EXISTS research_hypotheses_no_update
 BEFORE UPDATE ON research_hypotheses
 BEGIN SELECT RAISE(ABORT,'research_hypotheses_append_only'); END;
@@ -588,15 +630,27 @@ def evaluate_hypothesis_reuse(
 
 
 def verify_hypothesis_memory(path: str | Path) -> HypothesisMemoryVerification:
-    with sqlite3.connect(str(path)) as db:
+    db = sqlite3.connect(str(path))
+    try:
         db.row_factory = sqlite3.Row
         db.executescript(_SCHEMA)
-        hypotheses = db.execute("SELECT * FROM research_hypotheses").fetchall()
-        resolutions = db.execute("SELECT * FROM research_hypothesis_resolutions").fetchall()
-        events = db.execute("SELECT * FROM research_hypothesis_events ORDER BY sequence").fetchall()
-        checkpoint = db.execute(
-            "SELECT * FROM research_hypothesis_integrity_state WHERE singleton_id=1"
-        ).fetchone()
+        db.execute("BEGIN")
+        return _verify_hypothesis_memory_connection(db)
+    finally:
+        db.close()
+
+
+def _verify_hypothesis_memory_connection(
+    db: sqlite3.Connection,
+) -> HypothesisMemoryVerification:
+    hypotheses = db.execute("SELECT * FROM research_hypotheses").fetchall()
+    resolutions = db.execute("SELECT * FROM research_hypothesis_resolutions").fetchall()
+    events = db.execute("SELECT * FROM research_hypothesis_events ORDER BY sequence").fetchall()
+    checkpoint = db.execute(
+        "SELECT * FROM research_hypothesis_integrity_state WHERE singleton_id=1"
+    ).fetchone()
+    reservations = db.execute("SELECT * FROM prospective_study_reservations").fetchall()
+    finalizations = db.execute("SELECT * FROM prospective_study_finalizations").fetchall()
     failures: list[str] = []
     records: dict[str, str] = {}
     for row in hypotheses:
@@ -670,6 +724,75 @@ def verify_hypothesis_memory(path: str | Path) -> HypothesisMemoryVerification:
         if resolution_item.resolution_id != expected_resolution_id:
             failures.append("hypothesis_resolution_id_mismatch")
         records[resolution_item.resolution_id] = resolution_item.record_hash
+    prospective_records: dict[str, tuple[str, str, str]] = {}
+    roots: set[str] = set()
+    reserved_days: set[str] = set()
+    reservation_by_study: dict[str, sqlite3.Row] = {}
+    units = 0
+    for row in reservations:
+        study = str(row["study_sha256"])
+        identifier = _hash(_prospective_reservation_payload(row))
+        if identifier != str(row["record_hash"]):
+            failures.append("prospective_reservation_hash_mismatch")
+        roots.add(str(row["root_sha256"]))
+        units += int(row["alpha_units"])
+        days = json.loads(str(row["session_dates_json"]))
+        if not isinstance(days, list) or not all(isinstance(day, str) for day in days):
+            failures.append("prospective_invalid_dates")
+            days = []
+        if not days or len(days) != len(set(days)) or days != sorted(days):
+            failures.append("prospective_invalid_dates")
+        if reserved_days.intersection(days):
+            failures.append("prospective_session_reuse")
+        reserved_days.update(days)
+        if (
+            int(row["alpha_units"]) <= 0
+            or not _approval_record_valid(row)
+            or row["study_kind"] not in ("COHORT", "PAIRED_ENTRY_TRIAL")
+            or any(not _is_digest(row[key]) for key in (
+                "study_sha256", "root_sha256", "approval_sha256", "previous_chain_hash",
+            ))
+        ):
+            failures.append("prospective_reservation_invalid")
+        reservation_by_study[study] = row
+        records[identifier] = identifier
+        prospective_records[identifier] = (
+            "PROSPECTIVE_RESERVATION", str(row["previous_chain_hash"]), str(row["reserved_ts_utc"]),
+        )
+    if len(roots) > 1 or units > _PROSPECTIVE_BUDGET_UNITS:
+        failures.append("prospective_root_or_budget_conflict")
+    finalized_by_id: dict[str, str] = {}
+    final_evidence: set[str] = set()
+    for row in finalizations:
+        identifier = _hash(_prospective_finalization_payload(row))
+        reservation = reservation_by_study.get(str(row["study_sha256"]))
+        keys = json.loads(str(row["evidence_keys_json"]))
+        if not isinstance(keys, list) or not all(_is_digest(key) for key in keys):
+            failures.append("prospective_evidence_identity_invalid")
+            keys = []
+        if len(keys) != len(set(keys)) or final_evidence.intersection(keys):
+            failures.append("prospective_cross_study_evidence_reuse")
+        final_evidence.update(keys)
+        if (
+            identifier != str(row["record_hash"]) or reservation is None
+            or not _approval_record_valid(row) or not _dossier_record_valid(row)
+            or row["root_sha256"] != reservation["root_sha256"]
+            or row["finalized_ts_utc"] < reservation["reserved_ts_utc"]
+            or row["disposition"] not in (
+                "PAPER_RESEARCH_REVIEWED", "INCONCLUSIVE", "REJECTED",
+            )
+            or any(not _is_digest(row[key]) for key in (
+                "dossier_sha256", "approval_sha256", "previous_chain_hash",
+            ))
+        ):
+            failures.append("prospective_finalization_invalid")
+        records[identifier] = identifier
+        prospective_records[identifier] = (
+            "PROSPECTIVE_FINALIZATION", str(row["previous_chain_hash"]),
+            str(row["finalized_ts_utc"]),
+        )
+        if reservation is not None:
+            finalized_by_id[identifier] = str(reservation["record_hash"])
     previous = _GENESIS
     chain = _GENESIS
     covered: set[str] = set()
@@ -683,6 +806,16 @@ def verify_hypothesis_memory(path: str | Path) -> HypothesisMemoryVerification:
         record_hash = str(row["record_hash"])
         if records.get(record_id) != record_hash:
             failures.append("hypothesis_event_record_mismatch")
+        if record_id in covered:
+            failures.append("hypothesis_event_record_replayed")
+        prospective = prospective_records.get(record_id)
+        if prospective is not None:
+            if (str(row["event_kind"]), chain, str(row["created_ts_utc"])) != prospective:
+                failures.append("prospective_event_binding_mismatch")
+            if record_id in finalized_by_id and finalized_by_id[record_id] not in covered:
+                failures.append("prospective_finalization_precedes_reservation")
+        elif str(row["event_kind"]).startswith("PROSPECTIVE_"):
+            failures.append("prospective_event_missing_record")
         created = datetime.fromisoformat(str(row["created_ts_utc"])).astimezone(UTC)
         expected_hash = _hash(
             {
@@ -719,3 +852,346 @@ def verify_hypothesis_memory(path: str | Path) -> HypothesisMemoryVerification:
         valid=not unique,
         failures=unique,
     )
+
+
+def _is_digest(value: object) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 64
+        and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+def _approval_record_valid(row: sqlite3.Row | dict[str, object]) -> bool:
+    try:
+        raw = bytes.fromhex(str(row["approval_raw_hex"]))
+        signature = bytes.fromhex(str(row["approval_signature"]))
+        return (
+            len(signature) == 64 and 0 < len(raw) <= 65536
+            and row["approval_sha256"] == _hash([hashlib.sha256(raw).hexdigest(), signature.hex()])
+        )
+    except ValueError:
+        return False
+
+
+def _dossier_record_valid(row: sqlite3.Row | dict[str, object]) -> bool:
+    try:
+        raw = str(row["dossier_json"])
+        payload = json.loads(raw)
+        return (
+            isinstance(payload, dict) and payload.get("dossier_sha256") == row["dossier_sha256"]
+            and payload.get("study_sha256") == row["study_sha256"]
+            and payload.get("root_sha256") == row["root_sha256"]
+            and payload.get("ledger_chain_hash") == row["previous_chain_hash"]
+            and hashlib.sha256(raw.encode()).hexdigest() == row["dossier_json_sha256"]
+        )
+    except ValueError:
+        return False
+
+
+def _prospective_reservation_payload(row: sqlite3.Row | dict[str, object]) -> dict[str, object]:
+    return {
+        "version": "prospective-reservation-v1",
+        **{key: row[key] for key in (
+            "study_sha256", "root_sha256", "family_id", "study_kind", "alpha_units",
+            "session_dates_json", "approval_sha256", "approval_raw_hex", "approval_signature",
+            "previous_chain_hash", "reserved_ts_utc",
+        )},
+    }
+
+
+def _prospective_finalization_payload(row: sqlite3.Row | dict[str, object]) -> dict[str, object]:
+    return {
+        "version": "prospective-finalization-v1",
+        **{key: row[key] for key in (
+            "study_sha256", "root_sha256", "dossier_sha256", "dossier_json_sha256",
+            "approval_sha256", "approval_raw_hex", "approval_signature",
+            "previous_chain_hash", "disposition", "evidence_keys_json", "finalized_ts_utc",
+        )},
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class ProspectiveReservation:
+    study_sha256: str
+    root_sha256: str
+    family_id: str
+    study_kind: str
+    alpha_units: int
+    sessions: tuple[date, ...]
+    approval_sha256: str
+    reserved_ts_utc: datetime
+    record_hash: str
+    ledger_chain_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProspectiveFinalization:
+    study_sha256: str
+    dossier_sha256: str
+    disposition: str
+    approval_sha256: str
+    record_hash: str
+    ledger_chain_hash: str
+
+
+def _prospective_connection(path: Path, *, readonly: bool = False) -> sqlite3.Connection:
+    if readonly:
+        db = sqlite3.connect(
+            path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5.0, isolation_level=None,
+        )
+        db.row_factory = sqlite3.Row
+        return db
+    db = sqlite3.connect(str(path), timeout=5.0, isolation_level=None)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA synchronous=FULL")
+    db.executescript(_SCHEMA)
+    return db
+
+
+def _pinned_prospective_head(
+    db: sqlite3.Connection, expected_chain_hash: str, *, initialize: bool = False,
+) -> HypothesisMemoryVerification:
+    if not _is_digest(expected_chain_hash):
+        raise ValueError("invalid prospective ledger pin")
+    checkpoint = db.execute(
+        "SELECT 1 FROM research_hypothesis_integrity_state WHERE singleton_id=1"
+    ).fetchone()
+    if checkpoint is None and initialize:
+        if any(db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None for table in (
+            "research_hypotheses", "research_hypothesis_resolutions", "research_hypothesis_events",
+            "prospective_study_reservations", "prospective_study_finalizations",
+        )):
+            raise ValueError("prospective ledger missing checkpoint")
+        db.execute(
+            "INSERT INTO research_hypothesis_integrity_state VALUES (1,0,?,?)",
+            (_GENESIS, _GENESIS),
+        )
+    report = _verify_hypothesis_memory_connection(db)
+    if not report.valid or report.chain_hash != expected_chain_hash:
+        raise ValueError("prospective ledger integrity or external checkpoint mismatch")
+    return report
+
+
+def _read_reservation(row: sqlite3.Row, chain: str) -> ProspectiveReservation:
+    return ProspectiveReservation(
+        str(row["study_sha256"]), str(row["root_sha256"]), str(row["family_id"]),
+        str(row["study_kind"]), int(row["alpha_units"]),
+        tuple(date.fromisoformat(value) for value in json.loads(row["session_dates_json"])),
+        str(row["approval_sha256"]), datetime.fromisoformat(row["reserved_ts_utc"]),
+        str(row["record_hash"]), chain,
+    )
+
+
+def _reserve_prospective_study(
+    path: Path, *, study_sha256: str, root_sha256: str, family_id: str,
+    study_kind: str, alpha_units: int, sessions: tuple[date, ...],
+    approval_sha256: str, approval_raw_hex: str, approval_signature: str,
+    expected_chain_hash: str, now: datetime,
+) -> ProspectiveReservation:
+    """Internal persistence boundary. Caller must verify independent signed approval."""
+    if not all(_is_digest(v) for v in (study_sha256, root_sha256, approval_sha256)):
+        raise ValueError("invalid prospective identity")
+    if (
+        not family_id or study_kind not in ("COHORT", "PAIRED_ENTRY_TRIAL")
+        or type(alpha_units) is not int or not 0 < alpha_units <= _PROSPECTIVE_BUDGET_UNITS
+        or not sessions or tuple(sorted(set(sessions))) != sessions
+        or now.tzinfo is None or now.utcoffset() is None
+    ):
+        raise ValueError("invalid prospective reservation")
+    db = _prospective_connection(path)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        _pinned_prospective_head(db, expected_chain_hash, initialize=True)
+        rows = db.execute("SELECT * FROM prospective_study_reservations").fetchall()
+        requested = {day.isoformat() for day in sessions}
+        if any(str(row["root_sha256"]) != root_sha256 for row in rows):
+            raise ValueError("prospective registry root mismatch")
+        if any(str(row["study_sha256"]) == study_sha256 for row in rows):
+            raise ValueError("prospective study already reserved")
+        if any(requested.intersection(json.loads(row["session_dates_json"])) for row in rows):
+            raise ValueError("prospective session roster overlaps prior reservation")
+        if sum(int(row["alpha_units"]) for row in rows) + alpha_units > _PROSPECTIVE_BUDGET_UNITS:
+            raise ValueError("prospective global alpha budget exhausted")
+        material: dict[str, object] = {
+            "study_sha256": study_sha256, "root_sha256": root_sha256, "family_id": family_id,
+            "study_kind": study_kind, "alpha_units": alpha_units,
+            "session_dates_json": _json(sorted(requested)), "approval_sha256": approval_sha256,
+            "approval_raw_hex": approval_raw_hex, "approval_signature": approval_signature,
+            "previous_chain_hash": expected_chain_hash,
+            "reserved_ts_utc": now.astimezone(UTC).isoformat(),
+        }
+        record_hash = _hash(_prospective_reservation_payload(material))
+        db.execute(
+            "INSERT INTO prospective_study_reservations VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (*material.values(), record_hash),
+        )
+        _append_event(
+            db, event_kind="PROSPECTIVE_RESERVATION", record_id=record_hash,
+            record_hash=record_hash, created_ts_utc=now,
+        )
+        result = _verify_hypothesis_memory_connection(db)
+        if not result.valid:
+            raise ValueError("prospective reservation verification failed")
+        row = db.execute(
+            "SELECT * FROM prospective_study_reservations WHERE study_sha256=?", (study_sha256,),
+        ).fetchone()
+        db.execute("COMMIT")
+        return _read_reservation(row, result.chain_hash)
+    finally:
+        db.close()
+
+
+def read_prospective_reservation(
+    path: Path, *, study_sha256: str, root_sha256: str, expected_chain_hash: str,
+) -> ProspectiveReservation:
+    if not path.is_file():
+        raise ValueError("prospective registry unavailable")
+    db = _prospective_connection(path, readonly=True)
+    try:
+        db.execute("BEGIN")
+        head = _pinned_prospective_head(db, expected_chain_hash)
+        row = db.execute(
+            "SELECT * FROM prospective_study_reservations WHERE study_sha256=?", (study_sha256,),
+        ).fetchone()
+        if row is None or row["root_sha256"] != root_sha256:
+            raise ValueError("prospective reservation missing or wrong root")
+        if db.execute(
+            "SELECT 1 FROM prospective_study_finalizations WHERE study_sha256=?", (study_sha256,),
+        ).fetchone() is not None:
+            raise ValueError("prospective study already finalized")
+        return _read_reservation(row, head.chain_hash)
+    finally:
+        db.close()
+
+
+def _finalize_prospective_study(
+    path: Path, *, study_sha256: str, root_sha256: str, dossier_sha256: str,
+    approval_sha256: str, approval_raw_hex: str, approval_signature: str,
+    expected_chain_hash: str, disposition: str, now: datetime,
+    evidence_keys: tuple[str, ...], dossier_json: str,
+) -> ProspectiveFinalization:
+    """Internal persistence boundary for independently reviewed research, not activation."""
+    if not all(_is_digest(v) for v in (
+        study_sha256, root_sha256, dossier_sha256, approval_sha256,
+    )) or disposition not in ("PAPER_RESEARCH_REVIEWED", "INCONCLUSIVE", "REJECTED"):
+        raise ValueError("invalid prospective finalization")
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("naive finalization timestamp")
+    if tuple(sorted(set(evidence_keys))) != evidence_keys or not all(
+        _is_digest(key) for key in evidence_keys
+    ) or len(evidence_keys) > 1_000_000:
+        raise ValueError("invalid finalization evidence keys")
+    db = _prospective_connection(path)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        _pinned_prospective_head(db, expected_chain_hash)
+        reservation = db.execute(
+            "SELECT * FROM prospective_study_reservations WHERE study_sha256=?", (study_sha256,),
+        ).fetchone()
+        if reservation is None or reservation["root_sha256"] != root_sha256:
+            raise ValueError("prospective reservation missing or wrong root")
+        if db.execute(
+            "SELECT 1 FROM prospective_study_finalizations WHERE study_sha256=?", (study_sha256,),
+        ).fetchone() is not None:
+            raise ValueError("prospective study already finalized")
+        for row in db.execute("SELECT evidence_keys_json FROM prospective_study_finalizations"):
+            if set(evidence_keys).intersection(json.loads(row["evidence_keys_json"])):
+                raise ValueError("prospective cross-study evidence reuse")
+        material: dict[str, object] = {
+            "study_sha256": study_sha256, "root_sha256": root_sha256,
+            "dossier_sha256": dossier_sha256, "dossier_json": dossier_json,
+            "dossier_json_sha256": hashlib.sha256(dossier_json.encode()).hexdigest(),
+            "approval_sha256": approval_sha256, "approval_raw_hex": approval_raw_hex,
+            "approval_signature": approval_signature,
+            "previous_chain_hash": expected_chain_hash, "disposition": disposition,
+            "evidence_keys_json": _json(list(evidence_keys)),
+            "finalized_ts_utc": now.astimezone(UTC).isoformat(),
+        }
+        record_hash = _hash(_prospective_finalization_payload(material))
+        db.execute(
+            "INSERT INTO prospective_study_finalizations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (*material.values(), record_hash),
+        )
+        _append_event(
+            db, event_kind="PROSPECTIVE_FINALIZATION", record_id=record_hash,
+            record_hash=record_hash, created_ts_utc=now,
+        )
+        result = _verify_hypothesis_memory_connection(db)
+        if not result.valid:
+            raise ValueError("prospective finalization verification failed")
+        db.execute("COMMIT")
+        return ProspectiveFinalization(
+            study_sha256, dossier_sha256, disposition, approval_sha256, record_hash,
+            result.chain_hash,
+        )
+    finally:
+        db.close()
+
+
+@dataclass(frozen=True, slots=True)
+class ProspectiveRegistryStatus:
+    ledger_chain_hash: str
+    reserved_alpha_units: int
+    remaining_alpha_units: int
+    reservations: int
+    finalized_studies: int
+    reserved_sessions: int
+    authority: str = "RESEARCH_ONLY"
+
+
+def prospective_registry_status(
+    path: Path, *, root_sha256: str, expected_chain_hash: str,
+) -> ProspectiveRegistryStatus:
+    if not path.is_file():
+        raise ValueError("prospective registry unavailable")
+    db = _prospective_connection(path, readonly=True)
+    try:
+        db.execute("BEGIN")
+        report = _pinned_prospective_head(db, expected_chain_hash)
+        rows = db.execute("SELECT * FROM prospective_study_reservations").fetchall()
+        if any(row["root_sha256"] != root_sha256 for row in rows):
+            raise ValueError("prospective registry root mismatch")
+        units = sum(int(row["alpha_units"]) for row in rows)
+        finalized = int(db.execute(
+            "SELECT COUNT(*) FROM prospective_study_finalizations",
+        ).fetchone()[0])
+        return ProspectiveRegistryStatus(
+            report.chain_hash, units, _PROSPECTIVE_BUDGET_UNITS - units, len(rows), finalized,
+            sum(len(json.loads(row["session_dates_json"])) for row in rows),
+        )
+    finally:
+        db.close()
+
+
+def read_finalized_paper_dossier(
+    path: Path, *, study_sha256: str, root_sha256: str, expected_chain_hash: str,
+) -> dict[str, object]:
+    if not path.is_file():
+        raise ValueError("prospective registry unavailable")
+    db = _prospective_connection(path, readonly=True)
+    try:
+        db.execute("BEGIN")
+        _pinned_prospective_head(db, expected_chain_hash)
+        row = db.execute(
+            "SELECT * FROM prospective_study_finalizations WHERE study_sha256=?", (study_sha256,),
+        ).fetchone()
+        if row is None or row["root_sha256"] != root_sha256:
+            raise ValueError("finalized study missing or wrong root")
+        reservation = db.execute(
+            "SELECT * FROM prospective_study_reservations WHERE study_sha256=?", (study_sha256,),
+        ).fetchone()
+        if reservation is None:
+            raise ValueError("finalized study reservation missing")
+        dossier: object = json.loads(row["dossier_json"])
+        return {
+            "dossier": dossier, "disposition": str(row["disposition"]),
+            "reservation_record_hash": str(reservation["record_hash"]),
+            "reservation_approval_raw_hex": str(reservation["approval_raw_hex"]),
+            "reservation_approval_signature": str(reservation["approval_signature"]),
+            "approval_sha256": str(row["approval_sha256"]),
+            "approval_raw_hex": str(row["approval_raw_hex"]),
+            "approval_signature": str(row["approval_signature"]),
+            "record_hash": str(row["record_hash"]), "authority": "RESEARCH_ONLY",
+        }
+    finally:
+        db.close()

@@ -14,7 +14,7 @@ from __future__ import annotations
 import bisect
 import hashlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta
 from enum import StrEnum
 
@@ -173,6 +173,39 @@ def entry_schedule(post_ts: datetime, seen_ts: datetime, rules: ForwardRules) ->
         exit_ts=entry + timedelta(minutes=rules.hold_min),
         late=(seen_ts - post_ts) > timedelta(minutes=rules.skip_if_seen_after_min),
     )
+
+
+def strict_paper_schedule(
+    post_ts: datetime, seen_ts: datetime, rules: ForwardRules, *,
+    session_open: datetime, session_close: datetime,
+) -> EntrySchedule:
+    """Prospective wall-clock approximation to frozen first-eligible-minute timing.
+
+    The historical bar evaluator is unchanged. Early-close and no-session
+    admission are explicit rather than assuming the next observed minute exists.
+    """
+    if any(t.tzinfo is None or t.utcoffset() is None for t in (
+        post_ts, seen_ts, session_open, session_close,
+    )):
+        raise ValueError("naive paper schedule clock")
+    original = entry_schedule(post_ts, seen_ts, rules)
+    if seen_ts < post_ts or session_close <= session_open:
+        raise ValueError("noncausal paper schedule")
+    earliest = max(original.entry_ts, session_open)
+    entry = earliest.replace(second=0, microsecond=0)
+    if entry < earliest:
+        entry += timedelta(minutes=1)
+    close_et = session_close.astimezone(MARKET_TZ)
+    cap = min(
+        close_et.replace(hour=rules.exit_cap_et.hour, minute=rules.exit_cap_et.minute,
+                         second=0, microsecond=0),
+        close_et - timedelta(minutes=5),
+    )
+    chase = entry + timedelta(minutes=rules.limit_window_min)
+    if original.late or chase >= cap:
+        raise ValueError("paper schedule outside entry window")
+    return replace(original, entry_ts=entry, chase_ts=chase,
+                   exit_ts=min(entry + timedelta(minutes=rules.hold_min), cap))
 
 
 def tier_for(price: float, rules: ForwardRules) -> str:

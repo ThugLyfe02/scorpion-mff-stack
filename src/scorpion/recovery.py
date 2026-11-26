@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,3 +152,78 @@ def create_verified_backup(
     if not verification.verified:
         raise RuntimeError("backup verification failed: " + ",".join(verification.failures))
     return verification
+
+
+def recover_paper_session_journal(
+    source: Path, destination: Path, *, max_bytes: int = 64 * 1024 * 1024,
+) -> dict[str, object]:
+    """Preserve an interrupted paper session without replaying a single effect.
+
+    Only the last fsync-bound prefix can be recovered as evidence. The original
+    and every unverified trailing byte remain available for operator forensics.
+    This is not automatic restart authorization and never clears a safety latch.
+    """
+    from .session_service import (
+        JournalError,
+        _fsync_directory,
+        journal_checkpoint_path,
+        journal_identity_bytes,
+        journal_receipt_path,
+    )
+
+    if max_bytes <= 0:
+        raise ValueError("journal recovery bound must be positive")
+    sealed = journal_receipt_path(source).exists()
+    checkpoint = journal_receipt_path(source) if sealed else journal_checkpoint_path(source)
+    try:
+        metadata_bytes = checkpoint.read_bytes()
+        meta = json.loads(metadata_bytes)
+        with source.open("rb") as handle:
+            raw = handle.read(max_bytes + 1)
+        if checkpoint.read_bytes() != metadata_bytes:
+            raise JournalError("journal_checkpoint_changed_during_recovery")
+    except (OSError, ValueError) as exc:
+        raise JournalError("journal_recovery_checkpoint_unavailable") from exc
+    if len(raw) > max_bytes:
+        raise JournalError("journal_recovery_bound_exceeded")
+    if not isinstance(meta, dict) or type(meta.get("bytes")) is not int:
+        raise JournalError("journal_recovery_checkpoint_invalid")
+    size = meta["bytes"]
+    if not 0 <= size <= len(raw):
+        raise JournalError("journal_recovery_checkpoint_outside_file")
+    prefix, tail = raw[:size], raw[size:]
+    if meta != journal_identity_bytes(prefix):
+        raise JournalError("journal_recovery_prefix_mismatch")
+    if sealed and tail:
+        raise JournalError("sealed_journal_has_trailing_bytes")
+    # Never create a replacement journal at the original path, and never write a
+    # clean-session receipt for a recovered prefix.
+    destination.mkdir(parents=True, exist_ok=False)
+    manifest: dict[str, object] = {
+        "schema": "scorpion.paper-journal-recovery.v1",
+        "authority": "RESEARCH_ONLY",
+        "status": "SEALED_COPY" if sealed else "VERIFIED_PREFIX_QUARANTINED",
+        "source_sha256": hashlib.sha256(raw).hexdigest(),
+        "checkpoint_sha256": hashlib.sha256(metadata_bytes).hexdigest(),
+        "verified_prefix": meta,
+        "unverified_tail_bytes": len(tail),
+        "unverified_tail_sha256": hashlib.sha256(tail).hexdigest(),
+        "resume_authorized": False,
+        "certifies_fills": False,
+    }
+    for name, content in (
+        ("verified-prefix.jsonl", prefix), ("unverified-tail.bin", tail),
+        ("source-checkpoint.json", metadata_bytes),
+    ):
+        with (destination / name).open("xb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    with (destination / "recovery.json").open("x", encoding="utf-8") as handle:
+        json.dump(manifest, handle, sort_keys=True, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    _fsync_directory(destination)
+    _fsync_directory(destination.parent)
+    return manifest

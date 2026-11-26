@@ -15,7 +15,11 @@ dependencies = [
 databento = [
   "databento>=0.60",
 ]
+paper-evidence = [
+  "cryptography>=44,<50",
+]
 dev = [
+  "cryptography>=44,<50",
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.24,<1",
   "hypothesis>=6.112,<7",
