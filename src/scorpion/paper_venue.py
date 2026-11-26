@@ -380,6 +380,7 @@ def request_from_live_journal(
     # Short dispatch admission window prevents stale orders from a stopped writer.
     if not timedelta(0) <= now - created <= timedelta(seconds=10):
         raise PaperDeliveryError("durable intent too old for dispatch")
+    material: tuple[object, ...]
     if row.get("kind") == "intent":
         feature = next((f for f in features.rows if f.intent_seq == seq), None)
         if feature is None or exit_limit is not None or feature.rules_sha256 != rules.sha256:
@@ -486,6 +487,8 @@ def dispatch_paper_intent(
         if latest.intent_sha256 != req.intent_sha256:
             return reserved
     except (OSError, ValueError, JournalError):
+        return reserved
+    if not _latch_ok(latch_path) or clock() >= req.deadline:
         return reserved
     try:
         observation, digest = venue.submit_once(req, key)
