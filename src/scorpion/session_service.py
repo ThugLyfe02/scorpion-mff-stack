@@ -724,7 +724,9 @@ class PaperExecutionSession:
         else:
             working.limit = limit
             working.status = "limit_intent"
-        working.intended_qty = quantity
+        # A conditional chase never shrinks the maximum possible parent inventory.
+        # The external worker still sells only independently confirmed exact shares.
+        working.intended_qty = max(working.intended_qty, quantity)
         self.orders.append(result)
         elapsed = time.perf_counter_ns() - started
         self.latency.add("entry_to_intent", elapsed)

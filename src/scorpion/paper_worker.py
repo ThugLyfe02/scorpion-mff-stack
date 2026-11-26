@@ -224,8 +224,8 @@ class SupervisedPaperWorker:
         elif any(o.state in ("DISPATCH_UNCERTAIN", "CANCEL_UNCERTAIN", "UNKNOWN")
                  for o in working):
             result = recover_paper_orders(
-            self._ledger, self._venue, expected_head=self._head, clock=self._clock,
-        )
+                self._ledger, self._venue, expected_head=self._head, clock=self._clock,
+            )
         else:
             snapshot = self._venue.snapshot(self._ledger.policy.session_date)
             result = self._ledger.reconcile(
@@ -268,6 +268,7 @@ class SupervisedPaperWorker:
             self._disposition(c, "NOT_DISPATCHED", "existing_logical_order")
             return
         exit_limit = None
+        symbol: str | None
         if c.role == "EXIT":
             if (
                 not related or any(o.observation is None or not o.observation.terminal
@@ -280,7 +281,7 @@ class SupervisedPaperWorker:
             exit_limit = dict(self._authorization.exit_limits)[symbol]
         else:
             symbol = c.symbol
-            if symbol not in dict(self._authorization.exit_limits):
+            if symbol is None or symbol not in dict(self._authorization.exit_limits):
                 self._disposition(c, "NOT_DISPATCHED", "symbol_outside_operator_roster")
                 return
             if c.role == "CHASE" and (
@@ -291,6 +292,14 @@ class SupervisedPaperWorker:
                 self._disposition(c, "NOT_DISPATCHED", "initial_not_terminal_zero")
                 return
 
+        if any(
+            not (o.observation and o.observation.terminal)
+            and o.request.deadline <= self._clock() + timedelta(seconds=3)
+            for o in current.orders
+        ):
+            self._disposition(c, "NOT_DISPATCHED", "working_order_deadline_priority")
+            self._next_reconcile = 0.0
+            return
         blocked = set(self._blockers)
         if c.role == "EXIT":
             blocked.discard("terminal_fill_outside_route_deadline")

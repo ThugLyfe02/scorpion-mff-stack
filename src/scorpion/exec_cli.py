@@ -470,7 +470,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     labels = sub.add_parser("paper-outcome-labels")
     costs = sub.add_parser("paper-execution-costs")
     round_trip = sub.add_parser("paper-round-trip-reconcile")
-    for command in (labels, costs, round_trip):
+    worker_calibration = sub.add_parser("paper-worker-calibration")
+    for command in (labels, costs, round_trip, worker_calibration):
         command.add_argument("--journal", type=Path, required=True)
         command.add_argument("--trust", type=Path, required=True)
         command.add_argument("--trust-sha256", required=True)
@@ -479,6 +480,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         command.add_argument("--collector-signature", type=Path, required=True)
         command.add_argument("--reviewer-signature", type=Path, required=True)
         command.add_argument("--as-of", required=True)
+    worker_calibration.add_argument("--audit", type=Path, required=True)
+    worker_calibration.add_argument("--worker-config", type=Path, required=True)
+    worker_calibration.add_argument("--worker-sha256", required=True)
+    worker_calibration.add_argument("--risk-policy", type=Path, required=True)
+    worker_calibration.add_argument("--ledger", type=Path, required=True)
+    worker_calibration.add_argument("--ledger-head", required=True)
     costs.add_argument("--cost-policy", type=Path, required=True)
     costs.add_argument("--cost-policy-sha256", required=True)
     costs.add_argument("--cost-export", type=Path, required=True)
@@ -644,6 +651,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ) else 1
     if args.command in (
         "paper-outcome-labels", "paper-execution-costs", "paper-round-trip-reconcile",
+        "paper-worker-calibration",
     ):
         from dataclasses import asdict
 
@@ -663,6 +671,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 read_signature(args.collector_signature), read_signature(args.reviewer_signature),
                 datetime.fromisoformat(args.as_of),
             )
+            if args.command == "paper-worker-calibration":
+                from .paper_worker_calibration import calibrate_paper_worker
+
+                calibration = calibrate_paper_worker(
+                    admission, audit_path=args.audit, authorization_path=args.worker_config,
+                    authorization_pin=args.worker_sha256, risk_path=args.risk_policy,
+                    ledger_path=args.ledger, final_head=args.ledger_head,
+                )
+                _print(asdict(calibration))
+                return 1 if calibration.blockers else 0
             if args.command == "paper-outcome-labels":
                 _print(asdict(admission.verify()))
                 return 0
