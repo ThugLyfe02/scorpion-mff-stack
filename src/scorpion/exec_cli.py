@@ -434,6 +434,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     market_source.add_argument("--recovered", type=Path)
     market_stress = sub.add_parser("paper-market-stress")
     market_stress.add_argument("--journal", type=Path, required=True)
+    campaign = sub.add_parser("paper-campaign-check")
+    campaign.add_argument("--worker-config", type=Path, required=True)
+    campaign.add_argument("--worker-sha256", required=True)
+    campaign.add_argument("--risk-policy", type=Path, required=True)
+    campaign.add_argument("--ledger", type=Path, required=True)
+    campaign.add_argument("--samples", type=int, default=3)
+    campaign.add_argument("--authorize-paper-api", action="store_true", required=True)
     capture_bench = sub.add_parser("paper-capture-benchmark")
     capture_bench.add_argument("--samples", type=int, default=2048)
     capture_bench.add_argument("--batch", type=int, default=64)
@@ -496,6 +503,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     round_trip.add_argument("--round-trip-artifact", type=Path, required=True)
     round_trip.add_argument("--round-trip-collector-signature", type=Path, required=True)
     round_trip.add_argument("--round-trip-reviewer-signature", type=Path, required=True)
+    adaptive = sub.add_parser("paper-adaptive-research")
+    adaptive.add_argument("--plan", type=Path, required=True)
+    adaptive.add_argument("--plan-sha256", required=True)
+    adaptive.add_argument("--baseline-cohort", type=Path, required=True)
+    adaptive.add_argument("--baseline-inputs", type=Path, required=True)
+    adaptive.add_argument("--monitor-cohort", type=Path, required=True)
+    adaptive.add_argument("--monitor-inputs", type=Path, required=True)
+    adaptive.add_argument("--trust", type=Path, required=True)
+    adaptive.add_argument("--cost-policy", type=Path, required=True)
+    adaptive.add_argument("--economic-inputs", type=Path)
+    adaptive.add_argument("--as-of", required=True)
     stats = sub.add_parser("paper-session-statistics")
     stats.add_argument("--cohort", type=Path, required=True)
     stats.add_argument("--cohort-sha256", required=True)
@@ -627,6 +645,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sqlite3.Error) as exc:
             _print({"ok": False, "reason": type(exc).__name__})
             return 1
+    if args.command == "paper-adaptive-research":
+        from dataclasses import asdict
+
+        from .paper_adaptive_research import evaluate_adaptive_research
+        from .session_calendar import CalendarNotCovered
+        from .session_service import JournalError
+
+        try:
+            adaptive_report = evaluate_adaptive_research(
+                plan_path=args.plan, plan_pin=args.plan_sha256,
+                baseline_cohort=args.baseline_cohort, baseline_inputs=args.baseline_inputs,
+                monitor_cohort=args.monitor_cohort, monitor_inputs=args.monitor_inputs,
+                trust_path=args.trust, cost_policy=args.cost_policy,
+                economic_inputs=args.economic_inputs, as_of=datetime.fromisoformat(args.as_of),
+            )
+            _print(asdict(adaptive_report))
+            return 0 if (
+                adaptive_report.historical_research_recommendation == "RESEARCH_CANDIDATE_ONLY"
+                and adaptive_report.execution_decay.status == "NO_ALARM_NOT_PROOF_OF_HEALTH"
+                and adaptive_report.economic_decay.status == "NO_ALARM_NOT_PROOF_OF_HEALTH"
+            ) else 1
+        except (OSError, ValueError, ImportError, JournalError, CalendarNotCovered) as exc:
+            _print({"ok": False, "reason": type(exc).__name__, "authority": "RESEARCH_ONLY"})
+            return 1
     if args.command == "paper-session-statistics":
         from dataclasses import asdict
 
@@ -735,6 +777,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         _print(report)
         return 0
+    if args.command == "paper-campaign-check":
+        from dataclasses import asdict
+
+        from .paper_campaign_probe import probe_campaign
+        from .session_calendar import CalendarNotCovered
+        from .session_service import JournalError
+
+        try:
+            campaign_report = probe_campaign(
+                worker_config=args.worker_config, worker_pin=args.worker_sha256,
+                risk_path=args.risk_policy, ledger_path=args.ledger,
+                latch_path=latch_path(), samples=args.samples,
+            )
+            _print(asdict(campaign_report))
+            return 1 if campaign_report.blockers else 0
+        except (OSError, ValueError, JournalError, CalendarNotCovered) as exc:
+            _print({"ok": False, "reason": type(exc).__name__, "authorizes_orders": False})
+            return 1
     if args.command == "paper-capture-benchmark":
         from dataclasses import asdict
 

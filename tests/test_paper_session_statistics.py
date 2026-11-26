@@ -1099,3 +1099,69 @@ def test_cross_study_reuse_is_atomic_and_never_refunds_alpha(tmp_path: Path) -> 
     )
     assert report.finalized_studies == 1 and report.remaining_alpha_units == 0
     assert verify_hypothesis_memory(path).valid
+
+
+def test_adaptive_research_reverifies_signed_baseline_and_preserves_holdout(tmp_path, monkeypatch):
+    from scorpion.paper_adaptive_research import evaluate_adaptive_research
+
+    ctx = make_cohort(tmp_path)
+    baseline_days = (*DAYS, date(2026, 11, 30), date(2026, 12, 1))
+    for day in baseline_days[3:]:
+        ctx.bundles.append(build_bundle(ctx, day, mode="empty"))
+    base_policy = raw_policy(ctx.trust_hash, ctx.cost_hash)
+    base_policy.update(
+        end_date=baseline_days[-1].isoformat(),
+        sessions=[day.isoformat() for day in baseline_days],
+    )
+    ctx.pin = put(ctx.cohort, base_policy)
+    ctx.index()
+    freeze = datetime(2026, 12, 2, tzinfo=UTC)
+    base_report = ctx.report(as_of=freeze)
+    target_days = (date(2026, 12, 3), date(2026, 12, 4))
+    target_policy = raw_policy(ctx.trust_hash, ctx.cost_hash)
+    target_policy.update(
+        family_id="monitor", registered_ts_utc=freeze.isoformat(),
+        start_date=target_days[0].isoformat(), end_date=target_days[-1].isoformat(),
+        sessions=[day.isoformat() for day in target_days], minimum_sessions=2,
+    )
+    target_path = tmp_path / "monitor-cohort.json"
+    target_pin = put(target_path, target_policy)
+    target_input = tmp_path / "monitor-inputs.json"
+    bundle = build_bundle(ctx, target_days[0], mode="full")
+    put(target_input, {"schema": "scorpion.paper-session-inputs.v1", "sessions": [bundle.row]})
+    plan_path = tmp_path / "adaptive.json"
+    plan = {
+        "schema": "scorpion.paper-adaptive-plan.v1", "authority": "RESEARCH_ONLY",
+        "baseline_cohort_sha256": ctx.pin, "baseline_report_sha256": base_report.report_sha256,
+        "monitor_cohort_sha256": target_pin, "baseline_cutoff": freeze.isoformat(),
+        "frozen_at": freeze.isoformat(), "train_sessions": 5, "miscoverage": 0.1,
+        "density_ratio": 2, "novel_mass": 0.05, "score_floor_bps": -10,
+        "adverse_null": 0.1, "adverse_alternative": 0.4, "family_alpha": 0.05,
+        "budget_units": 10, "economic_floor_bps": 0, "economic_clip_bps": 100,
+    }
+    pin = put(plan_path, plan)
+    as_of = datetime(2026, 12, 5, tzinfo=UTC)
+
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return as_of.astimezone(tz)
+
+    monkeypatch.setattr("scorpion.paper_adaptive_research.datetime", FixedClock)
+    kwargs = dict(
+        plan_path=plan_path, plan_pin=pin, baseline_cohort=ctx.cohort,
+        baseline_inputs=ctx.inputs, monitor_cohort=target_path, monitor_inputs=target_input,
+        trust_path=ctx.trust, cost_policy=ctx.cost_policy, as_of=as_of,
+    )
+    result = evaluate_adaptive_research(**kwargs)
+    assert result.monitor_sessions == target_days
+    assert result.historical_research_recommendation == "ABSTAIN_FROM_RESEARCH_QUALIFICATION"
+    assert result.holdout_coverage.unresolved_outcomes == 1
+    assert result.economic_decay.ambiguous == 2
+    assert len(result.research_information) == 4
+    assert not result.authorizes_orders and not result.authorizes_promotion
+    assert result == evaluate_adaptive_research(**kwargs)
+    plan["baseline_report_sha256"] = "f" * 64
+    kwargs["plan_pin"] = put(plan_path, plan)
+    with pytest.raises(ValueError, match="holdout identity conflict"):
+        evaluate_adaptive_research(**kwargs)
