@@ -137,7 +137,7 @@ class SupervisedPaperWorker:
         self._queue: queue.Queue[Candidate] = queue.Queue(maxsize=_QUEUE_SIZE)
         self._stop = threading.Event()
         self._admission_fault = threading.Event()
-        self._last_health = 0.0
+        self._last_health: float | None = None
         self._next_reconcile = 0.0
         self._blockers: tuple[str, ...] = ("initial_reconciliation_required",)
         self._audit: Journal | None = None
@@ -152,9 +152,11 @@ class SupervisedPaperWorker:
         self._source.check()
         if self._audit is not None:
             self._audit.check()
+        heartbeat = self._last_health
         return (
             not self._stop.is_set() and not self._admission_fault.is_set()
-            and 0 <= time.monotonic() - self._last_health <= _HEARTBEAT_MAX_SECONDS
+            and heartbeat is not None
+            and 0 <= time.monotonic() - heartbeat <= _HEARTBEAT_MAX_SECONDS
         )
 
     def offer(self, seq: int, record: dict[str, object]) -> None:

@@ -97,3 +97,17 @@ budget, and trade-update stream require further fault certification. Venue
 double-read snapshots are not atomic. Hash chains are not rollback-resistant
 without independent checkpoints. Static exit floors can miss fills; separately
 review a deterministic bounded quote-based exit policy before permitting it.
+
+## Shadow correction pilot (offline API)
+
+`paper_worker_shadow.evaluate_shadow_correction` accepts in-memory reports from
+`calibrate_paper_worker` (do not deserialize unverified summaries). It compares
+fixed-tape fill residuals using five or more earlier independently reviewed
+sessions, a fixed five-session zero-bias shrinkage prior, equal session weights,
+role-specific buckets and a 24-hour embargo before target local midnight.
+Both errors are evaluated on the same comparable rows. Unqualified and warmup
+folds are visible; duplicates fail. Supply the full frozen session roster using
+independent custody; the function does not certify the roster or report origin.
+This retrospective replay correction is descriptive, not a point-in-time
+forecast or prospective qualification. No automatic fit, policy change, or
+promotion is performed by the worker.

@@ -168,6 +168,7 @@ def calibrate_paper_worker(
             estimate: int | None = None
             error: Decimal | None = None
             reason = "exit_requires_signed_round_trip_evidence"
+            target = label.observed_fill_target if label is not None else None
             if label is not None:
                 if label.requested_quantity != quantity:
                     raise ValueError("signed requested quantity mismatch")
@@ -177,19 +178,19 @@ def calibrate_paper_worker(
                     reason = "not_dispatched_not_a_zero_fill"
                 elif (
                     order.observation is None or label.venue_order_id is None
-                    or label.observed_fill_target is None
+                    or target is None
                 ):
                     reason = "external_fill_not_qualified"
                     blockers.add("dispatched_entry_outcome_unknown")
                 else:
                     if (
                         label.venue_order_id != order.observation.venue_id
-                        or label.observed_fill_target != order.filled
+                        or target != order.filled
                         or label.average_fill_price != order.observation.average
                         or label.ticker != order.request.symbol
                     ):
                         raise ValueError("signed fill disagrees with delivery ledger")
-                    observed = label.observed_fill_target
+                    observed = target
                     observed_entries += 1
                     call = calls.get(label.call_id)
                     if call and (
