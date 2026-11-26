@@ -41,9 +41,9 @@ from .session_calendar import session_hours
 from .session_service import (
     MAX_PAPER_JOURNAL_BYTES,
     JournalError,
+    _journal_identity,
     decode_paper_record,
     journal_checkpoint_path,
-    _journal_identity,
     journal_receipt_path,
 )
 

@@ -503,6 +503,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     round_trip.add_argument("--round-trip-artifact", type=Path, required=True)
     round_trip.add_argument("--round-trip-collector-signature", type=Path, required=True)
     round_trip.add_argument("--round-trip-reviewer-signature", type=Path, required=True)
+    adaptive = sub.add_parser("paper-adaptive-research")
+    adaptive.add_argument("--plan", type=Path, required=True)
+    adaptive.add_argument("--plan-sha256", required=True)
+    adaptive.add_argument("--baseline-cohort", type=Path, required=True)
+    adaptive.add_argument("--baseline-inputs", type=Path, required=True)
+    adaptive.add_argument("--monitor-cohort", type=Path, required=True)
+    adaptive.add_argument("--monitor-inputs", type=Path, required=True)
+    adaptive.add_argument("--trust", type=Path, required=True)
+    adaptive.add_argument("--cost-policy", type=Path, required=True)
+    adaptive.add_argument("--economic-inputs", type=Path)
+    adaptive.add_argument("--as-of", required=True)
     stats = sub.add_parser("paper-session-statistics")
     stats.add_argument("--cohort", type=Path, required=True)
     stats.add_argument("--cohort-sha256", required=True)
@@ -633,6 +644,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (OSError, ValueError, ImportError, JournalError, CalendarNotCovered,
                 sqlite3.Error) as exc:
             _print({"ok": False, "reason": type(exc).__name__})
+            return 1
+    if args.command == "paper-adaptive-research":
+        from dataclasses import asdict
+
+        from .paper_adaptive_research import evaluate_adaptive_research
+        from .session_calendar import CalendarNotCovered
+        from .session_service import JournalError
+
+        try:
+            result = evaluate_adaptive_research(
+                plan_path=args.plan, plan_pin=args.plan_sha256,
+                baseline_cohort=args.baseline_cohort, baseline_inputs=args.baseline_inputs,
+                monitor_cohort=args.monitor_cohort, monitor_inputs=args.monitor_inputs,
+                trust_path=args.trust, cost_policy=args.cost_policy,
+                economic_inputs=args.economic_inputs, as_of=datetime.fromisoformat(args.as_of),
+            )
+            _print(asdict(result))
+            return 0 if (
+                result.historical_research_recommendation == "RESEARCH_CANDIDATE_ONLY"
+                and result.execution_decay.status == "NO_ALARM_NOT_PROOF_OF_HEALTH"
+                and result.economic_decay.status == "NO_ALARM_NOT_PROOF_OF_HEALTH"
+            ) else 1
+        except (OSError, ValueError, ImportError, JournalError, CalendarNotCovered) as exc:
+            _print({"ok": False, "reason": type(exc).__name__, "authority": "RESEARCH_ONLY"})
             return 1
     if args.command == "paper-session-statistics":
         from dataclasses import asdict
