@@ -215,6 +215,7 @@ async def _run_session(args: argparse.Namespace) -> int:
     from .fastpath import QuoteCache
     from .health import FeedHealthMonitor
     from .ingest.discord import DiscordSignalClient
+    from .paper_worker import SupervisedPaperWorker, load_worker_authorization
     from .session_calendar import session_hours
     from .session_service import (
         Journal,
@@ -254,6 +255,18 @@ async def _run_session(args: argparse.Namespace) -> int:
     if getattr(args, "capture_market", False) and mode is not ExecutionMode.PAPER:
         LOGGER.error("market capture requires PAPER mode")
         return 2
+    worker_values = (
+        args.paper_worker_config, args.paper_worker_sha256, args.paper_risk_policy,
+        args.paper_ledger,
+    )
+    worker_enabled = args.authorize_paper_worker
+    if (
+        (worker_enabled and (not all(worker_values) or not latch.armed or args.no_discord
+                             or not args.capture_market or mode is not ExecutionMode.PAPER))
+        or (not worker_enabled and any(worker_values))
+    ):
+        LOGGER.error("worker requires explicit authorization, pins, ingress, capture and PAPER")
+        return 2
     try:
         journal = Journal(
             state_dir() / "journal" / f"{today.isoformat()}.jsonl", require_lossless=True,
@@ -262,6 +275,23 @@ async def _run_session(args: argparse.Namespace) -> int:
         latch.trip(f"journal_start:{type(exc).__name__}")
         LOGGER.error("paper journal unavailable; no session started")
         return 2
+    worker = None
+    if worker_enabled:
+        try:
+            authorization = load_worker_authorization(
+                args.paper_worker_config, args.paper_worker_sha256,
+            )
+            worker = SupervisedPaperWorker(
+                authorization=authorization, risk_path=args.paper_risk_policy,
+                ledger_path=args.paper_ledger, source=journal,
+                audit_path=state_dir() / "paper-worker" / f"{today.isoformat()}.jsonl",
+                latch_path=latch_path(), trip=latch.trip,
+            )
+        except Exception as exc:
+            latch.trip(f"worker_start:{type(exc).__name__}")
+            journal.close()
+            LOGGER.error("worker initialization refused")
+            return 2
     capture_market = bool(getattr(args, "capture_market", False))
     session = PaperExecutionSession(
         rules=rules,
@@ -271,6 +301,7 @@ async def _run_session(args: argparse.Namespace) -> int:
         journal=journal,
         allowed_author_ids=authors or None,
         strict_runtime=True, capture_market=capture_market, mode=mode,
+        on_intent=worker.offer if worker is not None else None,
     )
     monitor = FeedHealthMonitor(cache, session.stale, started_mono_ns=time.monotonic_ns())
     feed_client = DatabentoLiveClient()
@@ -335,6 +366,9 @@ async def _run_session(args: argparse.Namespace) -> int:
             stop_at_utc=stop_time_utc(close_et),
             on_new_symbol=feed.add_symbol,
             ingest_run=ingest_run,
+            worker_run=worker.run if worker is not None else None,
+            worker_heartbeat=worker.heartbeat if worker is not None else None,
+            worker_stop=worker.stop_admission if worker is not None else None,
         )
         end_safety = await asyncio.to_thread(latch.latch.verify_integrity, latch.component)
         journal.submit({
@@ -382,6 +416,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     run = sub.add_parser("run-session")
     run.add_argument("--no-discord", action="store_true", help="feed/health only (drills)")
     run.add_argument("--capture-market", action="store_true", help="bounded paper quote capture")
+    run.add_argument("--authorize-paper-worker", action="store_true")
+    run.add_argument("--paper-worker-config", type=Path)
+    run.add_argument("--paper-worker-sha256")
+    run.add_argument("--paper-risk-policy", type=Path)
+    run.add_argument("--paper-ledger", type=Path)
     probe = sub.add_parser("paper-feed-probe")
     probe.add_argument("--symbol", default="SPY")
     probe.add_argument("--timeout", type=float, default=20.0)
@@ -431,7 +470,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     labels = sub.add_parser("paper-outcome-labels")
     costs = sub.add_parser("paper-execution-costs")
     round_trip = sub.add_parser("paper-round-trip-reconcile")
-    for command in (labels, costs, round_trip):
+    worker_calibration = sub.add_parser("paper-worker-calibration")
+    for command in (labels, costs, round_trip, worker_calibration):
         command.add_argument("--journal", type=Path, required=True)
         command.add_argument("--trust", type=Path, required=True)
         command.add_argument("--trust-sha256", required=True)
@@ -440,6 +480,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         command.add_argument("--collector-signature", type=Path, required=True)
         command.add_argument("--reviewer-signature", type=Path, required=True)
         command.add_argument("--as-of", required=True)
+    worker_calibration.add_argument("--audit", type=Path, required=True)
+    worker_calibration.add_argument("--worker-config", type=Path, required=True)
+    worker_calibration.add_argument("--worker-sha256", required=True)
+    worker_calibration.add_argument("--risk-policy", type=Path, required=True)
+    worker_calibration.add_argument("--ledger", type=Path, required=True)
+    worker_calibration.add_argument("--ledger-head", required=True)
     costs.add_argument("--cost-policy", type=Path, required=True)
     costs.add_argument("--cost-policy-sha256", required=True)
     costs.add_argument("--cost-export", type=Path, required=True)
@@ -605,6 +651,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ) else 1
     if args.command in (
         "paper-outcome-labels", "paper-execution-costs", "paper-round-trip-reconcile",
+        "paper-worker-calibration",
     ):
         from dataclasses import asdict
 
@@ -624,6 +671,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 read_signature(args.collector_signature), read_signature(args.reviewer_signature),
                 datetime.fromisoformat(args.as_of),
             )
+            if args.command == "paper-worker-calibration":
+                from .paper_worker_calibration import calibrate_paper_worker
+
+                calibration = calibrate_paper_worker(
+                    admission, audit_path=args.audit, authorization_path=args.worker_config,
+                    authorization_pin=args.worker_sha256, risk_path=args.risk_policy,
+                    ledger_path=args.ledger, final_head=args.ledger_head,
+                )
+                _print(asdict(calibration))
+                return 1 if calibration.blockers else 0
             if args.command == "paper-outcome-labels":
                 _print(asdict(admission.verify()))
                 return 0
