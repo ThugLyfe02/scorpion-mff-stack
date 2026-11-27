@@ -264,6 +264,8 @@ class SupervisedPaperWorker:
                 return
             self._source.check()
             self._stop.wait(0.01)
+        self._record("worker_latency", phase="offer_to_durable_observed", intent_seq=c.seq,
+                     elapsed_ns=time.monotonic_ns() - c.enqueued_mono_ns)
         if not self._gate() or not timedelta(0) <= self._clock() - c.created <= ttl:
             self._disposition(c, "NOT_DISPATCHED", "supervision_or_candidate_deadline")
             return

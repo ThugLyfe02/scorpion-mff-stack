@@ -267,6 +267,9 @@ async def _run_session(args: argparse.Namespace) -> int:
     ):
         LOGGER.error("worker requires explicit authorization, pins, ingress, capture and PAPER")
         return 2
+    if worker_enabled and datetime.now(MARKET_TZ) >= hours[0]:
+        LOGGER.error("qualified worker requires a pre-open start")
+        return 2
     try:
         journal = Journal(
             state_dir() / "journal" / f"{today.isoformat()}.jsonl", require_lossless=True,
@@ -440,7 +443,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     campaign.add_argument("--risk-policy", type=Path, required=True)
     campaign.add_argument("--ledger", type=Path, required=True)
     campaign.add_argument("--samples", type=int, default=3)
+    campaign.add_argument("--pre-open", action="store_true")
     campaign.add_argument("--authorize-paper-api", action="store_true", required=True)
+    collect = sub.add_parser("paper-collect-venue")
+    collect.add_argument("--policy", type=Path, required=True)
+    collect.add_argument("--policy-sha256", required=True)
+    collect.add_argument("--out", type=Path, required=True)
+    collect.add_argument("--authorize-paper-api", action="store_true", required=True)
+    ops_report = sub.add_parser("paper-campaign-report")
+    for name in ("journal", "audit", "worker-config", "risk-policy", "ledger"):
+        ops_report.add_argument("--" + name, type=Path, required=True)
+    for name in ("worker-sha256", "ledger-head"):
+        ops_report.add_argument("--" + name, required=True)
+    draft = sub.add_parser("paper-prepare-outcomes")
+    for name in ("journal", "audit", "worker-config", "risk-policy", "ledger",
+                 "trust", "source-artifact", "out"):
+        draft.add_argument("--" + name, type=Path, required=True)
+    for name in ("worker-sha256", "ledger-head", "trust-sha256", "source-sha256"):
+        draft.add_argument("--" + name, required=True)
     capture_bench = sub.add_parser("paper-capture-benchmark")
     capture_bench.add_argument("--samples", type=int, default=2048)
     capture_bench.add_argument("--batch", type=int, default=64)
@@ -478,7 +498,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     costs = sub.add_parser("paper-execution-costs")
     round_trip = sub.add_parser("paper-round-trip-reconcile")
     worker_calibration = sub.add_parser("paper-worker-calibration")
-    for command in (labels, costs, round_trip, worker_calibration):
+    reviewed = sub.add_parser("paper-verify-reviewed-outcomes")
+    reviewed.add_argument("--draft", type=Path, required=True)
+    reviewed.add_argument("--draft-sha256", required=True)
+    for command in (labels, costs, round_trip, worker_calibration, reviewed):
         command.add_argument("--journal", type=Path, required=True)
         command.add_argument("--trust", type=Path, required=True)
         command.add_argument("--trust-sha256", required=True)
@@ -693,7 +716,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ) else 1
     if args.command in (
         "paper-outcome-labels", "paper-execution-costs", "paper-round-trip-reconcile",
-        "paper-worker-calibration",
+        "paper-worker-calibration", "paper-verify-reviewed-outcomes",
     ):
         from dataclasses import asdict
 
@@ -713,6 +736,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 read_signature(args.collector_signature), read_signature(args.reviewer_signature),
                 datetime.fromisoformat(args.as_of),
             )
+            if args.command == "paper-verify-reviewed-outcomes":
+                from .paper_evidence_collector import verify_reviewed_outcomes
+
+                review_report = verify_reviewed_outcomes(
+                    admission, draft_path=args.draft, draft_pin=args.draft_sha256,
+                )
+                _print(asdict(review_report))
+                return 1 if review_report.extra_feature_ids or review_report.feature_refusals else 0
             if args.command == "paper-worker-calibration":
                 from .paper_worker_calibration import calibrate_paper_worker
 
@@ -788,11 +819,62 @@ def main(argv: Sequence[str] | None = None) -> int:
             campaign_report = probe_campaign(
                 worker_config=args.worker_config, worker_pin=args.worker_sha256,
                 risk_path=args.risk_policy, ledger_path=args.ledger,
-                latch_path=latch_path(), samples=args.samples,
+                latch_path=latch_path(), samples=args.samples, pre_open=args.pre_open,
             )
             _print(asdict(campaign_report))
             return 1 if campaign_report.blockers else 0
         except (OSError, ValueError, JournalError, CalendarNotCovered) as exc:
+            _print({"ok": False, "reason": type(exc).__name__, "authorizes_orders": False})
+            return 1
+    if args.command == "paper-campaign-report":
+        import sqlite3
+        from dataclasses import asdict
+        from decimal import InvalidOperation
+
+        from .paper_campaign_report import build_campaign_report
+        from .session_service import JournalError
+
+        try:
+            ops_summary = build_campaign_report(
+                journal=args.journal, audit_path=args.audit, worker_config=args.worker_config,
+                worker_pin=args.worker_sha256, risk_path=args.risk_policy,
+                ledger_path=args.ledger, ledger_head=args.ledger_head,
+            )
+            _print(asdict(ops_summary))
+            return 1 if ops_summary.blockers else 0
+        except (OSError, ValueError, JournalError, sqlite3.Error, InvalidOperation, KeyError) as exc:
+            _print({"ok": False, "reason": type(exc).__name__, "authorizes_orders": False})
+            return 1
+    if args.command in ("paper-collect-venue", "paper-prepare-outcomes"):
+        import sqlite3
+        from dataclasses import asdict
+        from decimal import InvalidOperation
+
+        from .paper_evidence_collector import collect_venue_artifact, prepare_outcome_draft
+        from .paper_venue import load_paper_risk_policy
+        from .session_calendar import CalendarNotCovered
+        from .session_service import JournalError
+
+        try:
+            if args.command == "paper-collect-venue":
+                capture_policy = load_paper_risk_policy(args.policy, args.policy_sha256)
+                capture_receipt = collect_venue_artifact(
+                    account_id=capture_policy.account_id, session_date=capture_policy.session_date,
+                    output=args.out,
+                )
+                _print(asdict(capture_receipt))
+                return 1 if capture_receipt.blockers else 0
+            draft_receipt = prepare_outcome_draft(
+                journal=args.journal, audit_path=args.audit, worker_config=args.worker_config,
+                worker_pin=args.worker_sha256, risk_path=args.risk_policy,
+                ledger_path=args.ledger, ledger_head=args.ledger_head, trust_path=args.trust,
+                trust_pin=args.trust_sha256, source=args.source_artifact,
+                source_pin=args.source_sha256, output=args.out,
+            )
+            _print(asdict(draft_receipt))
+            return 0
+        except (OSError, ValueError, JournalError, CalendarNotCovered, sqlite3.Error,
+                InvalidOperation, KeyError, TypeError) as exc:
             _print({"ok": False, "reason": type(exc).__name__, "authorizes_orders": False})
             return 1
     if args.command == "paper-capture-benchmark":
