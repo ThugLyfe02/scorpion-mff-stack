@@ -854,6 +854,32 @@ class PaperDeliveryLedger:
             db.execute("BEGIN")
             return self._report(self._load(db, expected_head))
 
+    def inspect_lineage(
+        self, *, anchor_sequence: int, anchor_head: str,
+        snapshot: PaperAccountSnapshot | None = None,
+    ) -> PaperDeliveryReport:
+        """Read-only reconstruction after the last independently retained anchor.
+
+        A valid suffix is not an independently attested suffix. Never use the
+        returned current head to grant permission to restart or place orders.
+        Both the anchor and the full current chain are read in one transaction.
+        """
+        if type(anchor_sequence) is not int or not 1 <= anchor_sequence <= _PAPER_MAX_EVENTS:
+            raise PaperDeliveryError("invalid recovery anchor sequence")
+        anchor_head = _paper_digest(anchor_head)
+        if snapshot is not None:
+            self._check_snapshot(snapshot, snapshot.observed_at)
+        with closing(self._connect_readonly()) as db:
+            db.execute("BEGIN")
+            state = self._load(db)
+            anchor = db.execute(
+                "SELECT event_hash FROM paper_delivery_events WHERE sequence=?",
+                (anchor_sequence,),
+            ).fetchone()
+            if anchor is None or anchor["event_hash"] != anchor_head:
+                raise PaperDeliveryError("recovery anchor absent or conflicting; rollback possible")
+            return self._report(state, snapshot)
+
     def inspect_snapshot(
         self, snapshot: PaperAccountSnapshot, *, expected_head: str,
     ) -> PaperDeliveryReport:

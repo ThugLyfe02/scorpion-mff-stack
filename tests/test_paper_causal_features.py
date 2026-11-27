@@ -577,3 +577,140 @@ def test_stage1_exact_fill_notional_and_label_identity(cost_fixture: CostFixture
         ctx.prec = 50
         assert cost_fixture.outcome.admit() == report
     assert report.labels[0].filled_notional_usd == Decimal("29.95")
+
+
+def _cost_draft_inputs(tmp_path, cost_fixture):
+    from scorpion.provenance import canonical_json
+
+    admission = cost_fixture.synchronize()
+    original = dict(cost_fixture.outcome.payload, reviewed_ts_utc=None)
+    draft = tmp_path / "unsigned-entry.json"
+    draft.write_text(canonical_json(original))
+    fee = tmp_path / "raw-fees.json"
+    fee.write_text('{"fixture":"explicit fees"}')
+    quote = tmp_path / "raw-quotes.json"
+    quote.write_text('{"fixture":"independent market events"}')
+    source = tmp_path / "cost-source.json"
+    mark = cost_fixture.payload["marks"][0]
+    source_data = {
+        "schema": "scorpion.paper-cost-source.v1", "authority": "RESEARCH_ONLY",
+        "account_ref": cost_fixture.outcome.payload["account_ref"],
+        "market_source_id": cost_fixture.payload["market_source_id"],
+        "journal_sha256": cost_fixture.payload["journal_sha256"],
+        "outcome_export_sha256": cost_fixture.payload["outcome_export_sha256"],
+        "fee_source_sha256": hashlib.sha256(fee.read_bytes()).hexdigest(),
+        "quote_source_sha256": hashlib.sha256(quote.read_bytes()).hexdigest(),
+        "observed_through_ts_utc": THROUGH, "collected_ts_utc": REVIEWED,
+        "complete_fee_export": True, "session_coverage": None,
+        "fees": [{k: v for k, v in item.items() if k != "feature_sha256"}
+                 for item in cost_fixture.payload["fees"]],
+        "quotes": [{
+            "quote_id": mark["quote_id"], "ticker": mark["ticker"],
+            "event_ts_utc": mark["event_ts_utc"], "received_ts_utc": mark["received_ts_utc"],
+            "bid": mark["bid"], "ask": mark["ask"], "kind": "QUOTE",
+        }],
+    }
+    source.write_text(canonical_json(source_data))
+    kwargs = dict(
+        outcome_draft=draft, outcome_draft_pin=hashlib.sha256(draft.read_bytes()).hexdigest(),
+        cost_policy=cost_fixture.policy, cost_policy_pin=cost_fixture.policy_hash,
+        source=source, source_pin=hashlib.sha256(source.read_bytes()).hexdigest(),
+        fee_source=fee, quote_source=quote,
+    )
+    return admission, kwargs, source_data
+
+
+def test_cost_draft_rebuild_and_dual_review(tmp_path, cost_fixture):
+    from scorpion.paper_cost_draft import prepare_cost_draft, verify_cost_draft
+
+    admission, kwargs, _ = _cost_draft_inputs(tmp_path, cost_fixture)
+    draft = tmp_path / "unsigned-cost.json"
+    receipt = prepare_cost_draft(admission, **kwargs, output=draft)
+    assert receipt.mark_rows == receipt.fee_rows == 1 and not receipt.withheld
+    assert not receipt.authorizes_training
+    payload = json.loads(draft.read_bytes())
+    assert payload["reviewed_ts_utc"] is None
+    payload["reviewed_ts_utc"] = REVIEWED
+    reviewed = tmp_path / "reviewed-cost.json"
+
+    def verify():
+        raw = json.dumps(payload, sort_keys=True).encode()
+        reviewed.write_bytes(raw)
+        return verify_cost_draft(
+            admission, **kwargs, draft=draft, draft_pin=receipt.draft_sha256,
+            reviewed=reviewed,
+            collector_signature=cost_fixture.outcome.collector.sign(COST_COLLECTOR+raw).hex(),
+            reviewer_signature=cost_fixture.outcome.reviewer.sign(COST_REVIEWER+raw).hex(),
+        )
+
+    result = verify()
+    assert result.routes[0].net_shortfall_usd == Decimal("-0.40")
+    payload["marks"][0]["bid"] = "10.48"
+    with pytest.raises(ValueError, match="modified frozen"):
+        verify()
+
+
+def test_cost_draft_ignores_future_quote_but_never_falls_back_across_withdrawal(
+    tmp_path, cost_fixture,
+):
+    from scorpion.paper_cost_draft import prepare_cost_draft
+    from scorpion.provenance import canonical_json
+
+    admission, kwargs, source_data = _cost_draft_inputs(tmp_path, cost_fixture)
+    prior = source_data["quotes"][0]
+    source_data["quotes"].append({
+        **prior, "quote_id": "future", "event_ts_utc": "2026-11-24T15:01:32+00:00",
+        "received_ts_utc": "2026-11-24T15:01:32+00:00", "bid": "50.00", "ask": "50.01",
+    })
+
+    def repin():
+        kwargs["source"].write_text(canonical_json(source_data))
+        kwargs["source_pin"] = hashlib.sha256(kwargs["source"].read_bytes()).hexdigest()
+
+    repin()
+    draft = tmp_path / "future-cost.json"
+    receipt = prepare_cost_draft(admission, **kwargs, output=draft)
+    assert receipt.mark_rows == 1
+    assert json.loads(draft.read_bytes())["marks"][0]["quote_id"] == prior["quote_id"]
+    source_data["quotes"].insert(1, {
+        **prior, "quote_id": "withdrawn", "kind": "WITHDRAWAL",
+        "event_ts_utc": MARK_TIME, "received_ts_utc": MARK_TIME, "bid": None, "ask": None,
+    })
+    repin()
+    result = prepare_cost_draft(admission, **kwargs, output=tmp_path / "withdrawn-cost.json")
+    assert result.withheld == (("fixture", "CAUSAL_MARK_UNAVAILABLE"),)
+    assert result.mark_rows == 0
+    source_data["fees"] = []
+    repin()
+    with pytest.raises(ValueError, match="fees missing"):
+        prepare_cost_draft(admission, **kwargs, output=tmp_path / "missing-fee.json")
+
+
+def test_cost_draft_refuses_unobserved_chase_after_zero_initial(tmp_path, cost_fixture):
+    from scorpion.paper_cost_draft import prepare_cost_draft
+
+    first = load_paper_intent_features(cost_fixture.outcome.journal).rows[0]
+    order = order_for(first, state="CANCELLED", fills=[])
+    cost_fixture.outcome.payload["orders"] = [order]
+    cost_fixture.payload["fees"] = [fee_for(order)]
+    admission, kwargs, _ = _cost_draft_inputs(tmp_path, cost_fixture)
+    receipt = prepare_cost_draft(admission, **kwargs, output=tmp_path / "uncertain-cost.json")
+    assert receipt.withheld == (("fixture", "ROUTE_CLOSURE_UNSUBSTANTIATED"),)
+
+
+def test_cross_report_fee_conservation_detects_equal_net_disagreement(cost_fixture):
+    from scorpion.paper_economic_surveillance import compare_fee_evidence
+
+    report = cost_fixture.report()
+    observed = [order for order in report.orders if order.venue_order_id is not None]
+    assert len(observed) == 1
+    fees = [{
+        "venue_order_id": observed[0].venue_order_id,
+        "fees_usd": "0.30", "rebates_usd": "0.05",
+    }]
+    assert not compare_fee_evidence(report.orders, fees)
+    fees[0].update(fees_usd="0.40", rebates_usd="0.15")
+    assert compare_fee_evidence(report.orders, fees) == ("cross_report_entry_fee_conflict",)
+    assert compare_fee_evidence(report.orders, []) == ("cross_report_entry_fee_unavailable",)
+    with pytest.raises(ValueError, match="duplicate fee"):
+        compare_fee_evidence(report.orders, fees+fees)
