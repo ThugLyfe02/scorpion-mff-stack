@@ -45,9 +45,8 @@ def probe_campaign(
         raise ValueError("probe sample bound")
     authorization = load_worker_authorization(worker_config, worker_pin)
     policy = load_paper_risk_policy(risk_path, authorization.risk_pin)
-    status = PaperDeliveryLedger(ledger_path, policy).status(
-        expected_head=authorization.opening_head,
-    )
+    ledger = PaperDeliveryLedger(ledger_path, policy)
+    status = ledger.status(expected_head=authorization.opening_head)
     if status.events != 1 or status.orders:
         raise ValueError("probe requires initialized opening ledger")
     if set(dict(authorization.exit_limits)) != set(dict(policy.symbols_and_groups)):
@@ -86,6 +85,9 @@ def probe_campaign(
             break
         if snapshot.cash <= policy.fee_cash_buffer_usd:
             blockers.add("insufficient_cash")
+        opening = ledger.inspect_snapshot(snapshot, expected_head=status.chain_sha256)
+        if opening.cash_residual_usd != 0:
+            blockers.add("opening_cash_changed_after_pin")
         if not _latch_ok(latch_path):
             blockers.add("latch_changed")
             break
@@ -97,7 +99,7 @@ def probe_campaign(
     if len(snapshots) != samples:
         blockers.add("probe_incomplete")
     # A concurrent operator modifying the ledger must not pass this probe.
-    PaperDeliveryLedger(ledger_path, policy).status(expected_head=status.chain_sha256)
+    ledger.status(expected_head=status.chain_sha256)
     fields = (
         authorization.digest, policy.digest, status.chain_sha256, now,
         tuple(snapshots), tuple(clocks), combined, 3000, tuple(sorted(blockers)),

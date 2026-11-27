@@ -28,7 +28,15 @@ from .delivery import (
     paper_money,
     paper_quantity,
 )
-from .execution_meta_labels import _bounded_bytes, _fields, _parse_trust, _text, _unique_json
+from .execution_meta_labels import (
+    PaperOutcomeAdmission,
+    PaperOutcomeReport,
+    _bounded_bytes,
+    _fields,
+    _parse_trust,
+    _text,
+    _unique_json,
+)
 from .paper_venue import ORIGIN, Transport, _json, _order, _send, _time, _uuid, load_paper_risk_policy
 from .paper_worker import load_worker_authorization
 from .paper_worker_calibration import _coverage
@@ -552,3 +560,37 @@ def prepare_outcome_draft(
         hashlib.sha256(raw).hexdigest(), len(candidates), len(entries), exits,
         len(view.fills), len(features)-len(entries),
     )
+
+
+def verify_reviewed_outcomes(
+    admission: PaperOutcomeAdmission, *, draft_path: Path, draft_pin: str,
+) -> PaperOutcomeReport:
+    """Enforce exact normalized content across independent review.
+
+    Only the review timestamp may change. Signatures and the existing
+    admission checks remain mandatory. The retained draft pin comes from
+    the preparation report, independently held before review.
+    """
+    raw_draft = _bounded_bytes(draft_path, _MAX_ARCHIVE)
+    if hashlib.sha256(raw_draft).hexdigest() != draft_pin:
+        raise ValueError("collector draft pin mismatch")
+    original = _unique_json(raw_draft)
+    raw_final = _bounded_bytes(admission.export_path, _MAX_ARCHIVE)
+    final = _unique_json(raw_final)
+    if (
+        original.get("schema") != "scorpion.paper-outcome-export.v1"
+        or original.get("reviewed_ts_utc", False) is not None
+        or final.keys() != original.keys()
+        or {**final, "reviewed_ts_utc": None} != original
+    ):
+        raise ValueError("review modified frozen outcome content")
+    if _time(final.get("reviewed_ts_utc")) < _time(original.get("collected_ts_utc")):
+        raise ValueError("review chronology")
+    report = admission.verify()
+    if (
+        report.export_sha256 != hashlib.sha256(raw_final).hexdigest()
+        or report.source_artifact_sha256 != original.get("source_artifact_sha256")
+        or report.journal_sha256 != original.get("journal_sha256")
+    ):
+        raise ValueError("review evidence changed during admission")
+    return report

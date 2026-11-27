@@ -493,7 +493,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     costs = sub.add_parser("paper-execution-costs")
     round_trip = sub.add_parser("paper-round-trip-reconcile")
     worker_calibration = sub.add_parser("paper-worker-calibration")
-    for command in (labels, costs, round_trip, worker_calibration):
+    reviewed = sub.add_parser("paper-verify-reviewed-outcomes")
+    reviewed.add_argument("--draft", type=Path, required=True)
+    reviewed.add_argument("--draft-sha256", required=True)
+    for command in (labels, costs, round_trip, worker_calibration, reviewed):
         command.add_argument("--journal", type=Path, required=True)
         command.add_argument("--trust", type=Path, required=True)
         command.add_argument("--trust-sha256", required=True)
@@ -708,7 +711,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ) else 1
     if args.command in (
         "paper-outcome-labels", "paper-execution-costs", "paper-round-trip-reconcile",
-        "paper-worker-calibration",
+        "paper-worker-calibration", "paper-verify-reviewed-outcomes",
     ):
         from dataclasses import asdict
 
@@ -728,6 +731,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 read_signature(args.collector_signature), read_signature(args.reviewer_signature),
                 datetime.fromisoformat(args.as_of),
             )
+            if args.command == "paper-verify-reviewed-outcomes":
+                from .paper_evidence_collector import verify_reviewed_outcomes
+
+                review_report = verify_reviewed_outcomes(
+                    admission, draft_path=args.draft, draft_pin=args.draft_sha256,
+                )
+                _print(asdict(review_report))
+                return 1 if review_report.extra_feature_ids or review_report.feature_refusals else 0
             if args.command == "paper-worker-calibration":
                 from .paper_worker_calibration import calibrate_paper_worker
 

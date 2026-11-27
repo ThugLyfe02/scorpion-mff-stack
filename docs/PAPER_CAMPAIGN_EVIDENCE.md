@@ -10,7 +10,7 @@ produce external observations.
 The existing pilot requires a session journal from before the opening bell.
 Use paper-campaign-check with --pre-open on the policy's session date after
 initializing the exclusive flat paper ledger and pinning its opening head.
-It checks the venue's fresh closed market clock, actual snapshot, latch,
+It checks the venue's fresh closed market clock, exact opening cash, actual snapshot, latch,
 operator exit roster, and the same conservative 1,500 ms read latency budget.
 Do not treat this small sample as a p99 guarantee. The worker now refuses
 late starts in its opt-in mode; intent-only mode is unchanged. The default
@@ -83,7 +83,7 @@ The draft deliberately contains reviewed_ts_utc=null. It is not a signed
 outcome or authorized training input. Independent collector and reviewer
 must verify the raw artifact and all normalized fields, establish the
 actual review time, then sign the exact finalized bytes using the existing
-two signature domains. Use paper-outcome-labels to verify the signed file.
+two signature domains. Use paper-verify-reviewed-outcomes with the existing paper-outcome-labels\narguments plus --draft and --draft-sha256 to verify the signed file. Only\nthe review timestamp may differ from the independently pinned draft; any\nchanged normalized field refuses even when both signatures are valid.
 No signer is embedded, and no signature custody is implied by the program.
 Retain the unsigned draft digest, final signed export digest, and source
 pin separately. Neither this artifact nor a hash alone authenticates

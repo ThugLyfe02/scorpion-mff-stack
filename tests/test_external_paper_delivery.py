@@ -698,7 +698,11 @@ def test_collector_unsigned_draft_then_independent_signed_admission(
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     from scorpion.execution_meta_labels import PaperOutcome, PaperOutcomeAdmission
-    from scorpion.paper_evidence_collector import collect_venue_artifact, prepare_outcome_draft
+    from scorpion.paper_evidence_collector import (
+        collect_venue_artifact,
+        prepare_outcome_draft,
+        verify_reviewed_outcomes,
+    )
     from scorpion.provenance import stable_hash
 
     worker, remote, source, seq, row = _worker_fixture(tmp_path, ledger, adapter, monkeypatch)
@@ -799,7 +803,43 @@ def test_collector_unsigned_draft_then_independent_signed_admission(
     data["reviewed_ts_utc"] = reviewed.isoformat()
     signed = tmp_path / "reviewed.json"
     signed.write_text(json.dumps(data))
-    result = admission(signed, signed.read_bytes()).verify()
+    draft_pin = result.draft_sha256
+    result = verify_reviewed_outcomes(
+        admission(signed, signed.read_bytes()), draft_path=draft, draft_pin=draft_pin,
+    )
     assert result.labels[0].outcome is PaperOutcome.CANCELLED_NO_FILL
     assert result.labels[0].observed_fill_target == 0
     assert not result.authorizes_training
+
+    # Even two valid signatures cannot alter the frozen normalization.
+    data["orders"][0]["state"] = "REJECTED"
+    changed = tmp_path / "changed-review.json"
+    changed.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="modified frozen"):
+        verify_reviewed_outcomes(
+            admission(changed, changed.read_bytes()), draft_path=draft, draft_pin=draft_pin,
+        )
+
+
+def test_campaign_probe_refuses_even_small_opening_cash_drift(
+    tmp_path, ledger, adapter, monkeypatch,
+):
+    from scorpion.paper_campaign_probe import probe_campaign
+
+    worker, remote, _, _, _ = _worker_fixture(tmp_path, ledger, adapter, monkeypatch)
+    worker._audit.close()
+    obj, _ = ledger
+    _, venue = adapter
+    remote["cash"] = "1000.01"
+    monkeypatch.setattr("scorpion.paper_campaign_probe.AlpacaEquityPaperVenue", lambda *a, **k: venue)
+    monkeypatch.setattr("scorpion.paper_campaign_probe._latch_ok", lambda _: True)
+    manifest = tmp_path / "worker.json"
+    counter = iter((0, 100_000_000, 100_000_000, 200_000_000))
+    result = probe_campaign(
+        worker_config=manifest, worker_pin=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        risk_path=tmp_path / "risk.json", ledger_path=obj.path,
+        latch_path=tmp_path / "synthetic", samples=1,
+        clock=lambda: NOW, monotonic_ns=lambda: next(counter),
+    )
+    assert result.blockers == ("opening_cash_changed_after_pin",)
+    assert remote["posts"] == remote["deletes"] == 0
