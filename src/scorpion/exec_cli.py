@@ -450,6 +450,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     collect.add_argument("--policy-sha256", required=True)
     collect.add_argument("--out", type=Path, required=True)
     collect.add_argument("--authorize-paper-api", action="store_true", required=True)
+    ops_report = sub.add_parser("paper-campaign-report")
+    for name in ("journal", "audit", "worker-config", "risk-policy", "ledger"):
+        ops_report.add_argument("--" + name, type=Path, required=True)
+    for name in ("worker-sha256", "ledger-head"):
+        ops_report.add_argument("--" + name, required=True)
     draft = sub.add_parser("paper-prepare-outcomes")
     for name in ("journal", "audit", "worker-config", "risk-policy", "ledger",
                  "trust", "source-artifact", "out"):
@@ -819,6 +824,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print(asdict(campaign_report))
             return 1 if campaign_report.blockers else 0
         except (OSError, ValueError, JournalError, CalendarNotCovered) as exc:
+            _print({"ok": False, "reason": type(exc).__name__, "authorizes_orders": False})
+            return 1
+    if args.command == "paper-campaign-report":
+        import sqlite3
+        from dataclasses import asdict
+        from decimal import InvalidOperation
+
+        from .paper_campaign_report import build_campaign_report
+        from .session_service import JournalError
+
+        try:
+            ops_summary = build_campaign_report(
+                journal=args.journal, audit_path=args.audit, worker_config=args.worker_config,
+                worker_pin=args.worker_sha256, risk_path=args.risk_policy,
+                ledger_path=args.ledger, ledger_head=args.ledger_head,
+            )
+            _print(asdict(ops_summary))
+            return 1 if ops_summary.blockers else 0
+        except (OSError, ValueError, JournalError, sqlite3.Error, InvalidOperation, KeyError) as exc:
             _print({"ok": False, "reason": type(exc).__name__, "authorizes_orders": False})
             return 1
     if args.command in ("paper-collect-venue", "paper-prepare-outcomes"):

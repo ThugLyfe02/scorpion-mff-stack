@@ -749,7 +749,16 @@ def test_collector_unsigned_draft_then_independent_signed_admission(
     audit.submit({
         "kind": "worker_disposition", "authority": "RESEARCH_ONLY", "intent_seq": seq,
         "call_id": "a", "role": "INITIAL", "source_record_sha256": stable_hash(row),
-        "disposition": "DURABLE_DISPATCH",
+        "disposition": "DURABLE_DISPATCH", "reason": "CANCELLED",
+        "elapsed_from_offer_ns": 30_000_000,
+    })
+    audit.submit({
+        "kind": "worker_latency", "authority": "RESEARCH_ONLY", "phase": "dispatch",
+        "intent_seq": seq, "elapsed_ns": 20_000_000,
+    })
+    audit.submit({
+        "kind": "worker_latency", "authority": "RESEARCH_ONLY",
+        "phase": "offer_to_durable_observed", "intent_seq": seq, "elapsed_ns": 10_000_000,
     })
     audit.submit({
         "kind": "worker_shutdown_final", "authority": "RESEARCH_ONLY", "blockers": [],
@@ -781,6 +790,18 @@ def test_collector_unsigned_draft_then_independent_signed_admission(
         ledger_head=report.chain_sha256, trust_path=trust, trust_pin=trust_pin,
         source=artifact, source_pin=receipt.source_artifact_sha256, output=draft,
     )
+    from scorpion.paper_campaign_report import build_campaign_report
+
+    ops = build_campaign_report(
+        journal=sealed_path, audit_path=audit_path, worker_config=tmp_path / "worker.json",
+        worker_pin=auth.digest, risk_path=tmp_path / "risk.json", ledger_path=obj.path,
+        ledger_head=report.chain_sha256,
+    )
+    assert not ops.blockers and ops.dispatch_reservations == 1
+    assert not ops.certifies_external_account and not ops.authorizes_orders
+    dispatch_timing = next(t for t in ops.timings if t.phase == "dispatch")
+    assert dispatch_timing.samples == 1 and dispatch_timing.median_ms == 20
+    assert dispatch_timing.p95_ms is None and dispatch_timing.p99_ms is None
     result = prepare_outcome_draft(**kwargs)
     assert result.entry_orders == 1 and result.fills == 0
     assert result.authority == "UNSIGNED_RESEARCH_DRAFT"
@@ -843,3 +864,15 @@ def test_campaign_probe_refuses_even_small_opening_cash_drift(
     )
     assert result.blockers == ("opening_cash_changed_after_pin",)
     assert remote["posts"] == remote["deletes"] == 0
+
+
+def test_campaign_timing_percentiles_preserve_sample_resolution():
+    from scorpion.paper_campaign_report import timing_distribution
+
+    assert timing_distribution("empty", []).median_ms is None
+    short = timing_distribution("short", [i*1_000_000 for i in range(1, 21)])
+    assert short.p95_ms == 19 and short.p99_ms is None
+    long = timing_distribution("long", [i*1_000_000 for i in range(1, 101)])
+    assert long.p99_ms == 99 and long.maximum_ms == 100
+    with pytest.raises(ValueError, match="invalid duration"):
+        timing_distribution("bad", [-1])

@@ -581,7 +581,7 @@ def verify_reviewed_outcomes(
         original.get("schema") != "scorpion.paper-outcome-export.v1"
         or original.get("reviewed_ts_utc", False) is not None
         or final.keys() != original.keys()
-        or {**final, "reviewed_ts_utc": None} != original
+        or canonical_json({**final, "reviewed_ts_utc": None}) != canonical_json(original)
     ):
         raise ValueError("review modified frozen outcome content")
     if _time(final.get("reviewed_ts_utc")) < _time(original.get("collected_ts_utc")):

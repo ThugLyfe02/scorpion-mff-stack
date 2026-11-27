@@ -839,6 +839,21 @@ class PaperDeliveryLedger:
             db.execute("BEGIN")
             return self._report(self._load(db, expected_head))
 
+    def _connect_readonly(self) -> sqlite3.Connection:
+        db = sqlite3.connect(
+            self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5,
+            isolation_level=None,
+        )
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA query_only=ON")
+        return db
+
+    def inspect_status(self, *, expected_head: str) -> PaperDeliveryReport:
+        """Offline read-only state verification at an independently pinned head."""
+        with closing(self._connect_readonly()) as db:
+            db.execute("BEGIN")
+            return self._report(self._load(db, expected_head))
+
     def inspect_snapshot(
         self, snapshot: PaperAccountSnapshot, *, expected_head: str,
     ) -> PaperDeliveryReport:
@@ -848,12 +863,7 @@ class PaperDeliveryLedger:
         freshness; this is an offline diagnostic, never an admission snapshot.
         """
         self._check_snapshot(snapshot, snapshot.observed_at)
-        with closing(sqlite3.connect(
-            self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5,
-            isolation_level=None,
-        )) as db:
-            db.row_factory = sqlite3.Row
-            db.execute("PRAGMA query_only=ON")
+        with closing(self._connect_readonly()) as db:
             db.execute("BEGIN")
             return self._report(self._load(db, expected_head), snapshot)
 

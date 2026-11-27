@@ -95,3 +95,27 @@ mark supplement, or certify economic round trips or profitability.
 Those need explicit order-level fees/rebates, independent market marks,
 opening/closing account evidence and signed round-trip supplements.
 No synthetic fill, P&L, training, promotion or automatic order follows.
+
+
+## Local campaign operations report
+
+After both journals close, use the separately retained final ledger head:
+
+```sh
+python -m scorpion paper-campaign-report \
+  --journal /private/session.jsonl --audit /private/worker-audit.jsonl \
+  --worker-config /private/worker.json --worker-sha256 WORKER_PIN \
+  --risk-policy /private/risk.json --ledger /private/paper.db --ledger-head FINAL_HEAD
+```
+
+The report verifies candidate coverage and the exact durable reservation
+roster, counts disposition reasons and order states, and reports timing
+distributions for offer-to-durable-observed (including queue wait), offer
+to disposition, dispatch and reconciliation. Reservation slack is measured
+at the durable reservation, **not** the actual network send or exchange
+arrival. Empirical p95 and p99 are withheld below 20 and 100 observations,
+respectively; they are not population guarantees or production SLOs.
+Missing timing samples are explicit blockers. A session with zero dispatches
+has no execution-latency evidence. The report never contacts the venue,
+certifies external execution, or changes the policy or ledger. Unsealed
+crashes still require the existing explicit recovery procedure.
