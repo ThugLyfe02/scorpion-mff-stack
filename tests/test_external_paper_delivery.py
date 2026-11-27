@@ -876,3 +876,63 @@ def test_campaign_timing_percentiles_preserve_sample_resolution():
     assert long.p99_ms == 99 and long.maximum_ms == 100
     with pytest.raises(ValueError, match="invalid duration"):
         timing_distribution("bad", [-1])
+
+
+def test_recovery_audit_preserves_uncertain_reservation_and_detects_rollback(tmp_path, ledger):
+    import sqlite3
+
+    from scorpion.paper_recovery_audit import audit_paper_recovery
+
+    obj, head = ledger
+    old = tmp_path / "older.db"
+    with sqlite3.connect(obj.path) as source_db, sqlite3.connect(old) as destination:
+        source_db.backup(destination)
+    child = subprocess.run(
+        [sys.executable, "-c",
+         "import runpy,sys;runpy.run_path(sys.argv[1])['_crash_after_commit'](*sys.argv[2:])",
+         __file__, str(obj.path), head],
+        timeout=15, check=False, capture_output=True,
+    )
+    assert child.returncode == 73
+    result = audit_paper_recovery(
+        ledger_path=obj.path, policy=POLICY, anchor_sequence=1, anchor_head=head,
+    )
+    assert result.unanchored_events == 1 and result.candidate_sequence == 2
+    assert result.buy_commitment_usd == Decimal("60")
+    assert result.order_checks[0].local_state == "DISPATCH_UNCERTAIN"
+    assert result.order_checks[0].status == "VENUE_EVIDENCE_NOT_COLLECTED"
+    assert not result.resume_authorized and not result.authorizes_orders
+    assert obj.status(expected_head=result.candidate_head).events == 2
+    with pytest.raises(PaperDeliveryError, match="rollback possible"):
+        audit_paper_recovery(
+            ledger_path=old, policy=POLICY, anchor_sequence=2, anchor_head=result.candidate_head,
+        )
+    with pytest.raises(PaperDeliveryError, match="rollback possible"):
+        audit_paper_recovery(
+            ledger_path=obj.path, policy=POLICY, anchor_sequence=1, anchor_head="f"*64,
+        )
+
+
+def test_recovery_external_absence_is_not_nonexecution(tmp_path, ledger, monkeypatch):
+    from scorpion.paper_evidence_collector import collect_venue_artifact
+    from scorpion.paper_recovery_audit import audit_paper_recovery
+
+    monkeypatch.setenv("SCORPION_ALPACA_PAPER_KEY", "fixture-key")
+    monkeypatch.setenv("SCORPION_ALPACA_PAPER_SECRET", "fixture-secret")
+    obj, head = ledger
+    sent = obj.reserve_dispatch(request(), snapshot(), now=NOW, expected_head=head)
+    artifact = tmp_path / "post-close.json"
+    capture = collect_venue_artifact(
+        account_id=ACCOUNT, session_date=DAY, output=artifact,
+        transport=_capture_transport({"orders": [], "positions": [], "cash": "1000"}, []),
+        clock=lambda: CLOSE+timedelta(minutes=7),
+    )
+    result = audit_paper_recovery(
+        ledger_path=obj.path, policy=POLICY, anchor_sequence=2, anchor_head=sent.chain_sha256,
+        source=artifact, source_pin=capture.source_artifact_sha256,
+    )
+    assert not result.unanchored_events
+    assert result.order_checks[0].status == "ABSENT_EXTERNAL_ORDER_NOT_PROOF_OF_NONEXECUTION"
+    assert "unresolved_order_state" in result.blockers
+    assert result.buy_commitment_usd == Decimal("60")
+    assert obj.status(expected_head=sent.chain_sha256).orders[0].observation is None

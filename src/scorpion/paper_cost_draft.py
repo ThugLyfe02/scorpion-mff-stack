@@ -93,6 +93,8 @@ def _quote_index(
         if identity in seen or not event <= received <= through:
             raise ValueError("cost quote identity or chronology")
         seen.add(identity)
+        bid: Decimal | None
+        ask: Decimal | None
         if kind == "QUOTE":
             bid, ask = _price(value["bid"]), _price(value["ask"])
             if ask < bid:

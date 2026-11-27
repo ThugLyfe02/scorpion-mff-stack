@@ -487,6 +487,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     paper_cancel.add_argument("--client-id", required=True)
     for command in (paper_cancel, paper_sweep):
         command.add_argument("--authorize-paper-cancel", action="store_true", required=True)
+    recovery_audit = sub.add_parser("paper-recovery-audit")
+    recovery_audit.add_argument("--ledger", type=Path, required=True)
+    recovery_audit.add_argument("--policy", type=Path, required=True)
+    recovery_audit.add_argument("--policy-sha256", required=True)
+    recovery_audit.add_argument("--anchor-sequence", type=int, required=True)
+    recovery_audit.add_argument("--anchor-head", required=True)
+    recovery_audit.add_argument("--source-artifact", type=Path)
+    recovery_audit.add_argument("--source-sha256")
     recovery = sub.add_parser("recover-paper-journal")
     recovery.add_argument("--journal", type=Path, required=True)
     recovery.add_argument("--out", type=Path, required=True)
@@ -835,6 +843,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print({"ok": False, "reason": type(exc).__name__})
             return 1
         return 0
+    if args.command == "paper-recovery-audit":
+        import sqlite3
+        from dataclasses import asdict
+        from decimal import InvalidOperation
+
+        from .paper_recovery_audit import audit_paper_recovery
+        from .paper_venue import load_paper_risk_policy
+        from .session_calendar import CalendarNotCovered
+
+        try:
+            recovery_policy = load_paper_risk_policy(args.policy, args.policy_sha256)
+            recovery_report = audit_paper_recovery(
+                ledger_path=args.ledger, policy=recovery_policy,
+                anchor_sequence=args.anchor_sequence, anchor_head=args.anchor_head,
+                source=args.source_artifact, source_pin=args.source_sha256,
+            )
+            _print(asdict(recovery_report))
+            return 1 if recovery_report.blockers else 0
+        except (OSError, ValueError, CalendarNotCovered, sqlite3.Error, InvalidOperation,
+                KeyError, TypeError) as exc:
+            _print({"ok": False, "reason": type(exc).__name__, "resume_authorized": False})
+            return 1
     if args.command == "recover-paper-journal":
         from .recovery import recover_paper_session_journal
         from .session_service import JournalError
