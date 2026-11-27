@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,7 +50,8 @@ def timing_distribution(phase: str, values: list[int]) -> TimingDistribution:
         return ordered[max(0, math.ceil(q*len(ordered))-1)]/1e6
 
     return TimingDistribution(
-        phase, len(ordered), rank(0, 1), rank(0.5, 1), rank(0.95, 20),
+        phase, len(ordered), rank(0, 1),
+        statistics.median(ordered)/1e6 if ordered else None, rank(0.95, 20),
         rank(0.99, 100), rank(1, 1),
     )
 
@@ -178,7 +180,8 @@ def build_campaign_report(
     fields = (
         str(jr["sha256"]), str(ar["sha256"]), ledger_head, policy.session_date.isoformat(),
         len(candidates), len(reserved), len(candidates)-len(reserved), misses,
-        tuple(sorted(reasons.items())), tuple(sorted(Counter(o.state for o in ledger.orders).items())),
+        tuple(sorted(reasons.items())),
+        tuple(sorted(Counter(o.state for o in ledger.orders).items())),
         timings, min(slack) if slack else None, tuple(sorted(blockers)),
     )
     return CampaignOperationsReport(*fields, stable_hash(("paper-campaign-ops-v1", fields)))
