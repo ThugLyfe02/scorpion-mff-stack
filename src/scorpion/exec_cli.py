@@ -267,6 +267,9 @@ async def _run_session(args: argparse.Namespace) -> int:
     ):
         LOGGER.error("worker requires explicit authorization, pins, ingress, capture and PAPER")
         return 2
+    if worker_enabled and datetime.now(MARKET_TZ) >= hours[0]:
+        LOGGER.error("qualified worker requires a pre-open start")
+        return 2
     try:
         journal = Journal(
             state_dir() / "journal" / f"{today.isoformat()}.jsonl", require_lossless=True,
@@ -440,6 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     campaign.add_argument("--risk-policy", type=Path, required=True)
     campaign.add_argument("--ledger", type=Path, required=True)
     campaign.add_argument("--samples", type=int, default=3)
+    campaign.add_argument("--pre-open", action="store_true")
     campaign.add_argument("--authorize-paper-api", action="store_true", required=True)
     capture_bench = sub.add_parser("paper-capture-benchmark")
     capture_bench.add_argument("--samples", type=int, default=2048)
@@ -788,7 +792,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             campaign_report = probe_campaign(
                 worker_config=args.worker_config, worker_pin=args.worker_sha256,
                 risk_path=args.risk_policy, ledger_path=args.ledger,
-                latch_path=latch_path(), samples=args.samples,
+                latch_path=latch_path(), samples=args.samples, pre_open=args.pre_open,
             )
             _print(asdict(campaign_report))
             return 1 if campaign_report.blockers else 0

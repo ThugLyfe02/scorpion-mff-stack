@@ -297,12 +297,20 @@ class AlpacaEquityPaperVenue:
             stable_hash(tuple(hashes)), account[2],
         )
 
-    def market_open(self, now: datetime) -> bool:
+    def market_clock(self, now: datetime) -> bool:
         raw = self._get("/v2/clock", [])
-        if not isinstance(raw, dict):
+        if not isinstance(raw, dict) or type(raw.get("is_open")) is not bool:
             raise PaperDeliveryError("invalid paper market clock")
         stamp = _time(raw.get("timestamp"))
-        return raw.get("is_open") is True and abs(now - stamp) <= timedelta(seconds=5)
+        if abs(now - stamp) > timedelta(seconds=5):
+            raise PaperDeliveryError("stale paper market clock")
+        return bool(raw["is_open"])
+
+    def market_open(self, now: datetime) -> bool:
+        try:
+            return self.market_clock(now)
+        except PaperDeliveryError:
+            return False
 
     def submit_once(self, request: PaperOrderRequest, client_id: str) -> tuple[PaperVenueOrder, str]:
         status, raw = self._request("POST", "/v2/orders", {

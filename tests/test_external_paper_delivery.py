@@ -548,3 +548,44 @@ def test_campaign_probe_is_read_only_and_measures_combined_budget(
     assert result.blockers == ("read_latency_exceeds_probe_budget",)
     assert remote["posts"] == remote["deletes"] == 0
     assert obj.status(expected_head=head).events == 1
+
+
+def test_preopen_probe_distinguishes_fresh_closed_clock(tmp_path, ledger, adapter, monkeypatch):
+    from scorpion.paper_campaign_probe import probe_campaign
+
+    worker, remote, _, _, _ = _worker_fixture(tmp_path, ledger, adapter, monkeypatch)
+    worker._audit.close()
+    obj, _ = ledger
+    _, venue = adapter
+    remote["now"] = OPEN - timedelta(minutes=5)
+    monkeypatch.setattr(venue, "market_clock", lambda _: False)
+    monkeypatch.setattr("scorpion.paper_campaign_probe.AlpacaEquityPaperVenue", lambda *a, **k: venue)
+    monkeypatch.setattr("scorpion.paper_campaign_probe._latch_ok", lambda _: True)
+    manifest = tmp_path / "worker.json"
+    counter = iter((0, 100_000_000, 100_000_000, 200_000_000))
+    result = probe_campaign(
+        worker_config=manifest, worker_pin=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        risk_path=tmp_path / "risk.json", ledger_path=obj.path,
+        latch_path=tmp_path / "synthetic", samples=1, pre_open=True,
+        clock=lambda: remote["now"], monotonic_ns=lambda: next(counter),
+    )
+    assert result.phase == "PRE_OPEN" and not result.blockers
+    assert remote["posts"] == remote["deletes"] == 0
+    assert not result.authorizes_orders
+    with pytest.raises(ValueError, match="session phase"):
+        probe_campaign(
+            worker_config=manifest, worker_pin=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            risk_path=tmp_path / "risk.json", ledger_path=obj.path,
+            latch_path=tmp_path / "synthetic", samples=1,
+            clock=lambda: remote["now"],
+        )
+
+
+def test_inspect_snapshot_never_merges_or_moves_head(ledger):
+    obj, head = ledger
+    req = request()
+    sent = obj.reserve_dispatch(req, snapshot(), now=NOW, expected_head=head)
+    candidate = snapshot((observed(req),))
+    check = obj.inspect_snapshot(candidate, expected_head=sent.chain_sha256)
+    assert "unresolved_order_state" in check.blockers
+    assert obj.status(expected_head=sent.chain_sha256).orders[0].observation is None
