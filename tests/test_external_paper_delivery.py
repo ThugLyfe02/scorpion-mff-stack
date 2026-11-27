@@ -589,3 +589,217 @@ def test_inspect_snapshot_never_merges_or_moves_head(ledger):
     check = obj.inspect_snapshot(candidate, expected_head=sent.chain_sha256)
     assert "unresolved_order_state" in check.blockers
     assert obj.status(expected_head=sent.chain_sha256).orders[0].observation is None
+
+
+def _capture_transport(remote, fills, *, extra=None):
+    """Mock only the documented read paths; no credentials leave this test."""
+    def transport(req, timeout):
+        from urllib.parse import parse_qs, urlsplit
+
+        assert req.get_method() == "GET"
+        assert req.full_url.startswith("https://paper-api.alpaca.markets/v2/")
+        url = urlsplit(req.full_url)
+        params = parse_qs(url.query)
+        if url.path == "/v2/account":
+            body = {
+                "id": ACCOUNT, "currency": "USD", "status": "ACTIVE",
+                "cash": remote["cash"], "buying_power": remote["cash"],
+                "trading_blocked": False, "account_blocked": False,
+            }
+        elif url.path == "/v2/orders":
+            body = remote["orders"] if params["status"] == ["all"] else []
+        elif url.path == "/v2/positions":
+            body = remote["positions"]
+        elif url.path == "/v2/account/activities":
+            assert params["activity_types"] == ["FILL"]
+            assert params["page_size"] == ["100"] and params["direction"] == ["asc"]
+            if "page_token" in params:
+                assert params["page_token"] == [fills[99]["id"]]
+                body = fills[100:] if extra is None else extra
+            else:
+                body = fills[:100]
+        else:
+            raise AssertionError("unexpected request")
+        return 200, json.dumps(body).encode()
+
+    return transport
+
+
+def _fill_activity(i, qty, cumulative, total, price="10.00"):
+    return {
+        "activity_type": "FILL", "id": f"fill-{i}", "order_id": VENUE,
+        "qty": str(qty), "cum_qty": str(cumulative), "leaves_qty": str(total-cumulative),
+        "price": price, "symbol": "XYZ", "side": "buy", "type": "partial_fill",
+        "transaction_time": NOW.isoformat(),
+    }
+
+
+def test_collector_pagination_exact_bytes_and_tamper(tmp_path, monkeypatch):
+    from scorpion.paper_evidence_collector import collect_venue_artifact, replay_venue_artifact
+
+    monkeypatch.setenv("SCORPION_ALPACA_PAPER_KEY", "fixture-key")
+    monkeypatch.setenv("SCORPION_ALPACA_PAPER_SECRET", "fixture-secret")
+    order = {
+        "id": VENUE, "client_order_id": "paper-id", "asset_class": "us_equity",
+        "type": "limit", "time_in_force": "day", "extended_hours": False,
+        "symbol": "XYZ", "side": "buy", "qty": "101", "limit_price": "10",
+        "filled_qty": "101", "filled_avg_price": "10.00", "status": "filled",
+        "submitted_at": NOW.isoformat(), "updated_at": NOW.isoformat(),
+        "filled_at": NOW.isoformat(),
+    }
+    remote = {
+        "orders": [order], "positions": [{"asset_class": "us_equity", "side": "long",
+                                         "symbol": "XYZ", "qty": "101"}], "cash": "1000",
+    }
+    fills = [_fill_activity(i, 1, i+1, 101) for i in range(101)]
+    path = tmp_path / "source.json"
+    now = CLOSE + timedelta(minutes=7)
+    receipt = collect_venue_artifact(
+        account_id=ACCOUNT, session_date=DAY, output=path,
+        transport=_capture_transport(remote, fills), clock=lambda: now,
+    )
+    assert receipt.requests == 12 and receipt.fills == 101
+    assert receipt.blockers == ("account_not_flat",)
+    assert path.stat().st_mode & 0o077 == 0
+    assert b"fixture-secret" not in path.read_bytes()
+    verified, view = replay_venue_artifact(
+        path, receipt.source_artifact_sha256, account=ACCOUNT, day=DAY,
+    )
+    assert receipt == verified and sum(f.quantity for f in view.fills) == 101
+    with pytest.raises(ValueError, match="already exists"):
+        collect_venue_artifact(
+            account_id=ACCOUNT, session_date=DAY, output=path,
+            transport=_capture_transport(remote, fills), clock=lambda: now,
+        )
+    data = json.loads(path.read_bytes())
+    data["responses"][0]["sha256"] = "f" * 64
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="pin mismatch"):
+        replay_venue_artifact(path, receipt.source_artifact_sha256, account=ACCOUNT, day=DAY)
+    with pytest.raises(ValueError, match="response identity"):
+        replay_venue_artifact(
+            path, hashlib.sha256(path.read_bytes()).hexdigest(), account=ACCOUNT, day=DAY,
+        )
+    with pytest.raises(ValueError, match="duplicate fill"):
+        collect_venue_artifact(
+            account_id=ACCOUNT, session_date=DAY, output=tmp_path / "duplicate.json",
+            transport=_capture_transport(remote, fills, extra=[fills[99]]), clock=lambda: now,
+        )
+    with pytest.raises(ValueError, match="aggregate mismatch"):
+        collect_venue_artifact(
+            account_id=ACCOUNT, session_date=DAY, output=tmp_path / "missing.json",
+            transport=_capture_transport(remote, fills[:-1]), clock=lambda: now,
+        )
+
+
+def test_collector_unsigned_draft_then_independent_signed_admission(
+    tmp_path, ledger, adapter, monkeypatch,
+):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from scorpion.execution_meta_labels import PaperOutcome, PaperOutcomeAdmission
+    from scorpion.paper_evidence_collector import collect_venue_artifact, prepare_outcome_draft
+    from scorpion.provenance import stable_hash
+
+    worker, remote, source, seq, row = _worker_fixture(tmp_path, ledger, adapter, monkeypatch)
+    worker._audit.close()
+    obj, head = ledger
+    _, venue = adapter
+    report = dispatch_paper_intent(
+        obj, venue, journal=source.path, seq=seq, expected_head=head,
+        latch_path=tmp_path / "synthetic", clock=lambda: NOW,
+    )
+    report = recover_paper_orders(
+        obj, venue, expected_head=report.chain_sha256, clock=lambda: NOW,
+    )
+    report = cancel_paper_order(
+        obj, venue, client_id=report.orders[0].client_id,
+        expected_head=report.chain_sha256, clock=lambda: NOW,
+    )
+    remote["now"] = NOW + timedelta(seconds=1)
+    remote["orders"][0].update(
+        status="canceled", canceled_at=remote["now"].isoformat(),
+        updated_at=remote["now"].isoformat(),
+    )
+    report = recover_paper_orders(
+        obj, venue, expected_head=report.chain_sha256, clock=lambda: remote["now"],
+    )
+    assert not report.blockers
+    end = CLOSE + timedelta(minutes=5)
+    sealed_path = tmp_path / "sealed.jsonl"
+    sealed = Journal(sealed_path)
+    for line in source.path.read_text().splitlines():
+        original = json.loads(line)
+        original.pop("seq")
+        sealed.submit(original)
+    sealed.submit({"kind": "session_end", "ts_utc": end.isoformat()})
+    sealed.close()
+    audit_path = tmp_path / "sealed-audit.jsonl"
+    audit = Journal(audit_path)
+    auth = worker._authorization
+    audit.submit({
+        "kind": "worker_start", "authority": "RESEARCH_ONLY",
+        "authorization_sha256": auth.digest, "policy_sha256": POLICY.digest,
+        "ledger_head": head,
+    })
+    audit.submit({
+        "kind": "worker_disposition", "authority": "RESEARCH_ONLY", "intent_seq": seq,
+        "call_id": "a", "role": "INITIAL", "source_record_sha256": stable_hash(row),
+        "disposition": "DURABLE_DISPATCH",
+    })
+    audit.submit({
+        "kind": "worker_shutdown_final", "authority": "RESEARCH_ONLY", "blockers": [],
+        "ledger_head": report.chain_sha256, "ts_utc": end.isoformat(),
+    })
+    audit.close()
+    collected = end + timedelta(minutes=1)
+    artifact = tmp_path / "venue-source.json"
+    receipt = collect_venue_artifact(
+        account_id=ACCOUNT, session_date=DAY, output=artifact,
+        transport=_capture_transport(remote, []), clock=lambda: collected,
+    )
+    assert not receipt.blockers
+    collector, reviewer = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
+    trust = tmp_path / "trust.json"
+    trust.write_text(json.dumps({
+        "schema": "scorpion.paper-outcome-trust.v1", "authority": "PAPER_ONLY",
+        "source_id": "alpaca-equity-paper", "account_ref": ACCOUNT,
+        "rules_sha256": RULES.sha256, "registered_ts_utc": (OPEN-timedelta(days=1)).isoformat(),
+        "horizon_seconds": 180, "collector_id": "collector", "reviewer_id": "reviewer",
+        "collector_public_key": collector.public_key().public_bytes_raw().hex(),
+        "reviewer_public_key": reviewer.public_key().public_bytes_raw().hex(),
+    }))
+    draft = tmp_path / "draft.json"
+    trust_pin = hashlib.sha256(trust.read_bytes()).hexdigest()
+    kwargs = dict(
+        journal=sealed_path, audit_path=audit_path, worker_config=tmp_path / "worker.json",
+        worker_pin=auth.digest, risk_path=tmp_path / "risk.json", ledger_path=obj.path,
+        ledger_head=report.chain_sha256, trust_path=trust, trust_pin=trust_pin,
+        source=artifact, source_pin=receipt.source_artifact_sha256, output=draft,
+    )
+    result = prepare_outcome_draft(**kwargs)
+    assert result.entry_orders == 1 and result.fills == 0
+    assert result.authority == "UNSIGNED_RESEARCH_DRAFT"
+    assert obj.status(expected_head=report.chain_sha256).events == report.events
+    data = json.loads(draft.read_bytes())
+    assert data["reviewed_ts_utc"] is None and data["orders"][0]["state"] == "CANCELLED"
+    reviewed = collected + timedelta(minutes=1)
+    raw = draft.read_bytes()
+
+    def admission(path, raw):
+        return PaperOutcomeAdmission(
+            sealed_path, trust, trust_pin, path, artifact,
+            collector.sign(b"scorpion.paper-outcome-export.v1:collector\x00"+raw).hex(),
+            reviewer.sign(b"scorpion.paper-outcome-export.v1:reviewer\x00"+raw).hex(),
+            reviewed,
+        )
+
+    with pytest.raises(ValueError):
+        admission(draft, raw).verify()
+    data["reviewed_ts_utc"] = reviewed.isoformat()
+    signed = tmp_path / "reviewed.json"
+    signed.write_text(json.dumps(data))
+    result = admission(signed, signed.read_bytes()).verify()
+    assert result.labels[0].outcome is PaperOutcome.CANCELLED_NO_FILL
+    assert result.labels[0].observed_fill_target == 0
+    assert not result.authorizes_training

@@ -6,7 +6,6 @@ The broker response archive remains private. Its digest is not a vendor signatur
 from __future__ import annotations
 
 import base64
-import binascii
 import hashlib
 import os
 import time
@@ -24,6 +23,7 @@ from .config import MARKET_TZ
 from .delivery import (
     PaperAccountSnapshot,
     PaperDeliveryLedger,
+    PaperOrderRecord,
     PaperVenueOrder,
     paper_money,
     paper_quantity,
@@ -32,9 +32,14 @@ from .execution_meta_labels import _bounded_bytes, _fields, _parse_trust, _text,
 from .paper_venue import ORIGIN, Transport, _json, _order, _send, _time, _uuid, load_paper_risk_policy
 from .paper_worker import load_worker_authorization
 from .paper_worker_calibration import _coverage
-from .provenance import canonical_json
+from .provenance import canonical_json, stable_hash
 from .session_calendar import session_hours
-from .session_service import _fsync_directory, read_verified_paper_records
+from .session_service import (
+    MAX_PAPER_JOURNAL_BYTES,
+    MAX_PAPER_RECORD_BYTES,
+    _fsync_directory,
+    read_verified_paper_records,
+)
 
 _MAX_RAW = 16 * 1024 * 1024
 _MAX_ARCHIVE = 32 * 1024 * 1024
@@ -239,7 +244,8 @@ def _private_write(path: Path, raw: bytes) -> None:
     # Exclusive creation; never overwrite an earlier source or follow a symlink.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as handle:
-        handle.write(raw)
+        if handle.write(raw) != len(raw):
+            raise OSError("collector short write")
         handle.flush()
         os.fsync(handle.fileno())
     _fsync_directory(path.parent)
@@ -265,6 +271,7 @@ def collect_venue_artifact(
     account = _uuid(account_id)
     started = clock()
     _session_scope(session_date, started)
+    started = started.astimezone(UTC)
     if output.exists():
         raise ValueError("collector output already exists")
     key = os.environ.get("SCORPION_ALPACA_PAPER_KEY", "").strip()
@@ -304,6 +311,7 @@ def collect_venue_artifact(
     ):
         raise ValueError("collector inconsistent double read or time bound")
     _session_scope(session_date, completed)
+    completed = completed.astimezone(UTC)
     raw = canonical_json({
         "schema": "scorpion.alpaca-paper-source.v1", "authority": "PAPER_READ_ONLY",
         "account_id": account, "session_date": session_date, "started_at": started,
@@ -357,7 +365,7 @@ def replay_venue_artifact(
             raise ValueError("collector artifact request sequence")
         try:
             body = base64.b64decode(row["body_b64"], validate=True)
-        except (ValueError, binascii.Error) as exc:
+        except ValueError as exc:
             raise ValueError("collector artifact body encoding") from exc
         size += len(body)
         if size > _MAX_RAW or hashlib.sha256(body).hexdigest() != row["sha256"]:
@@ -372,6 +380,38 @@ def replay_venue_artifact(
         pin, account, day, started, completed,
         len(first.orders), len(first.fills), cursor, _blockers(first),
     ), first
+
+
+def _verify_dispatch_prefixes(
+    journal: Path, journal_hash: str, orders: tuple[PaperOrderRecord, ...],
+) -> None:
+    """Verify each committed prefix against actual final sealed journal bytes.
+
+    An incremental digest is used offline; the trusted dispatch path is
+    unchanged. Only needed hashes are retained, with the first permitted seq.
+    """
+    required: dict[str, int] = {}
+    for order in orders:
+        req = order.request
+        required[req.prefix_sha256] = max(req.intent_seq, required.get(req.prefix_sha256, 0))
+    digest = hashlib.sha256()
+    size = 0
+    with journal.open("rb") as handle:
+        for seq, line in enumerate(
+            iter(lambda: handle.readline(MAX_PAPER_RECORD_BYTES+1), b""), start=1,
+        ):
+            size += len(line)
+            if (
+                not line.endswith(b"\n") or len(line) > MAX_PAPER_RECORD_BYTES
+                or size > MAX_PAPER_JOURNAL_BYTES
+            ):
+                raise ValueError("collector journal prefix bound")
+            digest.update(line)
+            current = digest.hexdigest()
+            if current in required and seq >= required[current]:
+                del required[current]
+    if required or digest.hexdigest() != journal_hash:
+        raise ValueError("collector dispatch prefix not in sealed journal")
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,6 +487,7 @@ def prepare_outcome_draft(
     }:
         raise ValueError("collector dispatch roster mismatch")
     evidence = paper_features_from_records(source_receipt, records)
+    _verify_dispatch_prefixes(journal, evidence.journal_sha256, status.orders)
     features = {row.intent_seq: row for row in evidence.rows}
     if evidence.refusals or set(features) != {
         seq for seq, row in dispositions.items() if row["role"] != "EXIT"
@@ -468,7 +509,11 @@ def prepare_outcome_draft(
         ):
             raise ValueError("collector logical order identity mismatch")
         if req.role == "EXIT":
-            if req.limit != dict(auth.exit_limits).get(req.symbol):
+            if (
+                req.limit != dict(auth.exit_limits).get(req.symbol)
+                or req.intent_sha256 != stable_hash((candidates[seq], str(req.limit), req.quantity))
+                or req.quantity > paper_quantity(candidates[seq].get("quantity"), positive=True)
+            ):
                 raise ValueError("collector exit policy mismatch")
             exits += 1
             continue
@@ -476,6 +521,7 @@ def prepare_outcome_draft(
         if (
             (req.call_id, req.symbol, req.role) != (feature.call_id, feature.ticker, feature.role)
             or feature.rules_sha256 != trust.rules_sha256
+            or req.intent_sha256 != stable_hash((records[feature.decision_seq-1], candidates[seq]))
             or req.quantity != feature.features["quantity"]
             or req.limit != paper_money(feature.features["limit"], positive=True)
         ):
