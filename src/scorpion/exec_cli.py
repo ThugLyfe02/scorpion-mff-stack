@@ -501,7 +501,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     reviewed = sub.add_parser("paper-verify-reviewed-outcomes")
     reviewed.add_argument("--draft", type=Path, required=True)
     reviewed.add_argument("--draft-sha256", required=True)
-    for command in (labels, costs, round_trip, worker_calibration, reviewed):
+    cost_draft = sub.add_parser("paper-prepare-costs")
+    cost_review = sub.add_parser("paper-verify-reviewed-costs")
+    for command in (cost_draft, cost_review):
+        for name in ("outcome-draft", "cost-policy", "cost-source", "fee-source", "quote-source"):
+            command.add_argument("--" + name, type=Path, required=True)
+        for name in ("outcome-draft-sha256", "cost-policy-sha256", "cost-source-sha256"):
+            command.add_argument("--" + name, required=True)
+    cost_draft.add_argument("--out", type=Path, required=True)
+    for name in ("cost-draft", "cost-export", "cost-collector-signature", "cost-reviewer-signature"):
+        cost_review.add_argument("--" + name, type=Path, required=True)
+    cost_review.add_argument("--cost-draft-sha256", required=True)
+    for command in (labels, costs, round_trip, worker_calibration, reviewed, cost_draft, cost_review):
         command.add_argument("--journal", type=Path, required=True)
         command.add_argument("--trust", type=Path, required=True)
         command.add_argument("--trust-sha256", required=True)
@@ -717,6 +728,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command in (
         "paper-outcome-labels", "paper-execution-costs", "paper-round-trip-reconcile",
         "paper-worker-calibration", "paper-verify-reviewed-outcomes",
+        "paper-prepare-costs", "paper-verify-reviewed-costs",
     ):
         from dataclasses import asdict
 
@@ -736,6 +748,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 read_signature(args.collector_signature), read_signature(args.reviewer_signature),
                 datetime.fromisoformat(args.as_of),
             )
+            if args.command in ("paper-prepare-costs", "paper-verify-reviewed-costs"):
+                from .paper_cost_draft import prepare_cost_draft, verify_cost_draft
+
+                if args.command == "paper-prepare-costs":
+                    cost_draft_receipt = prepare_cost_draft(
+                        admission, outcome_draft=args.outcome_draft,
+                        outcome_draft_pin=args.outcome_draft_sha256,
+                        cost_policy=args.cost_policy, cost_policy_pin=args.cost_policy_sha256,
+                        source=args.cost_source, source_pin=args.cost_source_sha256,
+                        fee_source=args.fee_source, quote_source=args.quote_source, output=args.out,
+                    )
+                    _print(asdict(cost_draft_receipt))
+                    return 1 if cost_draft_receipt.withheld else 0
+                reviewed_cost = verify_cost_draft(
+                    admission, outcome_draft=args.outcome_draft,
+                    outcome_draft_pin=args.outcome_draft_sha256,
+                    cost_policy=args.cost_policy, cost_policy_pin=args.cost_policy_sha256,
+                    source=args.cost_source, source_pin=args.cost_source_sha256,
+                    fee_source=args.fee_source, quote_source=args.quote_source,
+                    draft=args.cost_draft, draft_pin=args.cost_draft_sha256,
+                    reviewed=args.cost_export,
+                    collector_signature=read_signature(args.cost_collector_signature),
+                    reviewer_signature=read_signature(args.cost_reviewer_signature),
+                )
+                _print(asdict(reviewed_cost))
+                return 1 if reviewed_cost.blockers else 0
             if args.command == "paper-verify-reviewed-outcomes":
                 from .paper_evidence_collector import verify_reviewed_outcomes
 
