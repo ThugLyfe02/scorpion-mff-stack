@@ -696,3 +696,21 @@ def test_cost_draft_refuses_unobserved_chase_after_zero_initial(tmp_path, cost_f
     admission, kwargs, _ = _cost_draft_inputs(tmp_path, cost_fixture)
     receipt = prepare_cost_draft(admission, **kwargs, output=tmp_path / "uncertain-cost.json")
     assert receipt.withheld == (("fixture", "ROUTE_CLOSURE_UNSUBSTANTIATED"),)
+
+
+def test_cross_report_fee_conservation_detects_equal_net_disagreement(cost_fixture):
+    from scorpion.paper_economic_surveillance import compare_fee_evidence
+
+    report = cost_fixture.report()
+    observed = [order for order in report.orders if order.venue_order_id is not None]
+    assert len(observed) == 1
+    fees = [{
+        "venue_order_id": observed[0].venue_order_id,
+        "fees_usd": "0.30", "rebates_usd": "0.05",
+    }]
+    assert not compare_fee_evidence(report.orders, fees)
+    fees[0].update(fees_usd="0.40", rebates_usd="0.15")
+    assert compare_fee_evidence(report.orders, fees) == ("cross_report_entry_fee_conflict",)
+    assert compare_fee_evidence(report.orders, []) == ("cross_report_entry_fee_unavailable",)
+    with pytest.raises(ValueError, match="duplicate fee"):
+        compare_fee_evidence(report.orders, fees+fees)

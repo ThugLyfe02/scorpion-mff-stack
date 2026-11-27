@@ -6,7 +6,7 @@ from datetime import date
 from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from pathlib import Path
 
-from .execution_attribution import PaperExecutionCostReport
+from .execution_attribution import PaperExecutionCostReport, PaperOrderCost, _nonnegative_money
 from .execution_meta_labels import (
     PaperOutcomeAdmission,
     _bounded_bytes,
@@ -17,6 +17,39 @@ from .execution_meta_labels import (
 from .paper_session_statistics import VerifiedPaperCohort, _day, _input_rows, _read_signature
 from .reconciliation import _parse_exit, reconcile_paper_round_trips
 from .session_service import JournalError
+
+
+def compare_fee_evidence(
+    orders: tuple[PaperOrderCost, ...], round_trip_fees: object,
+) -> tuple[str, ...]:
+    """Check gross charges and rebates separately, never just their net.
+
+    A signed fee statement with identical net cost can still contradict another
+    signed statement. Missing fee evidence does not imply zero charges.
+    """
+    if not isinstance(round_trip_fees, list):
+        raise ValueError("round trip fee roster")
+    by_id: dict[str, tuple[Decimal, Decimal]] = {}
+    for row in round_trip_fees:
+        if not isinstance(row, dict):
+            raise ValueError("round trip fee row")
+        _fields(row, {"venue_order_id", "fees_usd", "rebates_usd"})
+        identity = _text(row["venue_order_id"])
+        if identity in by_id:
+            raise ValueError("round trip duplicate fee")
+        by_id[identity] = (
+            _nonnegative_money(row["fees_usd"]), _nonnegative_money(row["rebates_usd"]),
+        )
+    blockers: set[str] = set()
+    for order in orders:
+        if order.venue_order_id is None:
+            continue
+        expected = by_id.get(order.venue_order_id)
+        if expected is None or order.fees_usd is None or order.rebates_usd is None:
+            blockers.add("cross_report_entry_fee_unavailable")
+        elif expected != (order.fees_usd, order.rebates_usd):
+            blockers.add("cross_report_entry_fee_conflict")
+    return tuple(sorted(blockers))
 
 
 def economic_intervals(
@@ -83,7 +116,9 @@ def economic_intervals(
             raw = _bounded_bytes(bundle["export"])
             if hashlib.sha256(raw).hexdigest() != report.round_trip_export_sha256:
                 raise ValueError("economic export changed")
-            exits = _unique_json(raw)["exit_orders"]
+            parsed = _unique_json(raw)
+            exits = parsed["exit_orders"]
+            fee_blockers = compare_fee_evidence(cost.orders, parsed["fees"])
             if not isinstance(exits, list):
                 raise ValueError("invalid exit roster")
             exit_orders = tuple(_parse_exit(row) for row in exits)
@@ -108,6 +143,9 @@ def economic_intervals(
                 if fill_id in seen_fills:
                     raise ValueError("economic fill reuse")
                 seen_fills.add(fill_id)
+        if fee_blockers:
+            results.append((day, (-clip, clip), "INCONSISTENT_OR_MISSING_ENTRY_FEES"))
+            continue
         if (
             stat.status not in ("COVERED_COMPLETE", "COVERED_EMPTY")
             or {call.call_id for call in report.calls} != {route.call_id for route in cost.routes}
